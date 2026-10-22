@@ -2713,6 +2713,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "gpui-pre-http-client-tls"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7616a90ec92c9832bbc80ddab34e10fdf8d23520d5cbb0b432b73e4e9f6c812"
+dependencies = [
+ "log",
+ "rustls",
+ "rustls-platform-verifier",
+ "webpki-roots",
+]
+
+[[package]]
 name = "gpui-pre-linux"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2882,6 +2894,24 @@ dependencies = [
  "wasm-streams 0.4.2",
  "web-sys",
  "windows-registry 0.4.0",
+]
+
+[[package]]
+name = "gpui-pre-reqwest-client"
+version = "0.3.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "92c2e70dc8550d60324b1eb3f3d08b4ccf20a8b577a9a42732dd3bafb2363bc0"
+dependencies = [
+ "anyhow",
+ "bytes",
+ "futures",
+ "gpui-pre-http-client",
+ "gpui-pre-http-client-tls",
+ "gpui-pre-reqwest",
+ "gpui-pre-util",
+ "log",
+ "regex",
+ "tokio",
 ]
 
 [[package]]
@@ -6022,6 +6052,7 @@ dependencies = [
  "bpi-rs",
  "env_logger",
  "gpui-kit",
+ "gpui-pre-reqwest-client",
  "log",
  "serde",
  "serde_json",
@@ -6076,6 +6107,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "aws-lc-rs",
+ "log",
  "once_cell",
  "ring",
  "rustls-pki-types",
@@ -7928,6 +7960,15 @@ name = "webpki-root-certs"
 version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "58ec80e73fd8baf57bf0d9615554c75348bda990d6d5bbeab964dd068319fecb"
+dependencies = [
+ "rustls-pki-types",
+]
+
+[[package]]
+name = "webpki-roots"
+version = "1.0.10"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1c1c8e20c8a38fc7d65abfe74eb7280e4aa667e8eec8bc84996d2874810748d9"
 dependencies = [
  "rustls-pki-types",
 ]

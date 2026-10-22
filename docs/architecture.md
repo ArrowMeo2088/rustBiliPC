@@ -156,7 +156,7 @@ gpui 0.3.9 的 `ImageAssetLoader`（`src/elements/img.rs:619-656`）对 `Resourc
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | P0 | 依赖骨架、release CI、空窗口 + 中文输入框 + 假数据列表、`api/store/player` 纯逻辑层 | **完成**（run 39787252294 全绿） |
-| P1 | 搜索接线：`search().video()`、结果转换（剥 `<em>`）、封面网络图（gpui 原生 URI 加载）、分页/排序 | 进行中 |
+| P1 | 搜索接线：`search().video()`、结果转换（剥 `<em>`）、封面网络图（gpui 原生 URI 加载）、分页/排序 | 编译通过（run 39795360593），待真机验证 |
 | P2 | 个人：扫码登录（`qr_generate`/`qr_poll` 轮询 + `qrcode` 自绘）、凭据读写与失效处理、我的信息/收藏/历史 | 未开始 |
 | P3 | 详情：`video().detail()`、多 P、tags/related、字幕列表 | 未开始 |
 | P4 | 播放：拉起 mpv、管道 IPC 读写、换清晰度（`loadfile` + `audio-remove`/`audio-add`）、`sub-add` | 未开始 |
@@ -204,3 +204,19 @@ gpui 0.3.9 的 `ImageAssetLoader`（`src/elements/img.rs:619-656`）对 `Resourc
 - 产物 `rustbilipc-win-x64-release`：zip 8.7 MB，解出的 `publish/release/rustbilipc.exe` 24 MB。
 - 待真机验证（UI 只能这样验）：窗口能否打开、中文 IME 能否输入、底部自检行显示的
   凭据/mpv 状态是否符合预期。
+- **真机已验证**（2026-10-22）：窗口正常打开、输入框可打中英混排、自检行显示"未登录 +
+  mpv 查找结果"符合预期；点击输入框时 gpui 会打一条 a11y INFO 日志（元素有 id 无 role），
+  属噪音，后续给可聚焦元素补 role 时消掉。
+
+### 第三轮（run 39792866994）：P1 代码 3 个错误
+
+- `Button::primary()` 缺 trait 导入、`InputEvent::PressEnter` 是带字段的变体——细节都记在
+  第 2 节的版本差异清单里。缓存已命中，从触发到我们的 crate 报错只用约 6 分钟。
+
+### 第四轮（run 39795360593）：P1 通过
+
+- 全部步骤 success，含 `cargo test --release`；产物 zip 解出的 `publish/release/rustbilipc.exe`
+  约 31.6 MB（比 P0 的 24 MB 大，因为链进了 gpui-component 组件层与 bpi-rs）。
+- lock 从 artifact 取回更新：新增 3 个包（`gpui-pre-reqwest-client`、`gpui-pre-http-client-tls`、
+  `webpki-roots`，ReqwestClient 走的是打包根证书而非系统根），总数 881 → 884。
+- 待真机验证：真实搜索结果与分页/排序、封面图是否显示（这条同时验 `set_http_client` 是否生效）。
