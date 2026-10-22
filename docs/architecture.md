@@ -121,7 +121,7 @@ cx.spawn(async move |_, cx| {
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
-| P0 | 依赖骨架、release CI、空窗口 + 中文输入框 + 假数据列表、`api/store/player` 纯逻辑层 | 进行中 |
+| P0 | 依赖骨架、release CI、空窗口 + 中文输入框 + 假数据列表、`api/store/player` 纯逻辑层 | **完成**（run 39787252294 全绿） |
 | P1 | 搜索接线：`search().video()`、结果转换（剥 `<em>`）、封面网络图 + 缓存、虚拟列表、分页 | 未开始 |
 | P2 | 个人：扫码登录（`qr_generate`/`qr_poll` 轮询 + `qrcode` 自绘）、凭据读写与失效处理、我的信息/收藏/历史 | 未开始 |
 | P3 | 详情：`video().detail()`、多 P、tags/related、字幕列表 | 未开始 |
@@ -148,7 +148,9 @@ cx.spawn(async move |_, cx| {
 - 测试只覆盖纯逻辑（`src/tests/`）。UI 与网络的验证方式是：CI 产物在真机上跑起来看。
 - 快速开发阶段不设 clippy/rustfmt 门禁，不追求零 warning；但编译必须无 error。
 
-## 8. 首轮 CI 实测（2026-10-22，run 39785338951）
+## 8. CI 实测记录（2026-10-22）
+
+### 第一轮（run 39785338951）：依赖图全绿，我们自己的代码报错
 
 - 前 6 步全绿（toolchain、NASM、fxc 探测、缓存），**整个依赖图 release 约 8 分钟编完**——
   远快于预估的 25–45 分钟（不 LTO + 不 strip 省下的）。
@@ -158,3 +160,12 @@ cx.spawn(async move |_, cx| {
 - **缓存教训**：`actions/cache` 在 post 步骤写盘，首轮失败时 post 不执行 → 缓存从未保存，
   第二轮仍是全量重编（>9 分钟）。已给该步骤加 `save-always: true`，并把 key 收窄为只按
   `Cargo.lock` 哈希（原先混入 workflow 与 Cargo.toml，改一行 CI 就整体失效）。
+
+### 第二轮：P0 通过（run 39787252294）
+
+- 全步骤 success，含 `cargo test --release`：**15 passed / 0 failed**，另有 1 个 doctest 被
+  `ignore` 标记跳过（`api/mod.rs` 里的示例代码块）。
+- 无缓存可命中时约 14 分钟编完全图（`debug=true`、不 LTO、不 strip）。
+- 产物 `rustbilipc-win-x64-release`：zip 8.7 MB，解出的 `publish/release/rustbilipc.exe` 24 MB。
+- 待真机验证（UI 只能这样验）：窗口能否打开、中文 IME 能否输入、底部自检行显示的
+  凭据/mpv 状态是否符合预期。
