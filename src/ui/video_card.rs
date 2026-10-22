@@ -9,6 +9,8 @@
 //! `App::http_client()` 抓取并自带缓存与在途合并（`src/elements/img.rs:619-656`）。
 //! 前提是启动时装了真的 HttpClient —— 见 `src/main.rs` 与 `docs/architecture.md` 第 4.5 节。
 
+// `gpui_kit::*` 的 glob 已经把 `Styled`/`StyledImage` 带进来（第三轮 CI 证明 `.object_fit`
+// 无需额外导入即可编译），所以这里不再单独引入 trait。
 use gpui_kit::*;
 
 /// 卡片数据。字段都是已格式化的展示文本，渲染路径里不做网络请求或数字格式化。

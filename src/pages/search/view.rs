@@ -13,7 +13,9 @@
 
 use std::sync::Arc;
 
-use gpui_kit::component::button::Button;
+// `Button::primary()` 定义在 `ButtonVariants` trait 上（gpui-component 0.8.0 的
+// src/button/button.rs:52），不把这个 trait 一起导入就报 "no method named `primary`"。
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::*;
 
@@ -60,13 +62,18 @@ impl SearchPage {
         });
 
         // 回车即搜索。回调里同时拿到本页实体与输入状态，不需要额外字段。
-        let _subscriptions =
-            vec![cx.subscribe_in(&query, window, move |this, state, event, _window, cx| {
-                if matches!(event, InputEvent::PressEnter) {
+        // 事件类型显式标注：kit 自身也是这么写的，省略时闭包的泛型参数推断会卡住。
+        let _subscriptions = vec![cx.subscribe_in(
+            &query,
+            window,
+            move |this, state, event: &InputEvent, _window, cx| {
+                // PressEnter 是带字段的 struct 变体（secondary / shift），必须写 `{ .. }`。
+                if matches!(event, InputEvent::PressEnter { .. }) {
                     let keyword = state.read(cx).value().trim().to_string();
                     this.submit(keyword, 1, this.sort, cx);
                 }
-            })];
+            },
+        )];
 
         Self {
             query,

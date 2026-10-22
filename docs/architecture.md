@@ -44,6 +44,13 @@ release 分支（`build.rs` 里 `#[cfg(not(debug_assertions))] compile_shaders()
 - `v_flex()` / `h_flex()` 自由函数**不可用** → 用 `div().flex().flex_col()`（行方向就是 `div().flex()`）。
 - `overflow_y_scroll()` 是 `Stateful<Div>` 的方法 → 必须先 `.id("...")`，否则报 E0599
   并提示一个不相干的 `overflow_y_scrollbar`。
+- `Button::primary()` / `.secondary()` 等定义在 **`ButtonVariants` trait** 上
+  （`gpui-component 0.8.0` 的 `src/button/button.rs:52`）→ 必须
+  `use gpui_kit::component::button::{Button, ButtonVariants};`，只导入 `Button` 会报 no method。
+- `InputEvent::PressEnter` 是**带字段的 struct 变体**（`{ secondary, shift }`）→ 模式要写
+  `InputEvent::PressEnter { .. }`，裸写报 E0533。
+- 反过来，`Styled` / `StyledImage`（`.object_fit()`）确实由 `gpui_kit::*` 的 glob 提供，
+  **不要**再为它们加显式导入：第三轮 CI 里 `video_card.rs` 无额外导入就编译通过了。
 
 规则：拿不准的调用，先在 `ref/gpui-kit/crates/{base,component}/src` 里找到**同版本已发布代码**
 中的真实用法（而不是 examples），或干脆看 CI 日志里 rustc 的建议。
