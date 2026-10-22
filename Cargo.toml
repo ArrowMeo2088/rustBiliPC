@@ -1,0 +1,11 @@
+[package]
+name = "rustbilipc"
+version = "0.1.0"
+edition = "2021"
+description = "Bilibili desktop client written in Rust (Windows x64)"
+
+[dependencies]
+
+[profile.dev]
+# 保留调试信息，便于 Actions 产物排查问题
+strip = false

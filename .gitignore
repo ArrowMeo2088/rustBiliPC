@@ -1,0 +1,20 @@
+# Rust 构建产物
+/target/
+
+# CI 生成的锁文件（本仓库统一由 Actions 编译，不入库）
+Cargo.lock
+
+# 参考代码、编译产物、资源文件（按项目规则不入库；排除内容而非目录, 便于保留 README）
+/ref/*
+/publish/*
+/res/*
+
+# 但保留各目录的 README.md 说明文件
+!publish/README.md
+!ref/README.md
+!res/README.md
+
+# 杂项
+**/.DS_Store
+Thumbs.db
+*.log

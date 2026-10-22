@@ -1,0 +1,64 @@
+name: Build
+
+# 仅手动触发：Actions 页面 -> Build workflow -> Run workflow
+# 现阶段只做 Windows x64 Debug 编译；缓存加速见下方 actions/cache。
+on:
+  workflow_dispatch:
+    inputs:
+      profile:
+        description: "Build profile (现阶段仅支持 debug)"
+        type: choice
+        required: false
+        default: "debug"
+        options:
+          - debug
+
+permissions:
+  contents: read
+
+jobs:
+  build-win-x64:
+    runs-on: windows-latest
+    env:
+      CARGO_TERM_COLOR: always
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain (stable, x86_64-pc-windows-msvc)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      # 不使用 rust-action 内置缓存，改为显式 actions/cache 精确控制缓存路径
+      - name: Cache cargo home and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            C:/Users/runneradmin/.cargo/registry
+            C:/Users/runneradmin/.cargo/git
+            target
+          key: cargo-win-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '.github/workflows/build.yml') }}
+          restore-keys: |
+            cargo-win-${{ runner.os }}-
+
+      - name: Build and test (via build.bat)
+        run: cmd /c build.bat debug
+
+      - name: Collect artifacts into publish/
+        run: |
+          if (-not (Test-Path publish)) { New-Item -ItemType Directory publish | Out-Null }
+          Copy-Item target/debug/rustbilipc.exe publish/ -ErrorAction SilentlyContinue
+          Copy-Item target/debug/*.dll publish/ -ErrorAction SilentlyContinue
+
+      - name: Upload Windows x64 debug artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustbilipc-win-x64-debug
+          path: |
+            publish/rustbilipc.exe
+            publish/*.dll
+          if-no-files-found: warn
