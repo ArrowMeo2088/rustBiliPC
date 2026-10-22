@@ -1,10 +1,15 @@
-# Rust 构建产物
+# Rust 构建中间产物
 /target/
 
-# CI 生成的锁文件（本仓库统一由 Actions 编译，不入库）
-Cargo.lock
+# 依赖锁 **要入库**：gpui-pre 快照每周变动且 API 破坏性，靠 lock + CI --locked 钉住
+# （本机无 cargo，首次 lock 由 CI 生成后取回提交）
 
-# 参考代码、编译产物、资源文件（按项目规则不入库；排除内容而非目录, 便于保留 README）
+# 运行期数据：登录凭据等，绝对不入库
+/data/
+/publish/data/
+cookies.json
+
+# 参考代码、编译产物、资源文件（按项目规则不入库；排除内容而非目录，便于保留 README）
 /ref/*
 /publish/*
 /res/*

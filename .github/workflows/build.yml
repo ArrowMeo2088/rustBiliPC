@@ -1,26 +1,30 @@
 name: Build
 
-# 仅手动触发：Actions 页面 -> Build workflow -> Run workflow
-# 现阶段只做 Windows x64 Debug 编译；缓存加速见下方 actions/cache。
+# 仅手动触发：Actions 页面 -> Build workflow -> Run workflow。
+# 现阶段只做 Windows x64 **release**（原因见 docs/architecture.md 第 2 节：
+# gpui 的 Windows 后端在 debug 下运行时从编译机路径读 HLSL，产物不可移植）。
 on:
   workflow_dispatch:
     inputs:
       profile:
-        description: "Build profile (现阶段仅支持 debug)"
+        description: "Build profile（现阶段只支持 release）"
         type: choice
         required: false
-        default: "debug"
+        default: "release"
         options:
-          - debug
+          - release
 
 permissions:
   contents: read
 
+env:
+  CARGO_TERM_COLOR: always
+  # 链接期与代码生成的噪音很大，快速开发阶段只关心 error。
+  RUSTFLAGS: ""
+
 jobs:
   build-win-x64:
     runs-on: windows-latest
-    env:
-      CARGO_TERM_COLOR: always
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -30,7 +34,25 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      # 不使用 rust-action 内置缓存，改为显式 actions/cache 精确控制缓存路径
+      # aws-lc-sys（rustls 0.23 默认 provider）在 MSVC 上要汇编器；runner 自带 CMake。
+      - name: Install NASM (for aws-lc-sys on MSVC)
+        run: choco install nasm --no-progress -y
+
+      - name: Locate fxc.exe (gpui compiles HLSL at build time in release)
+        run: |
+          $sdk = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+          $fxc = Get-ChildItem -Path $sdk -Recurse -Filter fxc.exe -ErrorAction SilentlyContinue |
+                 Where-Object { $_.FullName -match 'x64' } |
+                 Sort-Object FullName -Descending |
+                 Select-Object -First 1
+          if ($fxc) {
+            "GPUI_FXC_PATH=$($fxc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "fxc: $($fxc.FullName)"
+          } else {
+            "fxc.exe 未找到；gpui 的 build.rs 会自行搜索，若失败请检查 Windows SDK"
+          }
+
+      # 不用 rust-action 内置缓存，改为显式 actions/cache 精确控制路径；key 按 profile 分。
       - name: Cache cargo home and target
         uses: actions/cache@v4
         with:
@@ -41,24 +63,46 @@ jobs:
             C:/Users/runneradmin/.cargo/registry
             C:/Users/runneradmin/.cargo/git
             target
-          key: cargo-win-${{ runner.os }}-${{ hashFiles('**/Cargo.lock', '.github/workflows/build.yml') }}
+          key: cargo-win-${{ runner.os }}-release-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '.github/workflows/build.yml') }}
           restore-keys: |
-            cargo-win-${{ runner.os }}-
+            cargo-win-${{ runner.os }}-release-
 
-      - name: Build and test (via build.bat)
-        run: cmd /c build.bat debug
+      - name: Build (release, locked when Cargo.lock exists)
+        shell: bash
+        run: |
+          if [ -f Cargo.lock ]; then
+            cargo build --release --locked
+          else
+            # 首次没有 lock：让 cargo 解析并生成，随后由下面的步骤以 artifact 取回入库。
+            echo "::warning::Cargo.lock 不存在，本次由 cargo 现场解析依赖"
+            cargo build --release
+          fi
+
+      - name: Test (pure logic only, no window needed)
+        shell: bash
+        run: cargo test --release
 
       - name: Collect artifacts into publish/
+        shell: pwsh
         run: |
-          if (-not (Test-Path publish)) { New-Item -ItemType Directory publish | Out-Null }
-          Copy-Item target/debug/rustbilipc.exe publish/ -ErrorAction SilentlyContinue
-          Copy-Item target/debug/*.dll publish/ -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force publish | Out-Null
+          Copy-Item target/release/rustbilipc.exe publish/ -ErrorAction SilentlyContinue
+          Copy-Item target/release/*.dll publish/ -ErrorAction SilentlyContinue
 
-      - name: Upload Windows x64 debug artifact
+      - name: Upload Windows x64 release artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rustbilipc-win-x64-debug
+          name: rustbilipc-win-x64-release
           path: |
             publish/rustbilipc.exe
             publish/*.dll
           if-no-files-found: warn
+
+      # 首次成功后把解析出来的 lock 拿回来提交，之后 CI 就走 --locked。
+      - name: Upload Cargo.lock
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: cargo-lock
+          path: Cargo.lock
+          if-no-files-found: ignore

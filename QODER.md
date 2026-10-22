@@ -4,25 +4,61 @@
 
 ## 1. 文件结构规则
 
-- 目录用途固定：`src/`=项目源代码，`publish/`=编译产物，`test/`=单元测试（约定说明，单元测试代码在 `src/tests/`，集成测试按 cargo 惯例在 `tests/`），`ref/`=供参考的文件和代码，`docs/`=文档，`res/`=资源文件。
-- **每个项目文件夹都必须有自己的 `README.md`** 描述该目录用途与内容。
-- **每次修改某个目录的内容，必须同步更新对应 README/文档，并提交 git**（一次修改一个可复原的小提交，提交信息说明改了什么）。
-- `.gitignore` 按项目规则排除 `ref/`、`publish/`、`res/` 的**内容**（`/ref/*` 这种写法，各目录的 README.md 通过 `!` 例外保留入库）；不要随意把这些目录的其他内容加入暂存区（也不要滥用 `git add -f`）。
+- 目录用途固定：`src/`=项目源代码，`publish/`=编译产物，`test/`=单元测试布局说明（代码在 `src/tests/`），
+  `ref/`=供参考的文件和代码，`docs/`=文档，`res/`=资源文件。
+- **每个项目文件夹都必须有自己的 `README.md`** 描述用途与内容。
+- **每次修改某个目录的内容，必须同步更新该目录 README 与 `docs/` 对应小节，并提交 git**
+  （小步可复原的提交，提交信息说清改了什么）。
+- 代码**必须写注释**：模块头注释写职责与定稿理由，非显然处写"为什么"（机制、坑、被否决的方案），
+  不写"是什么"。公开项写文档注释（`//!` 模块 / `///` 项）。
+- `.gitignore` 按规则排除 `ref/`、`publish/`、`res/` 的**内容**（`/ref/*` 写法 + `!dir/README.md` 例外）；
+  不要滥用 `git add -f` 把这些目录的内容塞进暂存区。运行期的 `data/` 与 `Cargo.lock` 规则见第 5 节。
 
-## 2. 工具链约束
+## 2. 工具链与编译约束
 
-- **本机没有安装 Rust 工具链，也不要安装**（不装 rustup/cargo，不跑本地 cargo 命令做验证）。
-- 所有编译只通过 GitHub Actions 的 `Build` workflow 完成（手动触发，workflow_dispatch；现阶段仅 Windows x64 Debug）。
-- 验证 Rust 改动是否正确：推送后查看 Actions 运行日志，以 CI 结果为准；`build.bat` 只是产物归集/本地可选脚本，不代表本机可执行。
+- **本机没有安装 Rust 工具链，也不要安装**（不装 rustup/cargo，不在本地跑 cargo 命令做验证）。
+- 所有编译只通过 GitHub Actions 的 `Build` workflow（手动触发 `workflow_dispatch`），
+  现阶段仅 **Windows x64 release**。
+- **不要改成 debug**：gpui 的 Windows 后端（`gpui-pre-windows 0.3.9`）在 `cfg(debug_assertions)` 下
+  于运行时用 `D3DCompileFromFile(env!("CARGO_MANIFEST_DIR")/src/shaders.hlsl)` 编译着色器，
+  路径被烧进二进制，CI 产出的 debug exe 在别的机器上无法开窗。`runtime_shaders` 特性只管 macOS。
+- 验证改动 = 推送后看 Actions 日志。一次冷编译 25–45 分钟，所以**动手前先把 API 签名核对准**：
+  以 `ref/gpui-kit/examples/*/src/main.rs` 与 `ref/gpui-kit/crates/*/src` 里真实出现过的写法为准，
+  不要用没在参考仓库里见过的调用。
 
 ## 3. GitHub 访问代理
 
 - **访问 GitHub 一律走 HTTP 代理 `http://127.0.0.1:7887`**：
-  - git：`git -c http.proxy=http://127.0.0.1:7887 -c https.proxy=http://127.0.0.1:7887 push ...`（或仓库级 `git config http.proxy`）。
-  - gh CLI / curl：设置环境变量 `HTTPS_PROXY=http://127.0.0.1:7887 HTTP_PROXY=http://127.0.0.1:7887`。
-- 直连与代理都可能偶发失败；一种方式报错时切换另一种重试，不要长时间前台轮询等待。
+  - git：`git -c http.proxy=http://127.0.0.1:7887 -c https.proxy=http://127.0.0.1:7887 push ...`
+    （本仓库已设仓库级代理配置）。
+  - gh CLI / curl：`HTTPS_PROXY=http://127.0.0.1:7887 HTTP_PROXY=http://127.0.0.1:7887`。
+- 直连与代理都可能偶发失败；一种报错就换另一种重试，不要长时间前台轮询等待。
 
-## 4. 其他约定
+## 4. 选型红线（已由用户定稿，不要"顺手优化"掉）
 
-- 输出与文档中的中文必须是可读的 UTF-8，禁止 `\uXXXX` 转义或 GBK 乱码；`.bat` 文件保持 ASCII 内容（cmd 按 OEM 代码页解析）。
-- 不要在前台长时间轮询 CI；用后台轮询或短探测，以日志证据为准。
+- **零浏览器技术**：不引入 Electron / WebView / wry / JS / TS。注意 `ref/gpui-component`（0.2.2 那个
+  老组件库）会经 `lb-wry` 拖进 WebView2，且它的类型与 `gpui-pre 0.3.9` 不兼容 —— 已弃用，别引。
+- gpui 版本：只用 `gpui-kit` umbrella，应用侧不单独声明 gpui；pin 由 kit 的 `=0.3.9` + 我们的
+  `Cargo.lock` 共同保证。升级 gpui-pre 快照要连带检查 kit/Ely 的 pin 是否同步。
+- `ref/zed` 是 0.3.9 **之后**的未发布主干，只读参考，不能当依赖，也不能照抄它的示例。
+- 画质：HEVC 优先 + **默认封顶 1080P（qn ≤ 116）**，不选 4K/HDR/8K（目标机 i5-6200U 硬解不到）。
+- 播放：**外置 mpv 独立进程 + 独立窗口**，不做 `--wid` 嵌入，不自研解码渲染。
+- 凭据：明文 JSON 存 `<exe 同目录>/data/cookies.json`（用户知情选择）。要改加密只动
+  `src/store/credentials.rs` 的 `save`/`load`。
+- 快速开发阶段：能调库就不造轮子，不管 warning，不设 clippy/rustfmt/test 门禁；但编译必须无 error。
+
+## 5. CI 相关的既成事实
+
+- release 编译期需要 `fxc.exe`（gpui `build.rs` 找不到就 panic）：先探测 Windows SDK 路径，
+  必要时显式设 `GPUI_FXC_PATH`。
+- `rustls 0.23` 默认 provider 会拉 `aws-lc-sys`，MSVC 上要 CMake + NASM：CI 里装 nasm，
+  不去砍 http3/ring provider。
+- 构建里同时存在两份 reqwest（kit 的 `gpui-pre-reqwest 0.12.15` 与 bpi-rs 的 `0.13.5`），属已知浪费，
+  不为它做清理；**不要**再引入第三个 HTTP 客户端。
+- `Cargo.lock` **要入库**，CI 用 `--locked`；本机无法生成 lock，所以首次由 CI 产出并从 artifact 取回提交。
+- 不要在前台长时间轮询 CI：用后台轮询或短探测，以日志证据为准。
+
+## 6. 输出与文档
+
+- 中文必须可读：UTF-8，禁止 `\uXXXX` 转义与 GBK 乱码；`.bat` 文件内容保持 ASCII（cmd 按 OEM 代码页解析）。
+- 从 `ref/` 得出的结论要抄进 `docs/`，因为 `ref/` 不入库。

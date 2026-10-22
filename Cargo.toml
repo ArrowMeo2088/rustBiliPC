@@ -2,10 +2,43 @@
 name = "rustbilipc"
 version = "0.1.0"
 edition = "2021"
-description = "Bilibili desktop client written in Rust (Windows x64)"
+description = "Bilibili 桌面客户端（Rust + GPUI，Windows x64，零浏览器技术）"
+# 本机不装 Rust 工具链，只有 CI 会构建；发布配置见 [profile.release]。
+publish = false
 
 [dependencies]
+# GPUI 生态的唯一入口：umbrella crate 自带 `use gpui_kit::*`（gpui 在其根上），
+# 应用侧不单独声明 gpui，gpui-pre 的 =0.3.9 精确 pin 由 kit 自己携带 + 我们的 Cargo.lock 锁定。
+# default features = ["component", "assets"]，实测不含 webview，符合零浏览器要求。
+gpui-kit = "0.8.0"
 
-[profile.dev]
-# 保留调试信息，便于 Actions 产物排查问题
+# Bilibili Web API 封装。关掉默认的 full（27 个模块），只开当前四个阶段需要的。
+# 后续阶段按 docs/api-notes.md 的记录再增列（如 danmaku 会多拉 quick-xml + flate2）。
+bpi-rs = { version = "0.3.1", default-features = false, features = [
+    "login",
+    "search",
+    "video",
+    "user",
+    "fav",
+    "historytoview",
+] }
+
+# bpi-rs 基于 reqwest，poll 其 future 必须在有 tokio reactor 的环境里进行；
+# gpui 的执行器不是 tokio，所以我们在 src/app.rs 里自建 runtime 并做桥接。
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+log = "0.4"
+env_logger = "0.11"
+# 在 PATH 里找 mpv；找不到要能提示用户，而不是崩。
+which = "8"
+
+[profile.release]
+# 按定稿：现阶段不做 LTO、不 strip，优先编译速度与可排查性。
+lto = "off"
 strip = false
+codegen-units = 16
+# 保留 PDB/调试符号：release 崩溃时 CI 日志里才看得出行号。
+debug = true

@@ -1,11 +1,35 @@
 # test — 单元测试说明
 
-本项目 Rust 代码的测试布局约定：
+本目录不存放 `.rs` 代码（cargo 不识别 `test/`），只承载测试布局约定与将来的测试脚本。
 
-- **单元测试**：放在 `src/tests/`（作为 crate 的模块编译，可访问私有项），入口见 `src/lib.rs` 中的 `pub mod tests;`。
-- **集成测试**：按 cargo 惯例放仓库根的 `tests/` 目录（需要时再创建），只依赖公开 API。
-- 运行方式：`cargo test`，或由 `build.bat` 在编译后自动执行。
+## 布局约定
 
-本目录本身不存放 `.rs` 代码（cargo 不识别 `test/`），仅承载上述约定说明与将来的测试脚本。
+| 类型 | 位置 | 说明 |
+| --- | --- | --- |
+| 单元测试 | `src/tests/` | 作为 crate 的模块编译，入口 `src/lib.rs` 的 `pub mod tests;` |
+| 集成测试 | 仓库根 `tests/`（需要时再建） | 按 cargo 惯例，只依赖公开 API |
 
-修改测试布局时必须同步更新本 README 并提交 git。
+## 现阶段覆盖范围（快速开发期）
+
+只测**纯逻辑**，因为 CI 上没有 GUI 会话也没有 B 站账号：
+
+- `stream_select_tests`：画质档封顶边界（16/32/64/80/112/116 允许，120/125/126/127 排除）。
+- `player_tests`：mpv 参数形状——视频 URL 必须是最后一个位置参数、`--audio-file=` 单独一路、
+  `Referer` 头存在、附加头能追加、IPC JSON 命令形状、管道命名格式。
+- `credentials_tests`：JSON 往返、缺省字段容错（老文件不能读不回）、完整性判定、
+  与 `bpi_rs::Account` 的字段映射。
+- `scaffold_tests`：版本号非空且以数字开头。
+
+## 不测什么
+
+- UI 渲染与交互：验证方式是 CI 产物在真机上跑起来看（架构文档的机制决定 release 才能运行）。
+- 真实网络请求：需要登录态，人工验证。
+
+## 命令
+
+```bash
+cargo test            # 本机无工具链时由 CI 执行
+cargo test --release  # 与发布配置一致（现阶段 CI 只跑 --release）
+```
+
+改动测试布局或覆盖范围时，同步更新本 README 并提交 git。
