@@ -41,7 +41,9 @@ pub fn runtime() -> &'static tokio::runtime::Runtime {
 pub fn install_tls_provider() {
     match rustls::crypto::aws_lc_rs::default_provider().install_default() {
         Ok(()) => log::debug!("已安装 rustls 默认 provider: aws-lc-rs"),
-        Err(error) => log::warn!("rustls 默认 provider 已存在，跳过: {error}"),
+        // 注意：这个版本的 `install_default()` 的 Err 里装的是"已经被装上那个 provider"，
+        // 它不实现 Display，所以只能记事件、不能格式化内容（CI 实测踩过）。
+        Err(_) => log::warn!("rustls 默认 provider 已被安装，沿用现有配置"),
     }
 }
 

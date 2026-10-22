@@ -51,6 +51,8 @@ release 分支（`build.rs` 里 `#[cfg(not(debug_assertions))] compile_shaders()
   `InputEvent::PressEnter { .. }`，裸写报 E0533。
 - 反过来，`Styled` / `StyledImage`（`.object_fit()`）确实由 `gpui_kit::*` 的 glob 提供，
   **不要**再为它们加显式导入：第三轮 CI 里 `video_card.rs` 无额外导入就编译通过了。
+- `rustls::crypto::aws_lc_rs::default_provider().install_default()` 的 `Err` 变体是
+  **已经装上的那个 `CryptoProvider`**，它不实现 `Display` → 不能写成 `"{error}"`（第六轮 CI 实测）。
 
 规则：拿不准的调用，先按下面的顺序核对，再动手（一轮冷 CI 约 6–14 分钟，猜错就要重跑）：
 
