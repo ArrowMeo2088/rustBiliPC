@@ -11,12 +11,12 @@ Rust crate 根目录（crate 名 `rustbilipc`）。职责划分与维护契约�
 | `lib.rs` | 模块树 + `VERSION` | 逻辑都收敛在 lib crate 里便于 `cargo test` |
 | `app.rs` | 进程级基础设施 | 全局 tokio runtime（`OnceLock`）、`exe_dir()`/`data_dir()` |
 | `theme.rs` | 全局主题覆盖 | accent `#FB7299`，强调色前景改深色（对比度不足 4.5:1） |
-| `api/` | bpi-rs 封装 + DASH 选择 | `spawn_on_api_runtime` 是唯一的 gpui↔tokio 桥；`search.rs` 出 DTO（`SearchHit`/`PageInfo`/`SearchSort`），bpi 类型不外泄；`stream_select` 是纯函数 |
+| `api/` | bpi-rs 封装 + DASH 选择 | `spawn_on_api_runtime` 是唯一的 gpui↔tokio 桥；`login.rs`（取码/轮询 + 码值翻译 + cookie→凭据）、`search.rs` 出 DTO（`SearchHit`/`PageInfo`/`SearchSort`），bpi 类型不外泄；`stream_select` 是纯函数 |
 | `store/` | 落盘 | `credentials.rs` 明文 JSON，见文件头的风险说明 |
 | `player/` | 外置 mpv | `build_arguments` 纯函数 + Referer/UA 常量；`ipc.rs` 只做命令构造，管道 I/O 在 P4 |
-| `pages/` | 按阶段划分的页面 | `search/`：输入 → 回车/按钮/排序/分页 → tokio 请求 → `upgrade()+update()` 回填 |
-| `ui/` | 跨页面复用组件 | `video_card.rs`（封面用 `img(url)` + `ObjectFit::Cover`，时长角标绝对定位） |
-| `tests/` | 单元测试 | 只测纯逻辑：码流边界、mpv 参数形状、凭据往返、搜索标签清洗与播放量格式化 |
+| `pages/` | 按阶段划分的页面 | `root.rs` 是窗口根视图（无凭据→登录页，有→主界面，登录成功原地切换）；`login/` 扫码 + 1.5 s 轮询 + 过期自动重载；`search/`：输入 → 回车/按钮/排序/分页 → tokio 请求 → `upgrade()+update()` 回填 |
+| `ui/` | 跨页面复用组件 | `video_card.rs`（封面用 `img(url)` + `ObjectFit::Cover`，时长角标绝对定位）、`qr.rs`（qrcode-generator 出 `Vec<Vec<bool>>`，一格一个 div 画出来） |
+| `tests/` | 单元测试 | 只测纯逻辑：码流边界、mpv 参数形状、凭据往返、搜索标签清洗与播放量格式化、登录码值翻译与 cookie 完整性、二维码矩阵 |
 
 ## 分层规则
 

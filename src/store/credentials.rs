@@ -27,7 +27,7 @@ use bpi_rs::Account;
 use serde::{Deserialize, Serialize};
 
 /// 落盘结构。字段名即 JSON 键名，改动要考虑旧文件兼容（新增字段一律 `#[serde(default)]`）。
-#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SavedCredential {
     /// 用户 mid。
     pub dede_user_id: String,

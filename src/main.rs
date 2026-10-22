@@ -14,7 +14,7 @@ use std::sync::Arc;
 
 use gpui_kit::*;
 use rustbilipc::app;
-use rustbilipc::pages::search::SearchPage;
+use rustbilipc::pages::RootView;
 use rustbilipc::theme;
 
 /// 我们对外 HTTP 客户端自报的家门名（User-Agent 的一部分）。
@@ -52,10 +52,11 @@ fn main() {
 
         // open_window 会把视图包进 kit 的 Root，弹层/对话框/菜单才有宿主。
         // 客户端在闭包外 clone 一次：open_window 的构造闭包是 FnMut，会被多次调用。
+        // 根视图内部再决定进登录页还是主界面（见 docs/architecture.md 第 4.6 节）。
         let client_for_window = Arc::clone(&client);
         gpui_kit::open_window(window_options, cx, move |window, cx| {
             let client = Arc::clone(&client_for_window);
-            cx.new(|cx| SearchPage::new(window, cx, client))
+            cx.new(|cx| RootView::new(window, cx, client))
         })
         .expect("打开主窗口失败");
     });

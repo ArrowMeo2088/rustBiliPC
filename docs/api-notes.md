@@ -23,8 +23,14 @@
 | `login().qr_generate()` | `src/login/client.rs:193` | `GenerateQrCodeData { url, qrcode_key }` |
 | `login().qr_poll(LoginQrPollParams)` | `src/login/client.rs:202` | `CheckQrCodeStatusData { url, refresh_token, timestamp, code, message, cookies: Vec<(String,String)> }` |
 
-- `code == 0` 才算成功（`86101` = 等待扫码）；`qr_poll` 只在 `code == 0` 时抓取响应 cookie。
+- `code == 0` 才算成功；码值翻译集中在 `src/api/login.rs::QrPollState::from_code`
+  （`86101` 等待扫码、`86038` 过期→自动重新取码、`86090`/含"扫描"文案 视为已扫码待确认，
+  其余归 `Failed{code,message}`）。`qr_poll` 只在 `code == 0` 时抓取响应 cookie。
 - **库不做轮询、不做超时、不落盘**，节奏与持久化都由我们负责（`src/login/cookie_refresh.rs` 是空文件）。
+- 轮询参数：`bpi_rs::login::LoginQrPollParams::new(key) -> BpiResult<Self>`
+  （`src/login/mod.rs:22` 再导出，定义在 `src/login/params.rs:72`）。
+- cookie 白名单见 `src/client.rs:79`；我们要求 `DedeUserID/SESSDATA/bili_jct/buvid3` 四个全中，
+  缺任何一个 `credential_from_cookies` 返回 `None`（否则会撞上 `Account::validate_complete`）。
 - `Account` 只 derive `Deserialize`（`src/session/account.rs:11`），所以落盘走
   `SavedCredential` 镜像结构，见 `src/store/credentials.rs`。
 

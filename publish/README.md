@@ -5,8 +5,9 @@
 - 本目录内容**不提交 git**（`.gitignore` 排除，仅保留本 README）。
 - **只有 release 产物才有意义**：gpui 的 Windows 后端在 debug 构建里于运行时从编译机路径读
   `.hlsl` 源文件，CI 产出的 debug exe 在别的机器上起不了窗口。详见 `docs/architecture.md` 第 2 节。
-- Actions 侧同一份产物另存于 Artifacts：`rustbilipc-win-x64-release`。
-- 子目录约定：`release/`（`build.bat` 归集目标）、`debug/`（仅本机临时调试用，不外发）。
+- Actions 侧同一份产物另存于 Artifacts：`rustbilipc-win-x64-release`，**zip 根目录直接就是 exe**，
+  不再套一层 `release/`。
+- `build.bat` 按同一约定归集到 `publish/rustbilipc.exe`（debug 只用于本机验证能否编译，不外发）。
 
 ## 预期内容
 

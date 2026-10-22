@@ -34,11 +34,11 @@ if errorlevel 1 (
   exit /b 1
 )
 
-echo [3/3] copy artifacts to publish\%PROFILE%
-if not exist "publish\%PROFILE%" mkdir "publish\%PROFILE%"
-copy /Y "target\%PROFILE%\rustbilipc.exe" "publish\%PROFILE%\" >nul 2>&1
-copy /Y "target\%PROFILE%\*.dll" "publish\%PROFILE%\" >nul 2>&1
+echo [3/3] copy artifacts to publish\
+if not exist "publish" mkdir "publish"
+copy /Y "target\%PROFILE%\rustbilipc.exe" "publish\" >nul 2>&1
+copy /Y "target\%PROFILE%\*.dll" "publish\" >nul 2>&1
 
-echo Done. Artifacts in publish\%PROFILE%
+echo Done. Artifacts in publish\ (exe at the top level, same as the CI artifact)
 echo Note: a debug build is for local testing only; it will not run on another machine.
 endlocal

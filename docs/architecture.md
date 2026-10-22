@@ -71,7 +71,8 @@ src/
 ├── theme.rs           全局主题覆盖：accent = #FB7299，accent_foreground = #1F1F1F
 ├── api/
 │   ├── mod.rs         spawn_on_api_runtime()：gpui ↔ tokio 的调用桥
-│   ├── search.rs      搜索封装：DTO（SearchHit/PageInfo）+ 标签清洗 + 播放量格式化
+│   ├── login.rs       扫码登录：取码/轮询 + 码值翻译 + cookie→凭据（纯函数可测）
+│   ├── search.rs      搜索封装：DTO（SearchHit/PageInfo/SearchSort）+ 标签清洗 + 播放量格式化
 │   └── stream_select.rs  DASH 选择纯函数（HEVC 优先、画质档封顶 116）
 ├── store/
 │   └── credentials.rs 明文 JSON 凭据落盘（<exe>/data/cookies.json）
@@ -79,8 +80,11 @@ src/
 │   ├── mod.rs         mpv 参数构造 + Referer/UA 常量 + PATH 查找
 │   └── ipc.rs         mpv JSON IPC 的命令构造（纯数据，管道 I/O 在 P4）
 ├── pages/
+│   ├── root.rs        窗口根视图：无凭据→登录页，有凭据→主界面；登录成功后原地切换
+│   ├── login/         扫码登录页（二维码 + 1.5s 轮询 + 过期自动重载）
 │   └── search/        阶段一页面（view.rs 为根视图）
 ├── ui/
+│   ├── qr.rs          二维码：qrcode-generator 出布尔矩阵，div 网格绘制
 │   └── video_card.rs  卡片视图（封面走 gpui URI 图片加载 + 时长角标）
 └── tests/             单元测试集中地（纯逻辑）
 ```
@@ -151,13 +155,29 @@ gpui 0.3.9 的 `ImageAssetLoader`（`src/elements/img.rs:619-656`）对 `Resourc
 - 封面 CDN（`*.hdslb.com`）是公开域，不需要 Referer；这点与**播放用的 m4s 直链不同**，后者必须带头。
 - `cover_url` 为空时画占位块而不是提交空 URI，避免必然失败的请求刷日志。
 
+### 4.6 扫码登录与启动判定（定稿：登录先行，不做免登录搜索）
+
+- **启动判定**在 `pages/root.rs`：`SavedCredential::load()` 且四字段完整 → 直接把凭据
+  `set_account` 进共享的 `BpiClient` 并进主界面；否则进登录页。登录成功后由登录页发
+  `LoginSucceeded` 事件，根视图**在同一窗口内**换成搜索页。
+  之所以不开第二个窗口：`AsyncWindowContext::open_window` 可用，但"关掉登录窗口"要先拿到窗口
+  句柄再走 `Window::remove_window`，其中取句柄这一步在参考仓库里没有可照抄的先例，风险不值得。
+- **二维码不用图片管线**：`qrcode-generator`（只开 `std`+`qr` feature）出 `Vec<Vec<bool>>`，
+  一格一个 div 铺出来。走 `RenderImage` 要构造 Zed 自己那个 `image` 分支的 `Frame`
+  （`gpui/src/svg_renderer.rs:5`），而且会把 pixels 版 `image` 拖进同一棵依赖树。
+- **轮询节奏与状态机**在 `pages/login/view.rs`：每 1.5 秒一次；`86101` 继续等、`86038` 过期自动
+  重新取码并**退出旧循环**（避免两条轮询并存）、`code==0` 组装凭据；网络错误只记日志、下一轮重试。
+- 码值翻译与 cookie→凭据是纯函数（`api/login.rs` 的 `QrPollState::from_code` /
+  `credential_from_cookies`），单测覆盖——真机登录时才碰得到的分支，先在 CI 里锁住。
+
 ## 5. 阶段进度
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | P0 | 依赖骨架、release CI、空窗口 + 中文输入框 + 假数据列表、`api/store/player` 纯逻辑层 | **完成**（run 39787252294 全绿） |
-| P1 | 搜索接线：`search().video()`、结果转换（剥 `<em>`）、封面网络图（gpui 原生 URI 加载）、分页/排序 | 编译通过（run 39795360593），待真机验证 |
-| P2 | 个人：扫码登录（`qr_generate`/`qr_poll` 轮询 + `qrcode` 自绘）、凭据读写与失效处理、我的信息/收藏/历史 | 未开始 |
+| P1 | 搜索接线：`search().video()`、结果转换（剥 `<em>`）、封面网络图（gpui 原生 URI 加载）、分页/排序 | 代码与 CI 均完成（run 39795360593）；**验证并入登录之后**（定稿不做免登录搜索） |
+| P2a | 登录：扫码（取码/轮询/过期重载）+ 凭据落盘 + 启动判定 + 登录后进主界面 | 代码完成，待真机验证 |
+| P2b | 个人：我的信息 / 收藏 / 历史 入口与页面 | 未开始 |
 | P3 | 详情：`video().detail()`、多 P、tags/related、字幕列表 | 未开始 |
 | P4 | 播放：拉起 mpv、管道 IPC 读写、换清晰度（`loadfile` + `audio-remove`/`audio-add`）、`sub-add` | 未开始 |
 | P5 | 打磨：详情页覆盖式布局、骨架屏、快捷键、续播进度 | 未开始 |
@@ -220,3 +240,7 @@ gpui 0.3.9 的 `ImageAssetLoader`（`src/elements/img.rs:619-656`）对 `Resourc
 - lock 从 artifact 取回更新：新增 3 个包（`gpui-pre-reqwest-client`、`gpui-pre-http-client-tls`、
   `webpki-roots`，ReqwestClient 走的是打包根证书而非系统根），总数 881 → 884。
 - 待真机验证：真实搜索结果与分页/排序、封面图是否显示（这条同时验 `set_http_client` 是否生效）。
+- **真机日志噪音（不是故障）**：点击输入框时可能打出
+  `ERROR unable to get cursor position: 拒绝访问。(0x80070005)`——来自
+  `gpui_windows/src/window.rs:693-703` 的 `GetCursorPos`，它用 `.log_err()` 记录后照常返回，
+  不影响功能；之前那条 a11y INFO 同理。看到别当报错排查。

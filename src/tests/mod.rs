@@ -198,6 +198,102 @@ mod search_format_tests {
 }
 
 #[cfg(test)]
+mod login_tests {
+    use crate::api::login::{QrPollState, credential_from_cookies};
+    use crate::store::credentials::SavedCredential;
+
+    fn full_cookies() -> Vec<(String, String)> {
+        vec![
+            ("DedeUserID".to_string(), "42".to_string()),
+            ("SESSDATA".to_string(), "sess".to_string()),
+            ("bili_jct".to_string(), "csrf".to_string()),
+            ("buvid3".to_string(), "buvid".to_string()),
+            ("unsure".to_string(), "ignored".to_string()),
+        ]
+    }
+
+    #[test]
+    fn code_zero_means_authorized() {
+        assert!(matches!(
+            QrPollState::from_code(0, String::new(), full_cookies(), "refresh".to_string()),
+            QrPollState::Authorized { .. }
+        ));
+    }
+
+    #[test]
+    fn known_waiting_and_expired_codes_map_correctly() {
+        assert_eq!(
+            QrPollState::from_code(86101, "未扫码".to_string(), vec![], String::new()),
+            QrPollState::Waiting
+        );
+        assert_eq!(
+            QrPollState::from_code(86038, "二维码已失效".to_string(), vec![], String::new()),
+            QrPollState::Expired
+        );
+    }
+
+    #[test]
+    fn unknown_code_carries_server_message() {
+        let state = QrPollState::from_code(-101, "账号未登录".to_string(), vec![], String::new());
+        assert_eq!(
+            state,
+            QrPollState::Failed {
+                code: -101,
+                message: "账号未登录".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn credential_needs_all_four_cookies() {
+        let credential = credential_from_cookies(&full_cookies(), "refresh")
+            .expect("四个 cookie 齐全时应当构造成功");
+        assert_eq!(credential.dede_user_id, "42");
+        assert_eq!(credential.sessdata, "sess");
+        assert_eq!(credential.bili_jct, "csrf");
+        assert_eq!(credential.buvid3, "buvid");
+        assert_eq!(credential.refresh_token, "refresh");
+        assert!(credential.is_complete());
+
+        // 少任何一个都不该构造出凭据：Account::validate_complete 会当场拒绝。
+        let partial: Vec<(String, String)> = full_cookies()
+            .into_iter()
+            .filter(|(key, _)| key != "buvid3")
+            .collect();
+        assert!(credential_from_cookies(&partial, "refresh").is_none());
+    }
+
+    #[test]
+    fn saved_credential_roundtrips_after_login() {
+        let credential = credential_from_cookies(&full_cookies(), "refresh").unwrap();
+        let json = serde_json::to_string(&credential).unwrap();
+        let back: SavedCredential = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, credential);
+    }
+}
+
+#[cfg(test)]
+mod qr_tests {
+    use crate::ui::qr;
+
+    #[test]
+    fn matrix_is_square_and_non_empty() {
+        let matrix = qr::matrix_for("https://login.bilibili.com/qrcode/h5-login?validation_key=abc");
+        assert!(!matrix.is_empty(), "登录 URL 应当能编出二维码");
+        let side = matrix.len();
+        assert!(matrix.iter().all(|row| row.len() == side), "矩阵应当是正方形");
+        // QR 版本 1~40 的边长一定是奇数且 >= 21。
+        assert!(side >= 21 && side % 2 == 1, "异常边长: {side}");
+    }
+
+    #[test]
+    fn empty_text_still_produces_a_symbol() {
+        // B 站不会给空 URL，但解码器要能处理，避免登录页拿到空白。
+        assert!(!qr::matrix_for("").is_empty());
+    }
+}
+
+#[cfg(test)]
 mod scaffold_tests {
     use crate::VERSION;
 

@@ -34,6 +34,10 @@ log = "0.4"
 env_logger = "0.11"
 # 在 PATH 里找 mpv；找不到要能提示用户，而不是崩。
 which = "8"
+# 扫码登录要把 B 站给的 URL 变成模块矩阵。只要纯矩阵（`to_matrix()`），
+# 关掉默认的 image/svg/pic 渲染后端：那三个会拉进 pixels 版 `image`，与 gpui 用的
+# 同名 fork（`use image::Frame`）混在一个构建里容易出问题。二维码直接用 div 网格画。
+qrcode-generator = { version = "6.1", default-features = false, features = ["std", "qr"] }
 # gpui 的默认 HttpClient 是 NullHttpClient（请求直接失败），网络封面图必须换成真客户端。
 # 与 kit 的 pin 保持同一个 =0.3.9 快照，避免多一份 gpui。
 reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.9" }
