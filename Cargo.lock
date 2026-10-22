@@ -6087,6 +6087,7 @@ dependencies = [
  "gpui-pre-reqwest-client",
  "log",
  "qrcode-generator",
+ "rustls",
  "serde",
  "serde_json",
  "tokio",

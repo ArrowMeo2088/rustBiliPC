@@ -276,3 +276,11 @@ bpi-rs 的 builder 默认 `no_proxy = true`、`timeout = 10s`、`connect_timeout
 - lock 再次从 artifact 取回入库：新增 `qrcode-generator` 及其两个依赖（`atomic-write-file`、
   `nix`），881 → 887 个包。
 - 产物按新约定放在 `publish/rustbilipc.exe`（约 32.0 MB），artifact zip 根目录同样直接是 exe。
+
+### 第六、七轮（run 39806973376）：TLS provider 修复
+
+- 第六轮唯一错误是 `install_default()` 的 `Err` 变体不实现 `Display`（见第 2 节）；第七轮修好后
+  全步骤 success，**28 passed / 0 failed**，耗时约 5 分钟（缓存全命中）。
+- 背景是第 4.7 节那次真机诊断：加载态永不结束 → 任务 panic 被 `JoinHandle::Err` 吞掉。
+  现在两处（登录取码、轮询）都会把 `describe_join_error()` 的文案显示到界面上。
+- lock 只是本包依赖列表变化（新增直接依赖 `rustls`），包数仍 887。
