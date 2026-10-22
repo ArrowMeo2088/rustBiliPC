@@ -55,7 +55,8 @@
   不去砍 http3/ring provider。
 - 构建里同时存在两份 reqwest（kit 的 `gpui-pre-reqwest 0.12.15` 与 bpi-rs 的 `0.13.5`），属已知浪费，
   不为它做清理；**不要**再引入第三个 HTTP 客户端。
-- `Cargo.lock` **要入库**，CI 用 `--locked`；本机无法生成 lock，所以首次由 CI 产出并从 artifact 取回提交。
+- `Cargo.lock` **已入库**（881 个包，由首轮 CI 的 `cargo-lock` artifact 取回），CI 走 `--locked`；
+  改依赖后必须重新取回 lock 一起提交，否则 CI 会因 lock 与 Cargo.toml 不一致而失败。
 - 不要在前台长时间轮询 CI：用后台轮询或短探测，以日志证据为准。
 
 ## 6. 输出与文档

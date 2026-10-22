@@ -29,8 +29,11 @@ const COVER_WIDTH: f32 = 160.;
 const COVER_HEIGHT: f32 = 90.;
 
 /// 渲染一张横向卡片。
+///
+/// 用 `div().flex()`（默认行方向）而不是 `h_flex()`：已发布的 gpui-kit 0.8.0 没有那个自由函数。
 pub fn render(data: VideoCardData) -> impl IntoElement {
-    h_flex()
+    div()
+        .flex()
         .w_full()
         .flex_shrink_0()
         .gap_2()
@@ -45,7 +48,9 @@ pub fn render(data: VideoCardData) -> impl IntoElement {
                 .bg(rgb(0x2A2A2A)),
         )
         .child(
-            v_flex()
+            div()
+                .flex()
+                .flex_col()
                 .flex_1()
                 .gap_1()
                 .child(div().child(data.title))

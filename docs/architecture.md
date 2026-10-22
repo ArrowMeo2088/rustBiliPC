@@ -36,6 +36,18 @@ release 分支（`build.rs` 里 `#[cfg(not(debug_assertions))] compile_shaders()
 
 `gpui_platform` 的 `runtime_shaders` 特性只映射到 `gpui_macos`，**Windows 上没有开关**。
 
+### 参考仓库 ≠ 我们在用的版本（写代码前必读）
+
+`ref/gpui-kit` 是 kit 的**本地 main**，比 crates.io 的 `gpui-kit 0.8.0` 新，它的 `examples/` 里
+有些写法在已发布版本里不存在。已踩到的两条（首轮 CI 报错，均以日志为证）：
+
+- `v_flex()` / `h_flex()` 自由函数**不可用** → 用 `div().flex().flex_col()`（行方向就是 `div().flex()`）。
+- `overflow_y_scroll()` 是 `Stateful<Div>` 的方法 → 必须先 `.id("...")`，否则报 E0599
+  并提示一个不相干的 `overflow_y_scrollbar`。
+
+规则：拿不准的调用，先在 `ref/gpui-kit/crates/{base,component}/src` 里找到**同版本已发布代码**
+中的真实用法（而不是 examples），或干脆看 CI 日志里 rustc 的建议。
+
 ## 3. 模块布局
 
 ```
@@ -120,8 +132,8 @@ cx.spawn(async move |_, cx| {
 
 | # | 风险 | 处置 |
 | --- | --- | --- |
-| 1 | release 需要 `fxc.exe`（gpui `build.rs` 找不到就 panic） | CI 先探测 SDK 路径，必要时设 `GPUI_FXC_PATH`；**首次 release 构建必须确认** |
-| 2 | `rustls 0.23` 默认 provider 拉 `aws-lc-sys`，MSVC 需 CMake + NASM | CI 加 `choco install nasm`；不做砍 http3 的清理 |
+| 1 | release 需要 `fxc.exe`（gpui `build.rs` 找不到就 panic） | **已解除**：CI 探测到 Windows SDK 的 fxc 并设 `GPUI_FXC_PATH`，该步通过 |
+| 2 | `rustls 0.23` 默认 provider 拉 `aws-lc-sys`，MSVC 需 CMake + NASM | **已解除**：CI 的 `choco install nasm` 成功，aws-lc 编译通过 |
 | 3 | 构建内有两份 reqwest（kit 的 `gpui-pre-reqwest 0.12.15` + bpi-rs 的 `0.13.5`） | 只影响编译时长，不动 |
 | 4 | gpui-pre 快照每周变动、API 破坏性 | lock 入库 + `--locked`；升级要连带检查 kit 的 pin |
 | 5 | gpui Windows 侧 `WindowDecorations::Client` 是空实现、不支持原生锚定弹窗、无托盘 API | 依赖 kit 组件自绘弹层；托盘如需，自调 `Shell_NotifyIconW` |
@@ -135,3 +147,11 @@ cx.spawn(async move |_, cx| {
 - 代码注释写"为什么"，不写"是什么"：尤其是上面 4.x 的机制，注释与本文互为索引。
 - 测试只覆盖纯逻辑（`src/tests/`）。UI 与网络的验证方式是：CI 产物在真机上跑起来看。
 - 快速开发阶段不设 clippy/rustfmt 门禁，不追求零 warning；但编译必须无 error。
+
+## 8. 首轮 CI 实测（2026-10-22，run 39785338951）
+
+- 前 6 步全绿（toolchain、NASM、fxc 探测、缓存），**整个依赖图 release 约 8 分钟编完**——
+  远快于预估的 25–45 分钟（不 LTO + 不 strip 省下的）。
+- 唯一失败点是我们自己的代码：5 个错误、两类原因，见第 2 节"参考仓库 ≠ 我们在用的版本"。
+- `Cargo.lock`（881 个包；`gpui-pre 0.3.9` / `gpui-pre-windows 0.3.9` / `gpui-kit 0.8.0` /
+  `bpi-rs 0.3.1`）已由 CI 的 `cargo-lock` artifact 产出并入库，之后 CI 一律走 `--locked`。

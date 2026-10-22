@@ -28,3 +28,8 @@ Rust crate 根目录（crate 名 `rustbilipc`）。职责划分与维护契约�
 
 修改本目录任何代码时，同步更新本 README、`docs/architecture.md` 相应小节，并提交 git。
 注释写"为什么"（机制、坑、定稿理由），不写"是什么"。
+
+**写 gpui/kit 调用前先确认该写法在已发布版本里存在**：`ref/gpui-kit/examples/` 用的是 kit 本地
+main，比 crates.io 的 0.8.0 新。已踩过两条：没有 `v_flex()`/`h_flex()` 自由函数（用
+`div().flex()` + `.flex_col()`）；`overflow_y_scroll()` 属于 `Stateful<Div>`，必须先 `.id("...")`。
+详见 `docs/architecture.md` 第 2 节与第 8 节。

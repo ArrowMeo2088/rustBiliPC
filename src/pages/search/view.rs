@@ -68,20 +68,27 @@ impl SearchPage {
 
 impl Render for SearchPage {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
+        // 注意：已发布的 gpui-kit 0.8.0 没有 `v_flex()`/`h_flex()` 自由函数（那是 ref/gpui-kit
+        // 本地 main 才有的），所以这里用 `div().flex()` + `.flex_col()` 表达同一件事。
+        div()
+            .flex()
+            .flex_col()
             .size_full()
             // 顶栏：输入框占满剩余宽度，右侧留给以后的排序/分页控件。
             .child(
-                h_flex()
+                div()
+                    .flex()
                     .w_full()
                     .gap_2()
                     .p_4()
                     .items_center()
                     .child(div().flex_1().child(Input::new(&self.query))),
             )
-            // 结果区：P1 换成虚拟列表（结果可达上千条）。
+            // 结果区：滚动容器必须先 `.id()`——`overflow_*` 是 `Stateful<Div>` 上的方法。
+            // P1 换成虚拟列表（结果可达上千条）。
             .child(
                 div()
+                    .id("search-results")
                     .flex_1()
                     .w_full()
                     .overflow_y_scroll()
