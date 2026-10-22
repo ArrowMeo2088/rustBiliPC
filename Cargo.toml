@@ -34,6 +34,9 @@ log = "0.4"
 env_logger = "0.11"
 # 在 PATH 里找 mpv；找不到要能提示用户，而不是崩。
 which = "8"
+# gpui 的默认 HttpClient 是 NullHttpClient（请求直接失败），网络封面图必须换成真客户端。
+# 与 kit 的 pin 保持同一个 =0.3.9 快照，避免多一份 gpui。
+reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.9" }
 
 [profile.release]
 # 按定稿：现阶段不做 LTO、不 strip，优先编译速度与可排查性。

@@ -38,11 +38,22 @@ pub async fn video(&self, params: SearchVideoParams) -> BpiResult<SearchData<Vec
 - `SearchVideoParams::new(keyword)` **返回 Result**（`src/search/search_params.rs:170`），
   链上 `.with_order(SearchOrder)`（:179）、`.with_page(..)`、`.with_duration(..)`、`.with_tid(..)`。
 - `SearchData<T> { seid, page, page_size, num_results, num_pages, result }`。
+  - `result: Option<T>`：无结果时上游给 `null` 而不是空数组，转换处要 `unwrap_or_default()`。
+  - `pageinfo` 字段是**私有的**，crate 外无法用结构体字面量构造 `SearchData`，
+    所以单元测试只测纯函数（标签清洗、数字格式化），不测 `to_outcome` 的完整入参。
+  - `page/page_size/num_results/num_pages` 都是 `i64`，与我们的 `page: u32` 比较前先夹成 i64。
 - `Video`（`src/search/result.rs:134-192`）可用字段：`bvid, aid, title, author, mid, typeid,
   typename, pic, play, danmaku, favorites, like, tag, review, pubdate, duration, arcurl`。
   - `title` 内含 `<em class="keyword">…</em>` 高亮标签 → 展示前要剥。
   - `duration` 是已格式化的 `mm:ss` 字符串，直接显示即可。
 - 端点 `/x/web-interface/wbi/search/type`，WBI 由 `get_wbi_sign2` 自动签（`src/client.rs:137-152`）。
+- **P1 落地补充**：
+  - `SearchVideoParams::new(kw)`、`.with_page(page)` 都返回 `BpiResult`（会拒绝空关键词与非法页码），
+    `with_order/with_duration/with_tid` 返回 `Self`。
+  - 排序：`SearchOrder::{TotalRank, Click, PubDate, Dm, Stow}`；我们用
+    `SearchSort::{Comprehensive, PlayCount, PublishDate}` 包一层，映射分别到前三个。
+  - `pic` 是 `*.hdslb.com` 的公开 CDN，**不需要 Referer**，直接给 gpui 的 URI 图片加载器即可
+    （但要装真 HttpClient，见 architecture.md 第 4.5 节）。
 
 ## 4. 视频详情
 

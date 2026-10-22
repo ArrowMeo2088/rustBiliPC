@@ -1,30 +1,34 @@
 //! 视频卡片：搜索结果列表的基本单元。
 //!
 //! 尺寸参考 `ref/Bili.Copilot`（`App.xaml` 的 `VideoLayout`：卡片 232×238、间距 20；
-//! `VideoCardControl.xaml`：封面圆角 4、时长角标黑底 60% 不透明度 + `Margin=8 Padding=4`）。
-//! 那是 WinUI/XAML，不能直接搬，这里只按同一套度量在 gpui 上重画。
+//! `VideoCardControl.xaml`：封面 `CornerRadius=4`、时长角标黑底 60% 不透明度 + `Margin=8 Padding=4`）。
+//! 那是 WinUI/XAML，不能直接搬，这里只按同一套度量在 gpui 上重画；
+//! 现阶段用横向列表而不是网格，网格留到 P5 打磨阶段。
 //!
-//! P0 阶段封面是纯色占位块——网络图片加载器还没有（gpui-kit 不提供，需自研），
-//! 放到 P1 与真实搜索接口一起做。
+//! 封面**不需要我们自己写下载器**：gpui 0.3.9 的 `ImageAssetLoader` 见到 URI 就走
+//! `App::http_client()` 抓取并自带缓存与在途合并（`src/elements/img.rs:619-656`）。
+//! 前提是启动时装了真的 HttpClient —— 见 `src/main.rs` 与 `docs/architecture.md` 第 4.5 节。
 
 use gpui_kit::*;
 
-/// 卡片数据。字段都是已格式化的展示文本，避免在渲染路径里做网络请求或数字格式化。
-#[derive(Clone, Debug)]
+/// 卡片数据。字段都是已格式化的展示文本，渲染路径里不做网络请求或数字格式化。
+#[derive(Clone, Debug, Default)]
 pub struct VideoCardData {
     /// 稿件 bvid，用作列表项的稳定 key 与详情页入参。
     pub bvid: SharedString,
-    /// 标题（B 站返回的标题带 `<em class="keyword">` 高亮标签，入库前要剥掉，见 P1）。
+    /// 标题（已在 api 层剥掉高亮标签）。
     pub title: SharedString,
     /// UP 主名。
     pub author: SharedString,
-    /// 时长，bpi-rs 返回的就是 `mm:ss` 字符串，直接显示。
+    /// 时长，B 站返回的就是 `mm:ss`。
     pub duration: SharedString,
     /// 播放量的中文化文本（如 "12.3万"）。
     pub play_text: SharedString,
+    /// 封面 URL；为空时画占位块，避免向 gpui 提交一个必然失败的资源请求。
+    pub cover_url: SharedString,
 }
 
-/// 封面占位块的宽高（16:9）。
+/// 封面尺寸（16:9）。
 const COVER_WIDTH: f32 = 160.;
 const COVER_HEIGHT: f32 = 90.;
 
@@ -38,15 +42,8 @@ pub fn render(data: VideoCardData) -> impl IntoElement {
         .flex_shrink_0()
         .gap_2()
         .p_2()
-        .items_center()
-        // 封面占位：P1 换成网络图 + 右下角时长角标。
-        .child(
-            div()
-                .w(px(COVER_WIDTH))
-                .h(px(COVER_HEIGHT))
-                .flex_shrink_0()
-                .bg(rgb(0x2A2A2A)),
-        )
+        .items_start()
+        .child(cover(&data.cover_url, &data.duration))
         .child(
             div()
                 .flex()
@@ -54,21 +51,79 @@ pub fn render(data: VideoCardData) -> impl IntoElement {
                 .flex_1()
                 .gap_1()
                 .child(div().child(data.title))
-                .child(div().text_sm().child(data.author)),
+                .child(
+                    div()
+                        .flex()
+                        .gap_2()
+                        .text_sm()
+                        .child(data.author)
+                        .child(data.play_text),
+                ),
         )
-        .child(div().flex_shrink_0().text_sm().child(data.duration))
-        .child(div().flex_shrink_0().text_sm().child(data.play_text))
 }
 
-/// 用于骨架阶段的一组假数据，方便在没有网络的情况下验证布局与滚动。
-pub fn placeholder_cards() -> Vec<VideoCardData> {
-    (1..=8)
-        .map(|index| VideoCardData {
-            bvid: format!("BV00000000{index:02}").into(),
-            title: format!("P0 骨架假数据卡片 {index}（尚未接入搜索接口）").into(),
-            author: "rustBiliPC".into(),
-            duration: "12:34".into(),
-            play_text: "1.0万".into(),
+/// 封面区域：有 URL 就走 gpui 的 URI 图片加载，没有就画占位块。
+///
+/// 时长角标用绝对定位压在封面右下角，这是 Bili.Copilot 的读法。
+fn cover(cover_url: &SharedString, duration: &SharedString) -> impl IntoElement {
+    let box_base = div()
+        .w(px(COVER_WIDTH))
+        .h(px(COVER_HEIGHT))
+        .flex_shrink_0()
+        .overflow_hidden()
+        .relative();
+
+    if cover_url.is_empty() {
+        return box_base
+            .bg(rgb(0x2A2A2A))
+            .child(badge(duration))
+            .into_any_element();
+    }
+
+    box_base
+        // img 的 source 传字符串即按 URI 处理（`ImageSource: From<SharedString>`），
+        // 加载中/失败都由 gpui 内部处理，这里只保留一个深色底以免闪白。
+        .child(
+            img(cover_url.clone())
+                .size_full()
+                .object_fit(ObjectFit::Cover),
+        )
+        .child(badge(duration))
+        .into_any_element()
+}
+
+/// 右下角的时长角标。
+fn badge(duration: &SharedString) -> impl IntoElement {
+    div()
+        .absolute()
+        // 用 1（4px）而不是 0p5：gpui 没有生成 `right_0p5`/`bottom_0p5`。
+        .right_1()
+        .bottom_1()
+        .px_1()
+        .text_xs()
+        .bg(rgb(0x000000).opacity(0.6))
+        .child(duration.clone())
+        .into_any_element()
+}
+
+/// 用于无结果/未搜索状态的提示元素。
+pub fn notice(text: impl Into<SharedString>) -> impl IntoElement {
+    div().p_4().text_sm().child(text.into()).into_any_element()
+}
+
+/// 卡片列表的便捷构造：把 api 层的 DTO 变成带 gpui 类型的展示数据。
+///
+/// 放在这里是为了让 `pages/` 只做装配，不承担字段搬运的工作。
+pub fn cards_from(hits: Vec<crate::api::search::SearchHit>) -> Vec<VideoCardData> {
+    hits
+        .into_iter()
+        .map(|hit| VideoCardData {
+            bvid: hit.bvid.into(),
+            title: hit.title.into(),
+            author: hit.author.into(),
+            duration: hit.duration.into(),
+            play_text: hit.play_text.into(),
+            cover_url: hit.cover_url.into(),
         })
         .collect()
 }

@@ -1,7 +1,7 @@
 # Rust 构建中间产物
 /target/
 
-# 依赖锁 **要入库**：gpui-pre 快照每周变动且 API 破坏性，靠 lock + CI --locked 钉住
+# 依赖锁 **要入库**：gpui-pre 快照每周变动且 API 破坏性，lock 作为版本种子钉住解析结果
 # （本机无 cargo，首次 lock 由 CI 生成后取回提交）
 
 # 运行期数据：登录凭据等，绝对不入库

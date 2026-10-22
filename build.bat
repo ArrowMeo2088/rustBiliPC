@@ -20,12 +20,8 @@ exit /b 2
 
 :profile_ok
 echo [1/3] cargo build (--%PROFILE%)
-if exist Cargo.lock (
-  cargo build --%PROFILE% --locked
-) else (
-  echo Cargo.lock missing, resolving dependencies now.
-  cargo build --%PROFILE%
-)
+rem Cargo.lock 作为版本种子提交，但不加 --locked：新增依赖时本机无法刷新 lock。
+cargo build --%PROFILE%
 if errorlevel 1 (
   echo BUILD FAILED
   exit /b 1

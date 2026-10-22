@@ -1,52 +1,159 @@
 //! 搜索页（阶段一）。
 //!
-//! P0 只提供骨架：顶栏输入框 + 假数据卡片列表 + 底部环境自检。
-//! 目的是让"框架能不能跑起来"这件事在接入真实接口之前就有结论，
-//! 所以这里刻意**不**发任何网络请求。
+//! 这一页要跑通的是整条链路：输入 → 回车/按钮 → tokio 上的 bpi-rs 请求 →
+//! 回到 gpui 更新状态 → 卡片与分页呈现。UI 保持朴素，观感打磨在 P5。
 //!
-//! P1 要补的三件事，都记在 `docs/architecture.md` 的阶段表里：
-//! 1. `InputEvent::Enter` / 搜索按钮 → [`crate::api::spawn_on_api_runtime`] 发请求；
-//! 2. `bpi_rs::search` 的 `Video` → [`VideoCardData`] 的转换（标题要剥 `<em>` 标签）；
-//! 3. 封面网络图 + 缓存（gpui-kit 不提供，需自研）。
+//! 三个刻意的设计选择：
+//! - 触发方式同时给"回车"和"搜索"按钮：gpui 的 `InputEvent::PressEnter` 在中文 IME
+//!   组词期间的回车语义由 kit 的 InputState 处理，双入口能避免"按了没反应"的误判。
+//! - 结果区用普通滚动 + 分页按钮，不上虚拟列表：B 站每页固定几十条，一次渲染的代价
+//!   远小于把 `virtual_list` 的 render 回调接错的风险。真正的长列表（历史/收藏）到了
+//!   P2/P3 再引虚拟列表。
+//! - 封面直接 `img(url)`：gpui 自带 URI 图片加载与缓存，前提见 `docs/architecture.md` 第 4.5 节。
 
-use gpui_kit::component::input::{Input, InputState};
+use std::sync::Arc;
+
+use gpui_kit::component::button::Button;
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::*;
 
+use crate::api::search::{self, PageInfo, SearchSort};
+use crate::store::credentials::SavedCredential;
 use crate::ui::video_card::{self, VideoCardData};
 
 /// 搜索页根视图。
 pub struct SearchPage {
-    /// 关键词输入框的状态。kit 的 `InputState` 内部是 Rope，中文 IME 合成已可用。
+    /// 关键词输入框状态。kit 的 `InputState` 内部是 Rope，中文 IME 合成已可用。
     query: Entity<InputState>,
-    /// 当前展示的结果。P0 是假数据，P1 换成接口返回。
-    results: Vec<VideoCardData>,
-    /// 底部环境自检文本，构造时算一次，避免每帧读盘。
+    /// 复用一份客户端；请求要 clone 成 `Arc` 投给 tokio。
+    client: Arc<bpi_rs::BpiClient>,
+    /// 当前展示的卡片。
+    cards: Vec<VideoCardData>,
+    /// 分页信息，由最近一次成功搜索写入。
+    info: PageInfo,
+    /// 最近一次已提交的关键词（分页时沿用，不再读输入框，避免用户改了一半翻页）。
+    submitted: SharedString,
+    /// 当前页码，从 1 开始。
+    page: u32,
+    /// 排序口径。
+    sort: SearchSort,
+    /// 请求在途标记，防止连点回车并发多次搜索。
+    loading: bool,
+    /// 状态/错误提示，直接显示在列表上方。
+    feedback: SharedString,
+    /// 底部环境自检行。
     status_line: SharedString,
-    /// 订阅要随实体存活，命名以 `_` 开头表示"只需保活，不需读取"。
+    /// 订阅要随实体存活。
     _subscriptions: Vec<Subscription>,
 }
 
 impl SearchPage {
-    /// 创建搜索页。需要 `window` 是因为 kit 的 `InputState::new` 要读窗口级状态。
-    pub fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+    /// 创建搜索页。需要 `window` 是因为 kit 的 `InputState::new` 与 `subscribe_in` 都要用它。
+    pub fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        client: Arc<bpi_rs::BpiClient>,
+    ) -> Self {
         let query = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("搜索视频（P0 骨架：搜索接线在 P1）")
+                .placeholder("输入关键词，回车搜索（支持中文输入法）")
         });
+
+        // 回车即搜索。回调里同时拿到本页实体与输入状态，不需要额外字段。
+        let _subscriptions =
+            vec![cx.subscribe_in(&query, window, move |this, state, event, _window, cx| {
+                if matches!(event, InputEvent::PressEnter) {
+                    let keyword = state.read(cx).value().trim().to_string();
+                    this.submit(keyword, 1, this.sort, cx);
+                }
+            })];
 
         Self {
             query,
-            results: video_card::placeholder_cards(),
+            client,
+            cards: Vec::new(),
+            info: PageInfo::default(),
+            submitted: SharedString::default(),
+            page: 1,
+            sort: SearchSort::Comprehensive,
+            loading: false,
+            feedback: "输入关键词后回车或点搜索".into(),
             status_line: Self::build_status_line(),
-            _subscriptions: Vec::new(),
+            _subscriptions,
         }
     }
 
+    /// 提交一次搜索。`page` 从 1 开始；空关键词与在途请求直接忽略。
+    fn submit(
+        &mut self,
+        keyword: String,
+        page: u32,
+        sort: SearchSort,
+        cx: &mut Context<Self>,
+    ) {
+        if keyword.is_empty() || self.loading {
+            return;
+        }
+
+        self.submitted = keyword.clone().into();
+        self.page = page;
+        self.sort = sort;
+        self.loading = true;
+        self.feedback = format!("搜索中… {keyword}（{}）", sort.label()).into();
+        cx.notify();
+
+        let client = Arc::clone(&self.client);
+        let join = search::search_videos(client, keyword, page, sort);
+
+        // 请求在 tokio 上跑，回到 gpui 时用 kit 自身的写法：upgrade 后 update。
+        cx.spawn(async move |this, cx| {
+            let outcome = match join.await {
+                Ok(inner) => inner.map_err(|error| error.to_string()),
+                Err(join_error) => Err(format!("请求任务异常终止: {join_error}")),
+            };
+            if let Some(this) = this.upgrade() {
+                let _ = this.update(cx, |this, cx| {
+                    this.loading = false;
+                    match outcome {
+                        Ok(outcome) => {
+                            this.info = outcome.info.clone();
+                            this.cards = video_card::cards_from(outcome.hits);
+                            this.feedback = if this.cards.is_empty() {
+                                "没有匹配的结果".into()
+                            } else {
+                                format!(
+                                    "共 {} 条，第 {}/{} 页",
+                                    this.info.num_results, this.info.page, this.info.num_pages
+                                )
+                                .into()
+                            };
+                        }
+                        Err(message) => {
+                            this.cards.clear();
+                            this.feedback = format!("搜索失败: {message}").into();
+                        }
+                    }
+                    cx.notify();
+                });
+            }
+        });
+    }
+
+    /// 翻页：沿用已提交的关键词，只改页码。
+    fn goto_page(&mut self, page: u32, cx: &mut Context<Self>) {
+        let keyword = self.submitted.to_string();
+        self.submit(keyword, page, self.sort, cx);
+    }
+
+    /// 切换排序并回到第 1 页。
+    fn change_sort(&mut self, sort: SearchSort, cx: &mut Context<Self>) {
+        let keyword = self.submitted.to_string();
+        self.submit(keyword, 1, sort, cx);
+    }
+
     /// 组装底部自检信息：凭据文件在不在、mpv 找不找得到。
-    ///
-    /// 这两项决定了后面阶段能不能立刻跑起来，所以从 P0 就摆在明面上。
     fn build_status_line() -> SharedString {
-        let credential = if crate::store::credentials::SavedCredential::load().is_some() {
+        let credential = if SavedCredential::load().is_some() {
             "已保存"
         } else {
             "未登录"
@@ -60,21 +167,75 @@ impl SearchPage {
         format!(
             "rustBiliPC v{} · 凭据: {credential} ({}) · mpv: {mpv}",
             crate::VERSION,
-            crate::store::credentials::SavedCredential::path().display()
+            SavedCredential::path().display()
         )
         .into()
+    }
+
+    /// 分页按钮组。加载中一律不响应，避免同一页并发请求（判断写在回调里）。
+    fn pager(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let current = self.page;
+
+        div()
+            .flex()
+            .gap_2()
+            .items_center()
+            .child(
+                Button::new("prev-page")
+                    .label("上一页")
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        if this.page > 1 && !this.loading {
+                            let page = this.page - 1;
+                            this.goto_page(page, cx);
+                        }
+                    })),
+            )
+            .child(
+                div()
+                    .text_sm()
+                    .child(format!("第 {current} 页 / 共 {} 页", self.info.num_pages.max(0))),
+            )
+            .child(
+                Button::new("next-page")
+                    .label("下一页")
+                    .on_click(cx.listener(move |this, _, _window, cx| {
+                        if !this.loading && (this.page as i64) < this.info.num_pages.max(0) {
+                            let page = this.page + 1;
+                            this.goto_page(page, cx);
+                        }
+                    })),
+            )
+    }
+
+    /// 排序按钮组。
+    fn sort_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let mut bar = div().flex().gap_1();
+        for sort in [
+            SearchSort::Comprehensive,
+            SearchSort::PlayCount,
+            SearchSort::PublishDate,
+        ] {
+            let active = sort == self.sort;
+            let button = Button::new(format!("sort-{}", sort.label()))
+                .label(sort.label())
+                .on_click(cx.listener(move |this, _, _window, cx| {
+                    if this.sort != sort {
+                        this.change_sort(sort, cx);
+                    }
+                }));
+            bar = bar.child(if active { button.primary() } else { button });
+        }
+        bar
     }
 }
 
 impl Render for SearchPage {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
-        // 注意：已发布的 gpui-kit 0.8.0 没有 `v_flex()`/`h_flex()` 自由函数（那是 ref/gpui-kit
-        // 本地 main 才有的），所以这里用 `div().flex()` + `.flex_col()` 表达同一件事。
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
             .flex()
             .flex_col()
             .size_full()
-            // 顶栏：输入框占满剩余宽度，右侧留给以后的排序/分页控件。
+            // 顶栏：输入框 + 搜索按钮 + 排序。
             .child(
                 div()
                     .flex()
@@ -82,24 +243,46 @@ impl Render for SearchPage {
                     .gap_2()
                     .p_4()
                     .items_center()
-                    .child(div().flex_1().child(Input::new(&self.query))),
+                    .child(div().flex_1().child(Input::new(&self.query)))
+                    .child(
+                        Button::new("do-search")
+                            .primary()
+                            .label("搜索")
+                            .on_click(cx.listener(|this, _, _window, cx| {
+                                let keyword = this.query.read(cx).value().trim().to_string();
+                                this.submit(keyword, 1, this.sort, cx);
+                            })),
+                    )
+                    .child(self.sort_bar(cx)),
             )
-            // 结果区：滚动容器必须先 `.id()`——`overflow_*` 是 `Stateful<Div>` 上的方法。
-            // P1 换成虚拟列表（结果可达上千条）。
+            // 状态行。
+            .child(div().px_4().text_sm().child(self.feedback.clone()))
+            // 结果区：滚动容器必须先 `.id()`——`overflow_*` 是 `Stateful<Div>` 的方法。
             .child(
                 div()
                     .id("search-results")
                     .flex_1()
                     .w_full()
                     .overflow_y_scroll()
-                    .children(self.results.iter().cloned().map(video_card::render)),
+                    .child(
+                        div()
+                            .flex()
+                            .flex_col()
+                            .w_full()
+                            .children(self.cards.iter().cloned().map(video_card::render)),
+                    ),
             )
+            // 分页与自检。
             .child(
                 div()
+                    .flex()
                     .w_full()
+                    .gap_2()
                     .p_2()
-                    .text_sm()
-                    .child(self.status_line.clone()),
+                    .items_center()
+                    .child(self.pager(cx))
+                    .child(div().flex_1())
+                    .child(div().text_sm().child(self.status_line.clone())),
             )
     }
 }

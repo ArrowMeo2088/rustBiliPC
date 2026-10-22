@@ -18,6 +18,8 @@
   `Referer` 头存在、附加头能追加、IPC JSON 命令形状、管道命名格式。
 - `credentials_tests`：JSON 往返、缺省字段容错（老文件不能读不回）、完整性判定、
   与 `bpi_rs::Account` 的字段映射。
+- `search_format_tests`：标题高亮标签清洗、播放量的中文读法（万/亿与尾零截断、边界值）、
+  排序项的中文标签。
 - `scaffold_tests`：版本号非空且以数字开头。
 
 ## 不测什么

@@ -70,16 +70,12 @@ jobs:
           restore-keys: |
             cargo-win-${{ runner.os }}-release-
 
-      - name: Build (release, locked when Cargo.lock exists)
+      - name: Build (release)
         shell: bash
-        run: |
-          if [ -f Cargo.lock ]; then
-            cargo build --release --locked
-          else
-            # 首次没有 lock：让 cargo 解析并生成，随后由下面的步骤以 artifact 取回入库。
-            echo "::warning::Cargo.lock 不存在，本次由 cargo 现场解析依赖"
-            cargo build --release
-          fi
+        # 不使用 --locked：Cargo.lock 只作为"版本种子"（cargo 会沿用它已记录的版本，
+        # 只为新增的依赖解析）。加了 --locked 后，任何一次新增依赖都会先把 CI 卡死，
+        # 而本机没有 cargo 无法预先刷新 lock。每轮成功后仍把 lock 作为 artifact 取回入库。
+        run: cargo build --release
 
       - name: Test (pure logic only, no window needed)
         shell: bash
@@ -101,7 +97,7 @@ jobs:
             publish/*.dll
           if-no-files-found: warn
 
-      # 首次成功后把解析出来的 lock 拿回来提交，之后 CI 就走 --locked。
+      # 每轮都把 lock 取回来：新增依赖后这是唯一的更新途径（本机没有 cargo）。
       - name: Upload Cargo.lock
         if: always()
         uses: actions/upload-artifact@v4

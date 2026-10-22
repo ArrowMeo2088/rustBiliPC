@@ -4,12 +4,21 @@
 //! 1. 日志 —— gpui 与 bpi-rs 都用 `log`，没有 logger 时启动失败只会静默退出。
 //! 2. tokio runtime —— 见 [`rustbilipc::app`] 的说明，API 调用依赖它。
 //! 3. `with_assets` —— kit 的图标/字体资源，必须在 `init` 之前挂上。
-//! 4. `gpui_kit::init` → 主题覆盖 → 开窗。
+//! 4. `gpui_kit::init` → 主题覆盖 → **装 HttpClient** → 开窗。
+//!
+//! 第 4 步里的 HttpClient 不能省：gpui 默认装的是 `NullHttpClient`（`gpui` 的 `app.rs` 里
+//! 直接构造），任何网络图片请求都会失败；封面图靠 `ImageAssetLoader` 走
+//! `App::http_client()`，所以必须换成真的 reqwest 客户端。
+
+use std::sync::Arc;
 
 use gpui_kit::*;
 use rustbilipc::app;
 use rustbilipc::pages::search::SearchPage;
 use rustbilipc::theme;
+
+/// 我们对外 HTTP 客户端自报的家门名（User-Agent 的一部分）。
+const HTTP_CLIENT_NAME: &str = "rustbilipc";
 
 fn main() {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -17,8 +26,14 @@ fn main() {
     // 提前建好 API 用的 runtime，避免第一次网络请求时才初始化带来的不确定性。
     app::runtime();
 
+    // 客户端是 Send+Sync 的（内部 reqwest::Client + Mutex<Option<Account>> + WBI 缓存），
+    // 用 Arc 在 gpui 与 tokio 两侧共享同一份 cookie jar 与 WBI key 缓存。
+    let client = Arc::new(
+        bpi_rs::BpiClient::new().expect("初始化 BpiClient 失败，请检查网络与系统时间"),
+    );
+
     // Assets 是 gpui-kit 自带的 rust-embed 资源（Lucide 图标等）。
-    // 将来要加载我们自己的图片/字体时，改成 `Assets::before(our_assets)`。
+    // 将来要加载我们自己的图片/字体时，改成 `Assets::before(Assets)` 的组合形式。
     let application = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
 
     application.run(move |cx| {
@@ -26,17 +41,21 @@ fn main() {
         gpui_kit::init(cx);
         theme::apply(cx);
 
+        let http_client = reqwest_client::ReqwestClient::user_agent(HTTP_CLIENT_NAME)
+            .expect("初始化 HttpClient 失败");
+        cx.set_http_client(Arc::new(http_client));
+
         let window_options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(
-                size(px(1120.), px(760.)),
-                cx,
-            )),
+            window_bounds: Some(WindowBounds::centered(size(px(1120.), px(760.)), cx)),
             ..Default::default()
         };
 
         // open_window 会把视图包进 kit 的 Root，弹层/对话框/菜单才有宿主。
-        gpui_kit::open_window(window_options, cx, |window, cx| {
-            cx.new(|cx| SearchPage::new(window, cx))
+        // 客户端在闭包外 clone 一次：open_window 的构造闭包是 FnMut，会被多次调用。
+        let client_for_window = Arc::clone(&client);
+        gpui_kit::open_window(window_options, cx, move |window, cx| {
+            let client = Arc::clone(&client_for_window);
+            cx.new(|cx| SearchPage::new(window, cx, client))
         })
         .expect("打开主窗口失败");
     });

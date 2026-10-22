@@ -155,6 +155,49 @@ mod credentials_tests {
 }
 
 #[cfg(test)]
+mod search_format_tests {
+    use crate::api::search::{SearchSort, format_count, strip_keyword_tags};
+
+    #[test]
+    fn strips_highlight_tags_from_titles() {
+        // 搜索接口返回的标题里带 <em class="keyword">，直接显示会把标签露出来。
+        let raw = "【官方】<em class=\"keyword\">原神</em>新PV发布";
+        assert_eq!(strip_keyword_tags(raw), "【官方】原神新PV发布");
+    }
+
+    #[test]
+    fn leaves_plain_title_untouched() {
+        assert_eq!(strip_keyword_tags("普通标题"), "普通标题");
+    }
+
+    #[test]
+    fn counts_under_ten_thousand_stay_plain() {
+        assert_eq!(format_count(0), "0");
+        assert_eq!(format_count(9999), "9999");
+    }
+
+    #[test]
+    fn ten_thousand_boundary_collapses_to_one_wan() {
+        assert_eq!(format_count(10_000), "1万");
+        assert_eq!(format_count(15_000), "1.5万");
+        assert_eq!(format_count(12_345), "1.23万");
+    }
+
+    #[test]
+    fn hundred_millions_use_yi_unit() {
+        assert_eq!(format_count(100_000_000), "1亿");
+        assert_eq!(format_count(123_456_789), "1.23亿");
+    }
+
+    #[test]
+    fn sort_labels_are_chinese() {
+        assert_eq!(SearchSort::Comprehensive.label(), "综合");
+        assert_eq!(SearchSort::PlayCount.label(), "播放量");
+        assert_eq!(SearchSort::PublishDate.label(), "最新");
+    }
+}
+
+#[cfg(test)]
 mod scaffold_tests {
     use crate::VERSION;
 

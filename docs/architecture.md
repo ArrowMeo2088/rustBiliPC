@@ -24,7 +24,7 @@ Bilibili 桌面客户端（Windows x64），功能顺序 **搜索 → 个人 →
 | API | `bpi-rs = "0.3.1"`，`default-features = false` + 6 个 feature | 关掉 `full` 的 27 个模块，只开 login/search/video/user/fav/historytoview |
 | 异步 | 自建 tokio runtime（`src/app.rs`） | gpui 执行器不是 tokio，reqwest 需要 reactor |
 | 编译配置 | **release**，`lto = "off"`、`strip = false`、`debug = true` | 见下节 |
-| 依赖锁定 | **提交 `Cargo.lock`**，CI 用 `--locked` | 挡住 gpui-pre 每周快照的破坏性变更 |
+| 依赖锁定 | **提交 `Cargo.lock`** 作为版本种子，CI **不加** `--locked` | 挡住 gpui-pre 每周快照的破坏性变更；本机无 cargo，加 `--locked` 会让任何新增依赖直接卡死 CI |
 
 ### 为什么必须 release
 
@@ -52,12 +52,13 @@ release 分支（`build.rs` 里 `#[cfg(not(debug_assertions))] compile_shaders()
 
 ```
 src/
-├── main.rs            启动序列：logger → runtime → with_assets → init → theme → open_window
+├── main.rs            启动序列：logger → runtime → with_assets → init → theme → set_http_client → 开窗
 ├── lib.rs             模块树 + VERSION
 ├── app.rs             tokio runtime（OnceLock）、exe_dir()/data_dir()
 ├── theme.rs           全局主题覆盖：accent = #FB7299，accent_foreground = #1F1F1F
 ├── api/
 │   ├── mod.rs         spawn_on_api_runtime()：gpui ↔ tokio 的调用桥
+│   ├── search.rs      搜索封装：DTO（SearchHit/PageInfo）+ 标签清洗 + 播放量格式化
 │   └── stream_select.rs  DASH 选择纯函数（HEVC 优先、画质档封顶 116）
 ├── store/
 │   └── credentials.rs 明文 JSON 凭据落盘（<exe>/data/cookies.json）
@@ -67,7 +68,7 @@ src/
 ├── pages/
 │   └── search/        阶段一页面（view.rs 为根视图）
 ├── ui/
-│   └── video_card.rs  卡片视图 + 骨架期假数据
+│   └── video_card.rs  卡片视图（封面走 gpui URI 图片加载 + 时长角标）
 └── tests/             单元测试集中地（纯逻辑）
 ```
 
@@ -82,13 +83,19 @@ src/
 
 ### 4.1 异步调用桥
 
-`cx.spawn(client.search().video(..))` 会 panic（no reactor running）。规定写法：
+`cx.spawn(client.search().video(..))` 会 panic（no reactor running）。规定写法（与
+`ref/gpui-kit/crates/component/src/carousel/state.rs:1004` 同款）：
 
 ```rust
-let join = crate::api::spawn_on_api_runtime(async move { client.search().video(params).await });
-cx.spawn(async move |_, cx| {
-    let result = join.await;              // await JoinHandle 不需要 reactor
-    cx.update(|_, cx| { /* 写回页面状态 */ }).ok();
+let join = crate::api::search::search_videos(Arc::clone(&self.client), keyword, page, sort);
+cx.spawn(async move |this, cx| {
+    let outcome = join.await;                       // await JoinHandle 不需要 reactor
+    if let Some(this) = this.upgrade() {
+        let _ = this.update(cx, |this, cx| {
+            /* 写回状态 */
+            cx.notify();
+        });
+    }
 });
 ```
 
@@ -117,12 +124,26 @@ cx.spawn(async move |_, cx| {
 读回时构造 `Account` 交给 `BpiClient::set_account`。四字段（DedeUserID/SESSDATA/bili_jct/buvid3）
 必须齐全，缺 `buvid3` 会被判定不完整。
 
+### 4.5 网络封面图（不自己写下载器）
+
+gpui 0.3.9 的 `ImageAssetLoader`（`src/elements/img.rs:619-656`）对 `Resource::Uri` 会走
+`App::http_client()` 抓字节、解码、缓存，并在 `img(source)` 的 `From<&str/String/SharedString>`
+里自动判定"是 URI 还是嵌入式资源"（`is_uri` 用 `url::Url::parse`）。所以：
+
+- 展示封面 = `img(url).size_full().object_fit(ObjectFit::Cover)`，下载/去重/缓存都不用我们写。
+- **前提**：gpui 默认的 HttpClient 是 `NullHttpClient`（`src/app.rs:183` 直接构造），
+  不装真客户端时所有网络图片静默失败。启动时必须
+  `cx.set_http_client(Arc::new(reqwest_client::ReqwestClient::user_agent("rustbilipc")?))`，
+  依赖用 `gpui-pre-reqwest-client =0.3.9`（与 kit 同一快照，避免多份 gpui）。
+- 封面 CDN（`*.hdslb.com`）是公开域，不需要 Referer；这点与**播放用的 m4s 直链不同**，后者必须带头。
+- `cover_url` 为空时画占位块而不是提交空 URI，避免必然失败的请求刷日志。
+
 ## 5. 阶段进度
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | P0 | 依赖骨架、release CI、空窗口 + 中文输入框 + 假数据列表、`api/store/player` 纯逻辑层 | **完成**（run 39787252294 全绿） |
-| P1 | 搜索接线：`search().video()`、结果转换（剥 `<em>`）、封面网络图 + 缓存、虚拟列表、分页 | 未开始 |
+| P1 | 搜索接线：`search().video()`、结果转换（剥 `<em>`）、封面网络图（gpui 原生 URI 加载）、分页/排序 | 进行中 |
 | P2 | 个人：扫码登录（`qr_generate`/`qr_poll` 轮询 + `qrcode` 自绘）、凭据读写与失效处理、我的信息/收藏/历史 | 未开始 |
 | P3 | 详情：`video().detail()`、多 P、tags/related、字幕列表 | 未开始 |
 | P4 | 播放：拉起 mpv、管道 IPC 读写、换清晰度（`loadfile` + `audio-remove`/`audio-add`）、`sub-add` | 未开始 |
@@ -135,7 +156,7 @@ cx.spawn(async move |_, cx| {
 | 1 | release 需要 `fxc.exe`（gpui `build.rs` 找不到就 panic） | **已解除**：CI 探测到 Windows SDK 的 fxc 并设 `GPUI_FXC_PATH`，该步通过 |
 | 2 | `rustls 0.23` 默认 provider 拉 `aws-lc-sys`，MSVC 需 CMake + NASM | **已解除**：CI 的 `choco install nasm` 成功，aws-lc 编译通过 |
 | 3 | 构建内有两份 reqwest（kit 的 `gpui-pre-reqwest 0.12.15` + bpi-rs 的 `0.13.5`） | 只影响编译时长，不动 |
-| 4 | gpui-pre 快照每周变动、API 破坏性 | lock 入库 + `--locked`；升级要连带检查 kit 的 pin |
+| 4 | gpui-pre 快照每周变动、API 破坏性 | lock 入库作种子 + `=0.3.9` 精确 pin；升级要连带检查 kit 的 pin |
 | 5 | gpui Windows 侧 `WindowDecorations::Client` 是空实现、不支持原生锚定弹窗、无托盘 API | 依赖 kit 组件自绘弹层；托盘如需，自调 `Shell_NotifyIconW` |
 | 6 | 无 Mica/Acrylic 等价物（Bili.Copilot 的观感依赖它） | 用实色底近似，不追求一致 |
 | 7 | mpv 对 DASH/fmp4 双流 seek 无任何文档 | P4 实测；失败备选：合并下载后本地播放 |
@@ -156,7 +177,8 @@ cx.spawn(async move |_, cx| {
   远快于预估的 25–45 分钟（不 LTO + 不 strip 省下的）。
 - 唯一失败点是我们自己的代码：5 个错误、两类原因，见第 2 节"参考仓库 ≠ 我们在用的版本"。
 - `Cargo.lock`（881 个包；`gpui-pre 0.3.9` / `gpui-pre-windows 0.3.9` / `gpui-kit 0.8.0` /
-  `bpi-rs 0.3.1`）已由 CI 的 `cargo-lock` artifact 产出并入库，之后 CI 一律走 `--locked`。
+  `bpi-rs 0.3.1`）已由 CI 的 `cargo-lock` artifact 产出并入库；P1 起改为**不加 `--locked`**
+  （新增依赖时本机无法刷新 lock，加了必卡），lock 只作版本种子，每轮从 artifact 取回更新。
 - **缓存教训**：`actions/cache` 在 post 步骤写盘，首轮失败时 post 不执行 → 缓存从未保存，
   第二轮仍是全量重编（>9 分钟）。已给该步骤加 `save-always: true`，并把 key 收窄为只按
   `Cargo.lock` 哈希（原先混入 workflow 与 Cargo.toml，改一行 CI 就整体失效）。
