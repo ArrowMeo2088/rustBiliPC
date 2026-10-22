@@ -176,7 +176,7 @@ gpui 0.3.9 的 `ImageAssetLoader`（`src/elements/img.rs:619-656`）对 `Resourc
 | --- | --- | --- |
 | P0 | 依赖骨架、release CI、空窗口 + 中文输入框 + 假数据列表、`api/store/player` 纯逻辑层 | **完成**（run 39787252294 全绿） |
 | P1 | 搜索接线：`search().video()`、结果转换（剥 `<em>`）、封面网络图（gpui 原生 URI 加载）、分页/排序 | 代码与 CI 均完成（run 39795360593）；**验证并入登录之后**（定稿不做免登录搜索） |
-| P2a | 登录：扫码（取码/轮询/过期重载）+ 凭据落盘 + 启动判定 + 登录后进主界面 | 代码完成，待真机验证 |
+| P2a | 登录：扫码（取码/轮询/过期重载）+ 凭据落盘 + 启动判定 + 登录后进主界面 | 编译通过（run 39802276345，28 个测试全绿），待真机验证 |
 | P2b | 个人：我的信息 / 收藏 / 历史 入口与页面 | 未开始 |
 | P3 | 详情：`video().detail()`、多 P、tags/related、字幕列表 | 未开始 |
 | P4 | 播放：拉起 mpv、管道 IPC 读写、换清晰度（`loadfile` + `audio-remove`/`audio-add`）、`sub-add` | 未开始 |
@@ -198,7 +198,9 @@ gpui 0.3.9 的 `ImageAssetLoader`（`src/elements/img.rs:619-656`）对 `Resourc
 ## 7. 维护规则
 
 - 每个目录都有 `README.md`；改了这个目录的东西，就改它的 README，并更新本文相应小节，然后提交 git。
-- 代码注释写"为什么"，不写"是什么"：尤其是上面 4.x 的机制，注释与本文互为索引。
+- **注释是硬要求**（项目规定，覆盖 Agent 默认的"少写注释"取向）：每个模块文件头用 `//!` 写清职责与
+  定稿理由，`pub` 项用 `///`；机制、坑、被否决的方案必须写明，并尽量带上证据（参考仓库的文件行号或
+  CI run 号）。注释解释"为什么"，不复述代码在做什么。
 - 测试只覆盖纯逻辑（`src/tests/`）。UI 与网络的验证方式是：CI 产物在真机上跑起来看。
 - 快速开发阶段不设 clippy/rustfmt 门禁，不追求零 warning；但编译必须无 error。
 
@@ -244,3 +246,12 @@ gpui 0.3.9 的 `ImageAssetLoader`（`src/elements/img.rs:619-656`）对 `Resourc
   `ERROR unable to get cursor position: 拒绝访问。(0x80070005)`——来自
   `gpui_windows/src/window.rs:693-703` 的 `GetCursorPos`，它用 `.log_err()` 记录后照常返回，
   不影响功能；之前那条 a11y INFO 同理。看到别当报错排查。
+
+### 第五轮（run 39802276345）：登录功能一次通过
+
+- 全步骤 success，一次过、零返工；`cargo test --release` **28 passed / 0 failed**
+  （P0 的 15 + 搜索格式化 6 + 登录 5 + 二维码 2）。
+- 缓存命中后从触发到结束 **7 分 11 秒**（15:10:17 → 15:17:28），这是后续迭代的常态耗时。
+- lock 再次从 artifact 取回入库：新增 `qrcode-generator` 及其两个依赖（`atomic-write-file`、
+  `nix`），881 → 887 个包。
+- 产物按新约定放在 `publish/rustbilipc.exe`（约 32.0 MB），artifact zip 根目录同样直接是 exe。
