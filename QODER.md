@@ -57,6 +57,8 @@
   不为它做清理；**不要**再引入第三个 HTTP 客户端。
 - `Cargo.lock` **已入库**（881 个包，由首轮 CI 的 `cargo-lock` artifact 取回），CI 走 `--locked`；
   改依赖后必须重新取回 lock 一起提交，否则 CI 会因 lock 与 Cargo.toml 不一致而失败。
+- CI 缓存步骤必须 `save-always: true` 且 key 只按 `Cargo.lock` 哈希：否则一次失败构建既不写缓存
+  又让下一次全量重编（已踩，见 docs/architecture.md 第 8 节）。
 - 不要在前台长时间轮询 CI：用后台轮询或短探测，以日志证据为准。
 
 ## 6. 输出与文档

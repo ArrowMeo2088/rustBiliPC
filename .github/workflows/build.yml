@@ -52,10 +52,13 @@ jobs:
             "fxc.exe 未找到；gpui 的 build.rs 会自行搜索，若失败请检查 Windows SDK"
           }
 
-      # 不用 rust-action 内置缓存，改为显式 actions/cache 精确控制路径；key 按 profile 分。
+      # 不用 rust-action 内置缓存，改为显式 actions/cache 精确控制路径。
+      # key 只按 Cargo.lock：把 workflow/Cargo.toml 也混进 hash 会导致改一行 CI 就缓存全失效。
+      # save-always 必需：首轮失败时 post 步骤不执行，缓存没写盘，下一次又得全量重编。
       - name: Cache cargo home and target
         uses: actions/cache@v4
         with:
+          save-always: true
           path: |
             ~/.cargo/registry
             ~/.cargo/git
@@ -63,7 +66,7 @@ jobs:
             C:/Users/runneradmin/.cargo/registry
             C:/Users/runneradmin/.cargo/git
             target
-          key: cargo-win-${{ runner.os }}-release-${{ hashFiles('**/Cargo.lock', '**/Cargo.toml', '.github/workflows/build.yml') }}
+          key: cargo-win-${{ runner.os }}-release-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
             cargo-win-${{ runner.os }}-release-
 
