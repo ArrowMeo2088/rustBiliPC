@@ -31,8 +31,18 @@ pub struct RootView {
 impl RootView {
     /// 依据本机凭据决定初始阶段。
     pub fn new(window: &mut Window, cx: &mut Context<Self>, client: Arc<bpi_rs::BpiClient>) -> Self {
-        match SavedCredential::load().filter(|credential| credential.is_complete()) {
+        // 分开记两件事：文件能不能读，和读到的内容够不够格当凭据（缺 buvid3 就不合格）。
+        let saved = SavedCredential::load();
+        log::debug!(
+            "启动判定：凭据文件 {:?}（可读={}，字段完整={:?}）",
+            SavedCredential::path(),
+            saved.is_some(),
+            saved.as_ref().map(|credential| credential.is_complete())
+        );
+
+        match saved.filter(|credential| credential.is_complete()) {
             Some(credential) => {
+                log::info!("启动判定：本机已有凭据，直接进入主界面 mid={}", credential.dede_user_id);
                 if let Err(error) = client.set_account(credential.to_account()) {
                     // 凭据可能已失效；不致命，后续接口会用错误码提示重新登录。
                     log::warn!("复用已保存的登录态失败: {error}");
@@ -46,6 +56,7 @@ impl RootView {
                 }
             }
             None => {
+                log::info!("启动判定：无有效凭据，进入扫码登录页");
                 let login = cx.new(|cx| LoginPage::new(Arc::clone(&client), cx));
                 let subscription =
                     cx.subscribe_in(&login, window, |this, _login, _event: &LoginSucceeded, window, cx| {

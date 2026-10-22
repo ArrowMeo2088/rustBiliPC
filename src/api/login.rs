@@ -89,8 +89,16 @@ pub fn credential_from_cookies(cookies: &[(String, String)], refresh_token: &str
 
 /// 申请一张新的登录二维码。
 pub fn fetch_qr(client: Arc<BpiClient>) -> tokio::task::JoinHandle<BpiResult<QrSession>> {
+    log::debug!("提交 qr_generate 到 API runtime");
     spawn_on_api_runtime(async move {
+        let started = std::time::Instant::now();
+        log::debug!("tokio 任务开始执行 qr_generate");
         let data = client.login().qr_generate().await?;
+        log::debug!(
+            "qr_generate 返回，用时 {:?}，key 长度 {}",
+            started.elapsed(),
+            data.qrcode_key.len()
+        );
         Ok(QrSession {
             url: data.url,
             qrcode_key: data.qrcode_key,
@@ -100,9 +108,17 @@ pub fn fetch_qr(client: Arc<BpiClient>) -> tokio::task::JoinHandle<BpiResult<QrS
 
 /// 轮询一次扫码状态。
 pub fn poll_qr(client: Arc<BpiClient>, qrcode_key: String) -> tokio::task::JoinHandle<BpiResult<QrPollState>> {
+    log::debug!("提交 qr_poll 到 API runtime");
     spawn_on_api_runtime(async move {
+        let started = std::time::Instant::now();
         let params = bpi_rs::login::LoginQrPollParams::new(qrcode_key)?;
         let data = client.login().qr_poll(params).await?;
+        log::debug!(
+            "qr_poll 返回 code={} cookie 数={} 用时={:?}",
+            data.code,
+            data.cookies.len(),
+            started.elapsed()
+        );
         Ok(QrPollState::from_code(
             data.code,
             data.message,

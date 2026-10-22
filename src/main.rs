@@ -1,7 +1,7 @@
 //! rustBiliPC 启动入口。
 //!
 //! 启动顺序是有讲究的，别随意调换：
-//! 1. 日志 —— gpui 与 bpi-rs 都用 `log`，没有 logger 时启动失败只会静默退出。
+//! 1. 日志 —— 写 `<exe 目录>/debug.log`（每次启动清空，级别 debug），见 [`rustbilipc::logging`]。
 //! 2. tokio runtime + rustls 默认 provider —— 见 [`rustbilipc::app`] 的说明：API 调用依赖前者，
 //!    没有后者任何 HTTPS 请求都会在握手处 panic（表现是界面一直停在加载态）。
 //! 3. `with_assets` —— kit 的图标/字体资源，必须在 `init` 之前挂上。
@@ -15,6 +15,7 @@ use std::sync::Arc;
 
 use gpui_kit::*;
 use rustbilipc::app;
+use rustbilipc::logging;
 use rustbilipc::pages::RootView;
 use rustbilipc::theme;
 
@@ -22,7 +23,14 @@ use rustbilipc::theme;
 const HTTP_CLIENT_NAME: &str = "rustbilipc";
 
 fn main() {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+    // 日志必须第一个装：GUI 程序没有控制台，出问题时全靠 `<exe 目录>/debug.log`。
+    let log_path = logging::init();
+    log::info!(
+        "rustBiliPC v{} 启动，工作目录 {:?}",
+        rustbilipc::VERSION,
+        crate::app::exe_dir()
+    );
+    log::info!("日志文件 {:?}", log_path);
 
     // 提前建好 API 用的 runtime，避免第一次网络请求时才初始化带来的不确定性。
     app::runtime();
@@ -34,6 +42,7 @@ fn main() {
     let client = Arc::new(
         bpi_rs::BpiClient::new().expect("初始化 BpiClient 失败，请检查网络与系统时间"),
     );
+    log::info!("BpiClient 就绪");
 
     // Assets 是 gpui-kit 自带的 rust-embed 资源（Lucide 图标等）。
     // 将来要加载我们自己的图片/字体时，改成 `Assets::before(Assets)` 的组合形式。

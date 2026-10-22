@@ -69,7 +69,8 @@ release 分支（`build.rs` 里 `#[cfg(not(debug_assertions))] compile_shaders()
 src/
 ├── main.rs            启动序列：logger → runtime → with_assets → init → theme → set_http_client → 开窗
 ├── lib.rs             模块树 + VERSION
-├── app.rs             tokio runtime（OnceLock）、exe_dir()/data_dir()
+├── app.rs             tokio runtime（OnceLock）、install_tls_provider()、describe_join_error()、exe_dir()/data_dir()
+├── logging.rs         debug.log 文件日志（每次启动清空、Debug 级、零依赖、同时写 stderr）
 ├── theme.rs           全局主题覆盖：accent = #FB7299，accent_foreground = #1F1F1F
 ├── api/
 │   ├── mod.rs         spawn_on_api_runtime()：gpui ↔ tokio 的调用桥
@@ -189,6 +190,26 @@ bpi-rs 的 builder 默认 `no_proxy = true`、`timeout = 10s`、`connect_timeout
 "Could not automatically determine a process-level default crypto provider"。
 修法是启动时 `app::install_tls_provider()` 显式装 `aws-lc-rs`（它已随 CI 的 NASM 编好）；
 `install_default` 只能装一次，重复装返回 Err 时降级为 warn。
+
+**第七轮之后的新事实**：装好 provider 后请求确实发出去了（用户 Wireshark 抓到包），但界面仍停在
+加载态且没有错误文案 —— 说明"结果回到 UI"这一跳丢了。为把它拆开看，加了 `debug.log`（第 4.8 节）
+与登录页心跳；同时排除了两个猜测：`gpui::Task` 的 `Drop` 不取消任务
+（`gpui-pre-scheduler/src/executor.rs:402` 起没有 `Drop` impl，也没设 `cancel_on_drop`），
+bpi-rs 内部没有 `block_on`/跨 await 的 `std Mutex`。
+
+### 4.8 日志：debug.log 是唯一可依赖的现场
+
+GUI 程序双击启动时没有控制台，`stderr` 一律看不见，所以 `src/logging.rs` 自实现 `log::Log`：
+
+- 路径 `<exe 目录>/debug.log`，**每次启动 `File::create` 清空重写**，级别 `Debug`；
+- 每行 `HH:MM:SS.mmm LEVEL target: message`，写完立即 `flush`（崩溃也不丢最后几行）；
+- 同时把同一行复制到 stderr，便于从命令行启动时直接看；
+- 零新依赖（原来的 `env_logger` 已移除）。
+
+约定：**异步链路的每一跳都要有日志**，否则无法区分"没发出/没回来/回来了但没写进界面"：
+api 层在提交前、tokio 任务内请求前后（带 `Instant` 耗时与返回码）各一条；视图层在 `await` 前后、
+`upgrade()` 失败、`update()` 闭包内部各一条。登录页还带一个 2 秒一次、共 10 次的心跳，
+用来单独回答"前台执行器还在不被唤醒"这个问题。界面上会显示日志文件路径。
 
 ## 5. 阶段进度
 

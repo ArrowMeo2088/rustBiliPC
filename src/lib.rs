@@ -12,6 +12,7 @@
 
 pub mod api;
 pub mod app;
+pub mod logging;
 pub mod pages;
 pub mod player;
 pub mod store;

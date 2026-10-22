@@ -180,11 +180,15 @@ pub fn search_videos(
     page: u32,
     sort: SearchSort,
 ) -> tokio::task::JoinHandle<BpiResult<SearchOutcome>> {
+    log::debug!("提交 video 搜索到 API runtime：page={page}");
     spawn_on_api_runtime(async move {
+        let started = std::time::Instant::now();
         let params = SearchVideoParams::new(keyword)?
             .with_order(sort.to_order())
             .with_page(page)?;
         let data = client.search().video(params).await?;
+        let hits = data.result.as_ref().map_or(0, Vec::len);
+        log::debug!("搜索返回 {hits} 条，用时 {:?}", started.elapsed());
         Ok(to_outcome(data))
     })
 }

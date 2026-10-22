@@ -7,8 +7,9 @@ Rust crate 根目录（crate 名 `rustbilipc`）。职责划分与维护契约�
 
 | 路径 | 职责 | 备注 |
 | --- | --- | --- |
-| `main.rs` | 启动序列 | logger → tokio runtime → `with_assets` → `gpui_kit::init` → 主题 → **`set_http_client`** → 开窗，顺序有意义 |
+| `main.rs` | 启动序列 | **`logging::init()`** → tokio runtime → TLS provider → `BpiClient` → `with_assets` → `gpui_kit::init` → 主题 → `set_http_client` → 开窗，顺序有意义 |
 | `lib.rs` | 模块树 + `VERSION` | 逻辑都收敛在 lib crate 里便于 `cargo test` |
+| `logging.rs` | 文件日志 | `<exe 目录>/debug.log`，每次启动清空、级别 Debug、每行 flush，同时复制到 stderr；自实现 `log::Log`，零依赖 |
 | `app.rs` | 进程级基础设施 | 全局 tokio runtime（`OnceLock`）、`install_tls_provider()`（rustls 双 provider 会 panic）、`describe_join_error()`（把任务 panic 变成可读文案）、`exe_dir()`/`data_dir()` |
 | `theme.rs` | 全局主题覆盖 | accent `#FB7299`，强调色前景改深色（对比度不足 4.5:1） |
 | `api/` | bpi-rs 封装 + DASH 选择 | `spawn_on_api_runtime` 是唯一的 gpui↔tokio 桥；`login.rs`（取码/轮询 + 码值翻译 + cookie→凭据）、`search.rs` 出 DTO（`SearchHit`/`PageInfo`/`SearchSort`），bpi 类型不外泄；`stream_select` 是纯函数 |
@@ -30,6 +31,10 @@ Rust crate 根目录（crate 名 `rustbilipc`）。职责划分与维护契约�
 
 修改本目录任何代码时，同步更新本 README、`docs/architecture.md` 相应小节，并提交 git。
 注释写"为什么"（机制、坑、定稿理由），不写"是什么"。
+
+**异步链路的每一跳都要写日志**（`debug.log`，见 `logging.rs`）：api 层在提交前与 tokio 任务内
+请求前后各一条（带耗时与返回码），视图层在 `await` 前后、`upgrade()` 失败、`update()` 闭包内各一条。
+GUI 程序没有控制台，只有落盘的日志能区分"没发出 / 没回来 / 回来了但没写进界面"。
 
 **写 gpui/kit 调用前先确认该写法在已发布版本里存在**：`ref/gpui-kit/examples/` 用的是 kit 本地
 main，比 crates.io 的 0.8.0 新。已踩过两条：没有 `v_flex()`/`h_flex()` 自由函数（用

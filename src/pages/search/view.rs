@@ -111,38 +111,45 @@ impl SearchPage {
 
         let client = Arc::clone(&self.client);
         let join = search::search_videos(client, keyword, page, sort);
+        log::debug!("搜索页：等待搜索结果");
 
         // 请求在 tokio 上跑，回到 gpui 时用 kit 自身的写法：upgrade 后 update。
         cx.spawn(async move |this, cx| {
             let outcome = match join.await {
-                Ok(inner) => inner.map_err(|error| error.to_string()),
+                Ok(inner) => {
+                    log::debug!("搜索页：结果已回到前台执行器");
+                    inner.map_err(|error| error.to_string())
+                }
                 Err(join_error) => Err(crate::app::describe_join_error(join_error)),
             };
-            if let Some(this) = this.upgrade() {
-                let _ = this.update(cx, |this, cx| {
-                    this.loading = false;
-                    match outcome {
-                        Ok(outcome) => {
-                            this.info = outcome.info.clone();
-                            this.cards = video_card::cards_from(outcome.hits);
-                            this.feedback = if this.cards.is_empty() {
-                                "没有匹配的结果".into()
-                            } else {
-                                format!(
-                                    "共 {} 条，第 {}/{} 页",
-                                    this.info.num_results, this.info.page, this.info.num_pages
-                                )
-                                .into()
-                            };
-                        }
-                        Err(message) => {
-                            this.cards.clear();
-                            this.feedback = format!("搜索失败: {message}").into();
-                        }
+            let Some(this) = this.upgrade() else {
+                log::warn!("搜索页：等待期间实体已释放，丢弃结果");
+                return;
+            };
+            let _ = this.update(cx, |this, cx| {
+                this.loading = false;
+                match outcome {
+                    Ok(outcome) => {
+                        this.info = outcome.info.clone();
+                        this.cards = video_card::cards_from(outcome.hits);
+                        this.feedback = if this.cards.is_empty() {
+                            "没有匹配的结果".into()
+                        } else {
+                            format!(
+                                "共 {} 条，第 {}/{} 页",
+                                this.info.num_results, this.info.page, this.info.num_pages
+                            )
+                            .into()
+                        };
                     }
-                    cx.notify();
-                });
-            }
+                    Err(message) => {
+                        this.cards.clear();
+                        this.feedback = format!("搜索失败: {message}").into();
+                    }
+                }
+                log::debug!("搜索页：状态已写入，卡片 {} 张", this.cards.len());
+                cx.notify();
+            });
         });
     }
 

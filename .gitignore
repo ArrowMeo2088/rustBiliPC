@@ -9,6 +9,10 @@
 /publish/data/
 cookies.json
 
+# 运行期日志（exe 同目录 debug.log）
+/debug.log
+/publish/debug.log
+
 # 参考代码、编译产物、资源文件（按项目规则不入库；排除内容而非目录，便于保留 README）
 /ref/*
 /publish/*

@@ -53,7 +53,23 @@ impl LoginPage {
             finished: false,
         };
         this.refresh_qr(cx);
+        // 诊断用心跳：证明"gpui 前台任务被后台事件重新唤醒"这条链路本身是通的。
+        // 如果 debug.log 里有心跳却没有请求结果，问题在 JoinHandle 的唤醒；两者都没有，
+        // 说明前台执行器根本没被再次调度。
+        this.start_heartbeat(cx);
         this
+    }
+
+    /// 每 2 秒记一行，共 10 次；不显示任何界面内容。
+    fn start_heartbeat(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |_this, cx| {
+            for tick in 1..=10u8 {
+                cx.background_executor()
+                    .timer(Duration::from_millis(2000))
+                    .await;
+                log::debug!("登录页心跳 {tick}/10（前台执行器仍在跑）");
+            }
+        });
     }
 
     /// 申请新二维码（初次进入、过期重载、手动刷新都走这里）。
@@ -69,13 +85,18 @@ impl LoginPage {
 
         let join = login::fetch_qr(Arc::clone(&self.client));
         cx.spawn(async move |this, cx| {
+            log::debug!("登录页：开始等待 qr_generate 的结果");
             match join.await {
                 Ok(Ok(session)) => {
+                    log::debug!("登录页：qr_generate 成功，URL 长度 {}", session.url.len());
                     if let Some(this) = this.upgrade() {
                         let _ = this.update(cx, |this, cx| this.on_qr_received(session, cx));
+                    } else {
+                        log::warn!("登录页：等待期间实体已释放，丢弃二维码结果");
                     }
                 }
                 Ok(Err(error)) => {
+                    log::warn!("登录页：qr_generate 返回接口错误: {error}");
                     if let Some(this) = this.upgrade() {
                         let _ = this.update(cx, |this, cx| {
                             this.status = format!("获取二维码失败: {error}").into();
@@ -100,6 +121,9 @@ impl LoginPage {
 
     /// 拿到二维码后：编码、显示、启动轮询。
     fn on_qr_received(&mut self, session: QrSession, cx: &mut Context<Self>) {
+        // 这行日志是"update() 真的执行了"的证据；若上一条"qr_generate 成功"有、这条没有，
+        // 说明实体虽存在但状态写入被拒。
+        log::debug!("登录页：进入 on_qr_received，开始编码二维码");
         self.matrix = qr::matrix_for(&session.url);
         self.status = if self.matrix.is_empty() {
             "二维码生成失败，请点下方按钮重试".into()
@@ -116,10 +140,12 @@ impl LoginPage {
     fn start_polling(&mut self, session: QrSession, cx: &mut Context<Self>) {
         let client = Arc::clone(&self.client);
         let key = session.qrcode_key;
+        log::debug!("登录页：启动扫码轮询循环");
 
         cx.spawn(async move |this, cx| {
             loop {
                 cx.background_executor().timer(POLL_INTERVAL).await;
+                log::debug!("登录页：发起一轮 qr_poll");
 
                 let join = login::poll_qr(Arc::clone(&client), key.clone());
                 let state = match join.await {
@@ -204,6 +230,7 @@ impl LoginPage {
             return;
         }
         self.finished = true;
+        log::info!("登录成功，写入凭据 mid={}", credential.dede_user_id);
 
         if let Err(error) = credential.save() {
             // 写盘失败不影响本次使用，只是下次启动还要重新扫码。
@@ -250,6 +277,12 @@ impl Render for LoginPage {
                 Button::new("refresh-qr")
                     .label("重新获取二维码")
                     .on_click(cx.listener(|this, _, _window, cx| this.refresh_qr(cx))),
+            )
+            // 出问题时用户能直接找到日志。
+            .child(
+                div()
+                    .text_xs()
+                    .child(format!("日志：{}", crate::logging::log_path().display())),
             )
     }
 }
