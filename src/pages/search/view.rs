@@ -116,7 +116,7 @@ impl SearchPage {
         cx.spawn(async move |this, cx| {
             let outcome = match join.await {
                 Ok(inner) => inner.map_err(|error| error.to_string()),
-                Err(join_error) => Err(format!("请求任务异常终止: {join_error}")),
+                Err(join_error) => Err(crate::app::describe_join_error(join_error)),
             };
             if let Some(this) = this.upgrade() {
                 let _ = this.update(cx, |this, cx| {

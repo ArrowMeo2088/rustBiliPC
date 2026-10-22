@@ -28,6 +28,49 @@ pub fn runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
+/// 显式安装 rustls 的进程级默认 crypto provider。
+///
+/// 必须做，否则**任何 HTTPS 请求都会在 TLS 握手处 panic**：这张依赖图里
+/// `rustls 0.23` 同时启用了 `aws-lc-rs`（reqwest 的默认 provider）与 `ring`
+/// （首轮 CI 的 Cargo.lock 里两者都在），rustls 无法自行二选一，会抛
+/// "Could not automatically determine a process-level default crypto provider"。
+/// panic 发生在 tokio 任务里，表现为 `JoinHandle` 返回 Err，界面就停在加载态。
+///
+/// 选 `aws-lc-rs`：它已经在依赖图里编译好了（CI 为此装了 NASM），换 `ring` 不会更省事。
+/// `install_default` 只允许装一次，重复调用返回 Err，这里降级成一条 warn。
+pub fn install_tls_provider() {
+    match rustls::crypto::aws_lc_rs::default_provider().install_default() {
+        Ok(()) => log::debug!("已安装 rustls 默认 provider: aws-lc-rs"),
+        Err(error) => log::warn!("rustls 默认 provider 已存在，跳过: {error}"),
+    }
+}
+
+/// 把 `JoinHandle` 的错误翻译成能给人看的一句话。
+///
+/// 关键在 `is_panic()` 分支：任务 panic 时 `JoinError` 的 `Display` 只有
+/// "task panicked: ..."，真正的现场在 panic payload 里，必须 `try_into_panic()`
+/// 下来再 downcast 才能拿到（bpi-rs/rustls 的 panic 消息就是靠这个暴露的）。
+pub fn describe_join_error(error: tokio::task::JoinError) -> String {
+    if error.is_panic() {
+        let payload = error
+            .try_into_panic()
+            .ok()
+            .and_then(|panic| {
+                panic
+                    .downcast_ref::<String>()
+                    .cloned()
+                    .or_else(|| panic.downcast_ref::<&str>().map(|text| (*text).to_string()))
+            });
+
+        match payload {
+            Some(message) => format!("请求任务 panic: {message}"),
+            None => "请求任务 panic（未提供消息）".to_string(),
+        }
+    } else {
+        format!("请求任务被取消: {error}")
+    }
+}
+
 /// 可执行文件所在目录。凭据与配置要"保存到运行同目录"，一切路径以它为根。
 ///
 /// 拿不到 `current_exe` 时退回当前工作目录，不 panic——这只在异常启动方式下发生。

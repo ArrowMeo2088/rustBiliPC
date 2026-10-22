@@ -84,7 +84,15 @@ impl LoginPage {
                     }
                 }
                 Err(join_error) => {
-                    log::error!("二维码请求任务异常: {join_error}");
+                    // 任务 panic 会每次都一样地失败，必须显示出来，否则界面永远停在"正在获取"。
+                    let message = crate::app::describe_join_error(join_error);
+                    log::error!("二维码请求任务异常: {message}");
+                    if let Some(this) = this.upgrade() {
+                        let _ = this.update(cx, |this, cx| {
+                            this.status = message.into();
+                            cx.notify();
+                        });
+                    }
                 }
             }
         });
@@ -122,8 +130,16 @@ impl LoginPage {
                         continue;
                     }
                     Err(join_error) => {
-                        log::error!("扫码轮询任务异常: {join_error}");
-                        continue;
+                        // panic 类错误重试也不会变好，直接停止本轮并显示，避免"无限轮询"假象。
+                        let message = crate::app::describe_join_error(join_error);
+                        log::error!("扫码轮询任务异常: {message}");
+                        if let Some(view) = this.upgrade() {
+                            let _ = view.update(cx, |view, cx| {
+                                view.status = message.into();
+                                cx.notify();
+                            });
+                        }
+                        return;
                     }
                 };
 

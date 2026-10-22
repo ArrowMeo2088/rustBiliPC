@@ -170,6 +170,24 @@ gpui 0.3.9 的 `ImageAssetLoader`（`src/elements/img.rs:619-656`）对 `Resourc
 - 码值翻译与 cookie→凭据是纯函数（`api/login.rs` 的 `QrPollState::from_code` /
   `credential_from_cookies`），单测覆盖——真机登录时才碰得到的分支，先在 CI 里锁住。
 
+### 4.7 异步任务的失败必须可见（真机教训）
+
+真机上出现过"界面一直停在正在获取二维码/搜索中"，但没有错误文案。定位路径：
+bpi-rs 的 builder 默认 `no_proxy = true`、`timeout = 10s`、`connect_timeout = 10s`
+（`src/client.rs:113-115`），**网络再差也会在 10 秒内回一个 `BpiError`**。既然界面停在加载态，
+说明结果根本没回到 gpui 侧 —— 唯一会这样的是 tokio 任务 **panic**：`join.await` 返回
+`Err(JoinError)`，而我们的分支只写了 `log`。
+
+规则：`cx.spawn` 里的 `JoinHandle` 错误**必须同时写日志和上界面**。`src/app.rs::describe_join_error`
+用 `is_panic()` + `try_into_panic()` + downcast 把 panic payload 取出来，因为 `JoinError` 的
+`Display` 不含现场信息。
+
+已定位的最可能 panic 源：这张依赖图里 `rustls 0.23` 同时启用了 `aws-lc-rs` 与 `ring`
+（首轮 Cargo.lock 里两者都在），未装进程级默认 crypto provider 时 TLS 握手会抛
+"Could not automatically determine a process-level default crypto provider"。
+修法是启动时 `app::install_tls_provider()` 显式装 `aws-lc-rs`（它已随 CI 的 NASM 编好）；
+`install_default` 只能装一次，重复装返回 Err 时降级为 warn。
+
 ## 5. 阶段进度
 
 | 阶段 | 内容 | 状态 |
@@ -194,6 +212,7 @@ gpui 0.3.9 的 `ImageAssetLoader`（`src/elements/img.rs:619-656`）对 `Resourc
 | 6 | 无 Mica/Acrylic 等价物（Bili.Copilot 的观感依赖它） | 用实色底近似，不追求一致 |
 | 7 | mpv 对 DASH/fmp4 双流 seek 无任何文档 | P4 实测；失败备选：合并下载后本地播放 |
 | 8 | 1080P 需登录、HDR/4K/8K 需大会员 | 按 `accept_quality` 降级 + `requires_vip` 提示 |
+| 9 | rustls 同时启用 aws-lc-rs 与 ring → 未装默认 provider 时 TLS 握手 panic（症状：加载态永不结束） | 启动时 `app::install_tls_provider()`；所有 `JoinHandle` 错误都上界面（第 4.7 节） |
 
 ## 7. 维护规则
 

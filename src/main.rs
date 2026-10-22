@@ -2,7 +2,8 @@
 //!
 //! 启动顺序是有讲究的，别随意调换：
 //! 1. 日志 —— gpui 与 bpi-rs 都用 `log`，没有 logger 时启动失败只会静默退出。
-//! 2. tokio runtime —— 见 [`rustbilipc::app`] 的说明，API 调用依赖它。
+//! 2. tokio runtime + rustls 默认 provider —— 见 [`rustbilipc::app`] 的说明：API 调用依赖前者，
+//!    没有后者任何 HTTPS 请求都会在握手处 panic（表现是界面一直停在加载态）。
 //! 3. `with_assets` —— kit 的图标/字体资源，必须在 `init` 之前挂上。
 //! 4. `gpui_kit::init` → 主题覆盖 → **装 HttpClient** → 开窗。
 //!
@@ -25,6 +26,8 @@ fn main() {
 
     // 提前建好 API 用的 runtime，避免第一次网络请求时才初始化带来的不确定性。
     app::runtime();
+    // 必须在任何 HTTPS 请求之前装好 rustls 的默认 provider，否则握手处 panic。
+    app::install_tls_provider();
 
     // 客户端是 Send+Sync 的（内部 reqwest::Client + Mutex<Option<Account>> + WBI 缓存），
     // 用 Arc 在 gpui 与 tokio 两侧共享同一份 cookie jar 与 WBI key 缓存。

@@ -13,6 +13,10 @@
 - 客户端对象：`BpiClient::builder()...build()?` / `BpiClient::new()`（`src/client.rs:282-291`），
   内部持有 `reqwest::Client`、cookie jar、`Mutex<Option<Account>>`、WBI key 缓存。
   可以长期放在应用状态里复用。
+- **builder 默认值**（`src/client.rs:112-126`）：`timeout = 10s`、`connect_timeout = 10s`、
+  **`no_proxy = true`**（默认不吃系统/环境变量代理，所以本机 7887 代理与 B 站请求互不干扰），
+  并自带 `DEFAULT_USER_AGENT / REFERER / ORIGIN`。结论：请求不会无限挂着——界面若停在加载态，
+  应先怀疑 tokio 任务 panic（见 architecture.md 第 4.7 节）。
 - `set_account(&self, Account) -> Result<(), BpiError>`（`src/client.rs:294`）会走
   `Account::validate_complete`：DedeUserID / SESSDATA / bili_jct / **buvid3** 四者缺一不可。
 

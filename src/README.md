@@ -9,7 +9,7 @@ Rust crate 根目录（crate 名 `rustbilipc`）。职责划分与维护契约�
 | --- | --- | --- |
 | `main.rs` | 启动序列 | logger → tokio runtime → `with_assets` → `gpui_kit::init` → 主题 → **`set_http_client`** → 开窗，顺序有意义 |
 | `lib.rs` | 模块树 + `VERSION` | 逻辑都收敛在 lib crate 里便于 `cargo test` |
-| `app.rs` | 进程级基础设施 | 全局 tokio runtime（`OnceLock`）、`exe_dir()`/`data_dir()` |
+| `app.rs` | 进程级基础设施 | 全局 tokio runtime（`OnceLock`）、`install_tls_provider()`（rustls 双 provider 会 panic）、`describe_join_error()`（把任务 panic 变成可读文案）、`exe_dir()`/`data_dir()` |
 | `theme.rs` | 全局主题覆盖 | accent `#FB7299`，强调色前景改深色（对比度不足 4.5:1） |
 | `api/` | bpi-rs 封装 + DASH 选择 | `spawn_on_api_runtime` 是唯一的 gpui↔tokio 桥；`login.rs`（取码/轮询 + 码值翻译 + cookie→凭据）、`search.rs` 出 DTO（`SearchHit`/`PageInfo`/`SearchSort`），bpi 类型不外泄；`stream_select` 是纯函数 |
 | `store/` | 落盘 | `credentials.rs` 明文 JSON，见文件头的风险说明 |
