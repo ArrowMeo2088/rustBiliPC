@@ -7,8 +7,8 @@
 
 | 目录 | 是什么 | 怎么用 | 关键结论落在 |
 | --- | --- | --- | --- |
-| `zed/` | gpui 家族 crate 的**未发布主干**快照（gpui / gpui_platform / gpui_windows / gpui_wgpu / gpui_shared_string / gpui_tokio / gpui_util） | **只读，不能当依赖**：`gpui_platform` 在 crates.io 上 404，且 API 比我们在用的 0.3.9 更新，直接照抄示例会漂移 | architecture.md 第 2 节（debug 着色器路径的证据来自这里） |
-| `gpui-kit/` | gpui-kit 0.8.0 全 workspace（**我们在用的框架**，依赖 `gpui-pre =0.3.9`） | 主要 API 参照：`crates/kit/Cargo.toml`（features）、`crates/component/src/theme/*`、`examples/*/src/main.rs` | architecture.md 第 3/4 节 |
+| `gpui/` | **我们真正依赖的 gpui 0.3.9 源码**（`gpui` / `gpui_platform` / `gpui_windows` / `gpui_util` / `gpui_shared_string` / `gpui_tokio`） | 读渲染、IME、文本、图片加载的实现；核对某 API 是否存在于 0.3.9。来源与取舍见 [gpui/README.md](gpui/README.md) | architecture.md 第 2/4 节 |
+| `gpui-kit/` | gpui-kit 0.8.0 全 workspace（**我们在用的框架**，依赖 `gpui-pre =0.3.9`） | 组件与主题 API 参照；**注意它的 `examples/` 是本地 main，比已发布版本新，照抄会踩不存在的 API** | architecture.md 第 2/3/4 节 |
 | `Ely-GPUI-Components/` | Ely 组件库（同为 `gpui-pre =0.3.9`，`publish=false` 只能 git 依赖） | 只读参考：它的 `AGENTS.md` 有大量 gpui 实战坑（hover/focus/动画/Taffy 折叠），排查布局问题时优先查这里 | 不引入依赖 |
 | `bpi-rs/` | Bilibili API 封装 0.3.1（**我们在用的接口层**） | 已核实签名与字段 | api-notes.md 第 1-6 节 |
 | `mpv/` | mpv 源码 + `DOCS/man` | 只查选项与 IPC 文档 | api-notes.md 第 7 节 |
@@ -21,7 +21,8 @@
   `named_pipe` 0.4.1、`qrcode` 0.14.1、`image` 0.25.10。
 - `gpui_windows` / `gpui_platform` / `gpui_tokio` / `sum_tree` / `collections` **不在 crates.io 上**
   （gpui-pre 的重发布分别叫 `gpui-pre-windows` / `gpui-pre-platform` / …，`gpui-pre-tokio` 不存在，
-  所以 tokio 桥要自己写）。
+  所以 tokio 桥要自己写）。`ref/gpui/gpui_tokio` 是从 Zed 仓库 `93d7456` 单文件取来的，
+  不是发布版内容。
 - `gpui-pre-0.3.9.crate` 包内**不含**平台实现（只有跨平台部分 + `examples/`），Windows 后端在
   `gpui-pre-windows-0.3.9` 里，两者要一起下载才看得全。
 

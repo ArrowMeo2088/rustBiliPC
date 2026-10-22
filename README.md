@@ -30,7 +30,7 @@ rustBiliPC/
 │   └── ui/              复用组件（视频卡片）
 ├── publish/             编译产物（不入库）
 ├── test/                单元测试布局说明（代码在 src/tests/）
-├── ref/                 参考仓库：zed/gpui-kit/Ely/bpi-rs/mpv/Bili.Copilot（不入库）
+├── ref/                 参考源码：gpui(0.3.9)/gpui-kit/Ely/bpi-rs/mpv/Bili.Copilot（不入库）
 ├── docs/                architecture.md、api-notes.md
 ├── res/                 资源文件（不入库）
 ├── Cargo.toml           依赖与 profile 配置

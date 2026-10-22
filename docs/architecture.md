@@ -20,7 +20,7 @@ Bilibili 桌面客户端（Windows x64），功能顺序 **搜索 → 个人 →
 | --- | --- | --- |
 | UI 框架 | `gpui-kit = "0.8.0"`（umbrella，`default = ["component","assets"]`） | 60+ 组件、Lucide 图标、JSON 主题令牌；实测默认 features **不含 webview** |
 | gpui 实际版本 | `gpui-pre = "=0.3.9"`（Zed@93d7456 的重发布快照），由 kit 携带精确 pin | 0.2.2 与 0.3.x 的 `App/Window/Entity` 类型互不兼容，不能混 |
-| 放弃 | `ref/gpui-component`（0.2.2）、Ely、`ref/zed` 作依赖 | 分别因为：拉 tree-sitter + `lb-wry`（WebView2）；`publish=false` 只能 git 依赖 + Rust 1.95；是 0.3.9 之后的未发布主干 |
+| 放弃 | `ref/gpui-component`（0.2.2）与 Ely 作依赖 | 分别因为：拉 tree-sitter + `lb-wry`（WebView2）且与 0.3.9 类型不兼容；`publish=false` 只能 git 依赖 + Rust 1.95 |
 | API | `bpi-rs = "0.3.1"`，`default-features = false` + 6 个 feature | 关掉 `full` 的 27 个模块，只开 login/search/video/user/fav/historytoview |
 | 异步 | 自建 tokio runtime（`src/app.rs`） | gpui 执行器不是 tokio，reqwest 需要 reactor |
 | 编译配置 | **release**，`lto = "off"`、`strip = false`、`debug = true` | 见下节 |
@@ -52,8 +52,14 @@ release 分支（`build.rs` 里 `#[cfg(not(debug_assertions))] compile_shaders()
 - 反过来，`Styled` / `StyledImage`（`.object_fit()`）确实由 `gpui_kit::*` 的 glob 提供，
   **不要**再为它们加显式导入：第三轮 CI 里 `video_card.rs` 无额外导入就编译通过了。
 
-规则：拿不准的调用，先在 `ref/gpui-kit/crates/{base,component}/src` 里找到**同版本已发布代码**
-中的真实用法（而不是 examples），或干脆看 CI 日志里 rustc 的建议。
+规则：拿不准的调用，先按下面的顺序核对，再动手（一轮冷 CI 约 6–14 分钟，猜错就要重跑）：
+
+1. `ref/gpui/<crate>/src` —— 我们真正依赖的 gpui 0.3.9 发布源码（渲染、元素、`Styled`/`StyledImage`、
+   `ImageAssetLoader`、`.hlsl` 都在这里）。
+2. `ref/gpui-kit/crates/{base,component}/src` —— 组件层真实用法（**看 src，不看 examples**）。
+3. 需要更精确时直接下发布包核对：`curl -L https://static.crates.io/crates/<name>/<name>-<ver>.crate`
+   （已用过这招确认 `ButtonVariants` trait 与 `gpui-pre-windows` 的着色器分支）。
+4. 都拿不到就等 CI 日志里 rustc 的建议。
 
 ## 3. 模块布局
 

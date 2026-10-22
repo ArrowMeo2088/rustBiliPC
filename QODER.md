@@ -40,7 +40,9 @@
   老组件库）会经 `lb-wry` 拖进 WebView2，且它的类型与 `gpui-pre 0.3.9` 不兼容 —— 已弃用，别引。
 - gpui 版本：只用 `gpui-kit` umbrella，应用侧不单独声明 gpui；pin 由 kit 的 `=0.3.9` + 我们的
   `Cargo.lock` 共同保证。升级 gpui-pre 快照要连带检查 kit/Ely 的 pin 是否同步。
-- `ref/zed` 是 0.3.9 **之后**的未发布主干，只读参考，不能当依赖，也不能照抄它的示例。
+- gpui 源码参照放在 `ref/gpui/`，是**我们依赖的 0.3.9 发布版**（含 `gpui_windows` 与三个 `.hlsl`）；
+  `ref/gpui-kit/examples/` 是 kit 本地 main，比已发布版本新，照抄前先在 `ref/gpui` 或
+  crates.io 发布包里确认该 API 存在。
 - 画质：HEVC 优先 + **默认封顶 1080P（qn ≤ 116）**，不选 4K/HDR/8K（目标机 i5-6200U 硬解不到）。
 - 播放：**外置 mpv 独立进程 + 独立窗口**，不做 `--wid` 嵌入，不自研解码渲染。
 - 凭据：明文 JSON 存 `<exe 同目录>/data/cookies.json`（用户知情选择）。要改加密只动
