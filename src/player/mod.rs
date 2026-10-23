@@ -19,6 +19,16 @@
 //! 因此换清晰度时用 `loadfile` + `audio-add` 复用同一实例是安全的；
 //! 反过来，**URL 必须和这套头一起给出**，否则 403。
 //!
+//! ## 为什么头是用逗号拼成一个参数
+//!
+//! `--http-header-fields` 是 string list（`stream/network.c:37` 的 `OPT_STRINGLIST`），
+//! mpv 用 `,` 切分参数（`options/m_option.c:1403-1440` 的 `separate_input_param` 配合
+//! `m_option.h:644` 的 `OPTION_LIST_SEPARATOR`），而**在命令行上重复给同一个列表选项
+//! 是"替换"而非"追加"**（默认操作 `OP_NONE` 直接 `VAL(dst) = res`）。
+//! 所以多条头必须拼成一次给出，别写两个 `--http-header-fields`。
+//! 副作用是值里不能出现裸逗号——已对着现场凭据核过：四个 cookie 字段（含 222 字符的
+//! `SESSDATA`）都不含逗号与空格，所以拼起来不会被切坏。
+//!
 //! ## 为什么必须带 Referer
 //!
 //! B 站的 m4s 直链校验 Referer。bpi-rs 自己请求时会加，但它不外发这份头，

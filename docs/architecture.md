@@ -398,6 +398,12 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 - **换清晰度现在是"重开一个实例"**（P4a 的临时做法）：重新 playurl + 重新 `launch`，
   代价是窗口回到开头。等命名管道 IPC 通了改成同实例 `loadfile` + `audio-remove`/`audio-add`。
   先把按钮做出来是有意义的：它能立刻暴露"哪个档位其实取不到流"这类真机问题。
+- **多条头只能拼成一个逗号分隔的参数**：`--http-header-fields` 是 string list 选项，
+  mpv 按 `,` 切分（`ref/mpv/options/m_option.c:1403-1440` + `m_option.h:644`），
+  而**命令行上重复给同一个列表选项是"替换"不是"追加"**（默认 `OP_NONE` 直接
+  `VAL(dst) = res`）。所以 `build_arguments` 把 `Referer` 与 `Cookie` 用 `,` 连起来一次给出；
+  代价是值里不能有裸逗号——对着现场凭据核过，四个 cookie 字段（含 222 字符的 `SESSDATA`）
+  都不含逗号与空格，拼接是安全的。
 - **结果只认最近一次点击的 cid**：`planning_cid` 守卫——用户点了 P3 又点 P5，
   P3 的地址回来时直接丢，否则会起一个播错分 P 的窗口。
 
@@ -406,11 +412,11 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | P0 | 依赖骨架、release CI、空窗口 + 中文输入框 + 假数据列表、`api/store/player` 纯逻辑层 | **完成**（run 39787252294 全绿） |
-| P1 | 搜索接线：`search().video()`、结果转换（剥 `<em>`）、封面网络图（gpui 原生 URI 加载）、分页/排序 | 代码与 CI 均完成；真机确认列表/分页可用，**但封面一直是空的**——第十六轮按日志找到真因（协议相对地址被当成内置资源，第 4.5 节）并修好，待下一轮真机复看 |
+| P1 | 搜索接线：`search().video()`、结果转换（剥 `<em>`）、封面网络图（gpui 原生 URI 加载）、分页/排序 | **完成**（第十六轮找到封面真因——协议相对地址被当成内置资源，第 4.5 节——修好后真机确认列表/分页/封面都正常） |
 | P2a | 登录：扫码（取码/轮询/过期重载）+ 凭据落盘 + 启动判定 + 登录后进主界面 | **完成**（第十一轮产物真机扫码登录通过，凭据已写出） |
 | P2b | 个人：我的信息 / 收藏 / 历史 入口与页面 | **完成**（第十五轮产物真机通过；外壳 + 懒加载 + 三路并发，第 4.11 节） |
-| P3 | 详情：`video().view()`、多 P、tags/related、字幕列表 | 代码与 CI 均完成（第十七轮 37 passed，机制见第 4.12 节），待真机复验；发布时间/分区按用户决定**不做**（live 类型里没有这俩字段） |
-| P4a | 起播：playurl 取地址 + 选流 + 拉起外置 mpv（不遥控） | 代码完成（机制见第 4.13 节），待编译与真机复验 |
+| P3 | 详情：`video().view()`、多 P、tags/related、字幕列表 | **完成**（第十七轮产物真机通过；机制见第 4.12 节。发布时间/分区按用户决定**不做**——live 的 `VideoView` 没有这两个字段） |
+| P4a | 起播：playurl 取地址 + 选流 + 拉起外置 mpv（不遥控） | 代码与 CI 均完成（第十八轮 41 passed、零 warning，机制见第 4.13 节），待真机复验 |
 | P4b | 遥控：管道 IPC 读写、进度/暂停观测、同实例换清晰度、`sub-add`、备用域名换用 | 未开始（`player/ipc.rs` 只有命令构造与管道命名） |
 | P5 | 打磨：详情页覆盖式布局、骨架屏、快捷键、续播进度 | 未开始 |
 
@@ -599,3 +605,31 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 
 - **待真机验证**（P2b）：外壳两个入口、"我的"第一次点下去才发那三个请求、资料头与收藏夹/历史
   能出内容、三块各自的错误位是否显示得下 B 站少字段造成的 `BpiError::parse`。
+
+### 第十八轮（run 39903211796，commit `c48b048`）：P4a 起播一轮通过
+
+- **41 passed / 0 failed**（第三十七→四十一：`playback_tests` 三条 + 新增的
+  `single_file_playback_adds_no_audio_argument`），**零 Rust warning**（`grep warning` 只剩
+  Actions 自己的 node 弃用提示），产物 33,349,632 字节（md5 `1b50ce45…`），
+  `Cargo.lock` 与库内零差异（这一轮没加依赖，`which 8.0.6` 早在上一轮的 lock 里就解析好了）。
+- 整轮 2 分 45 秒。**编译这么快是可信的**：日志里 `Compiling bpi-rs v0.3.1`（约 18 秒）与
+  `Compiling rustbilipc v0.1.0`（约 23 秒）都在，`Finished` 那句写的是 42.52 秒，
+  而 exe 比第十七轮大 24 万字节——不是"缓存空跑出的旧产物"。
+  （依赖图本身全命中缓存，所以只重编这两个 crate。）
+- 写代码前用 vendored 源码把新用到的接口逐条核过，是这轮一次过的原因：
+  `VideoPlayUrlParams` 的 setter 名与参数类型、`DashStream/DurlInfo/SupportFormat/
+  PlayUrlResponseData` 的字段名与类型、`Bvid::new(impl Into<String>)`、
+  `BpiError::unsupported_response(impl Into<String>)`、`impl IntoElement for SharedString`
+  （`gpui/src/elements/text.rs:378`）。
+- 顺手补上一条 mpv 的机制证据（写进了第 4.13 节）：`--http-header-fields` 是
+  `OPT_STRINGLIST`（`stream/network.c:37`），列表选项按**逗号**切分
+  （`options/m_option.c:1403-1440` 的 `separate_input_param` + `m_option.h:644` 的
+  `OPTION_LIST_SEPARATOR ','`），而**重复给同一个列表选项是"替换"不是"追加"**
+  （`parse_str_list_impl` 默认 `OP_NONE` 走 `VAL(dst) = res`）。
+  所以多条头必须拼成一个逗号分隔的参数——我们现在的写法是对的；
+  反过来说，cookie 值里一旦出现裸逗号就会被切成两条坏头。对着现场凭据核过：
+  四个 cookie 字段都不含逗号与空格（含 222 字符的 `SESSDATA`），拼接安全。
+- **待真机验证**（P4a）：详情页点"播放选中分P"能不能拉起 mpv 并出声（DASH 双流走
+  `--audio-file`）；`player_note` 打出的档位/编码是 `hev1/hvc1` 还是 `avc1/av01`
+  （风险表 #14：Skylake 无 AV1 硬解）；换清晰度时"旧窗口收掉、新窗口起来"是否符合预期；
+  返回上一页或关窗口后 mpv 是否真的没了（风险：还有声音就是 `Drop` 没生效）。
