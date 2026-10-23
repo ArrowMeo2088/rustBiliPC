@@ -28,7 +28,11 @@ bpi-rs = { version = "0.3.1", default-features = false, features = [
 
 # bpi-rs 基于 reqwest，poll 其 future 必须在有 tokio reactor 的环境里进行；
 # gpui 的执行器不是 tokio，所以我们在 src/app.rs 里自建 runtime 并做桥接。
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+# "net" 只为 `tokio::net::windows::named_pipe`（mpv 的 IPC 管道客户端，见 player/ipc.rs）：
+# 它把 Windows 命名管道要求的 overlapped I/O 封在 `try_read`/`try_write`/`ready` 里，
+# 同一任务内可同时读写同一条管道——mpv 文档明确说客户端自己得用 overlapped I/O
+# （ref/mpv/DOCS/man/ipc.rst:69-73），自己拿 std 的同步句柄做这件事容易死锁。
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync", "net"] }
 
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

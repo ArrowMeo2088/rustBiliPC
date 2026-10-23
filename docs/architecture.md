@@ -87,8 +87,9 @@ src/
 ├── store/
 │   └── credentials.rs 明文 JSON 凭据落盘（<exe>/data/cookies.json）+ cookie_header() 给 mpv
 ├── player/
-│   ├── mod.rs         mpv 参数构造 + launch() 拉起进程 + Referer/UA 常量 + PATH 查找
-│   └── ipc.rs         mpv JSON IPC 的命令构造（纯数据，管道 I/O 在 P4b）
+│   ├── mod.rs         mpv 参数构造（一律 `--opt=value`）+ launch() 拉起进程 + Referer/UA 常量 + 运行目录定位
+│   ├── ipc.rs         mpv 命名管道：命令构造 + tokio 客户端的读写任务（一行一条 minified JSON）
+│   └── state.rs       把 `property-change` 折成播放状态（纯数据，可单测）
 ├── pages/
 │   ├── mod.rs         页面层出口 + 共用导航事件 `OpenVideo`（三个页面发同一个信号）
 │   ├── root.rs        窗口根视图：无凭据→登录页，有凭据→主界面外壳；登录成功后原地切换
@@ -163,14 +164,18 @@ cx.spawn(async move |this, cx| {
 - **mpv 的位置：`<exe 同目录>/mpv.exe`（不走 PATH）**。PATH 上 `PATHEXT` 先命中 `mpv.com`，
   那是控制台版启动器，会再派生一个 mpv.exe：我们 `kill` 的只是外层，真正的播放器脱管。
   懒人包（mpv-lazy）还带自己的 `portable_config` 和单实例管道，更不可控。
-- **mpv 的 stderr 逐行进 `debug.log`（前缀 `mpv:`）**：GUI 进程没有控制台，mpv 又是
-  "参数写错就静默退出"的程序。第十八轮整轮都在猜，就是因为现场一行 mpv 的输出都没落下。
-  读线程只读不 join（等它 = 等 mpv 退出）。
+- **不接 mpv 的文本输出**（用户定稿，2026-10-23）：`launch()` 把 stdout 与 stderr 都设 `null()`。
+  播放状态一律以 IPC 为准，日志里再抄一份 mpv 自己的话没有意义；而且 `piped()` 之后没人抽水会
+  **把 mpv 的写阻塞住**，那是更坏的沉默。要查 mpv 为什么不动，就在本机把同一套参数复跑一遍——
+  第十八轮那条 `--opt value` 致命错误就是这样定位的。
+  顺带记一条源码事实：**mpv 的消息默认写 stdout**，只有 `force_stderr` 才走 stderr
+  （`ref/mpv/common/msg.c:190-202` 的 `term_msg_fileno`；本机实测一次失败的打开，
+  stdout 613 字节、stderr 0 字节）。所以"只接 stderr"其实等于什么都没接。
 - 控制走命名管道 `\\.\pipe\rustbilipc-<pid>-<序号>`，JSON 行协议 + `observe_property`；
-  连接断开即视为 mpv 已退出。**这条还没接上**：P4a 只拉起进程、不读写管道（第 4.13 节），
-  `player/ipc.rs` 目前只有命令构造与管道命名。管道名带序号是因为 mpv 用
-  `PIPE_UNLIMITED_INSTANCES`（`ref/mpv/input/ipc-win.c:387`）建管道，同名不报错，
-  于是"刚 kill 掉的上一个实例"可能还在听同一条管道。
+  连接断开即视为 mpv 已退出。**P4b-1 已接上**（第 4.14 节）：进度/时长/暂停/缓冲/结束从这条管道读，
+  暂停、±10 秒、`quit` 从这条管道写。**还没做**的是同实例换清晰度与 `sub-add`（P4b-2）。
+  管道名带序号是因为 mpv 用 `PIPE_UNLIMITED_INSTANCES`（`ref/mpv/input/ipc-win.c:387`）建管道，
+  同名不报错，于是"刚 kill 掉的上一个实例"可能还在听同一条管道——我们的命令会发给错的窗口。
 - `--no-config` 隔离用户自己的 `mpv.conf`，避免别人的 `vo`/`hwdec` 设置干扰。
 - **参数表里只放所有构建都存在的选项**：`--no-ytdl` 看着很合理（我们给的是解析好的直链，不需要
   URL 提取器，还能少一句没用的 `youtube-dl failed` 噪音），但 `{"ytdl", …}` 整块在
@@ -395,7 +400,7 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | 段 | 文件 | 只管 |
 | --- | --- | --- |
 | 取地址、选流 | `src/api/stream.rs` | playurl 请求参数、DASH/durl 两条路、清晰度中文档 |
-| 拼参数、开进程 | `src/player/mod.rs` 的 `launch()` | 定位 `mpv.exe`（运行同目录）、请求头、管道名、`CREATE_NO_WINDOW`、把 mpv 的 stderr 搬进日志 |
+| 拼参数、开进程 | `src/player/mod.rs` 的 `launch()` | 定位 `mpv.exe`（运行同目录）、请求头、管道名、`CREATE_NO_WINDOW`、stdout/stderr 一律 `null()`（第 4.3 节） |
 | 发起、显示状态、收进程 | `src/pages/detail/view.rs` 的播放块 | 按钮/清晰度/`player_note`、`Child` 的生命周期 |
 
 - **fnval 是 `16 | 2048`（DASH + AV1）**：**没有单独的 HEVC 位**——开了 DASH 之后
@@ -418,9 +423,11 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 - **mpv 走运行目录、不走 PATH**：`mpv_path()` = `<exe 同目录>/mpv.exe`（真机定稿，见第 4.3 节）。
   找不到就在 `player_note` 与日志里写明**该放哪儿的哪个文件名**，不 panic、不静默；
   搜索页底部状态行也把这个路径显示出来，省一轮来回问。
-- **起播"没窗口"先看 `debug.log` 里的 `mpv:` 行**：第十八轮的教训是——playurl 成功、
-  `已拉起 mpv（pid …）`也写了，进程却在我们看不见的地方 fatal 退出，现场一句 mpv 输出都没有。
-  现在 stderr 逐行进日志，`--opt value` 那类写法会直接被 mpv 自己喊出来。
+- **起播"没窗口"靠本机复跑那条命令行定位，不靠 mpv 的文本日志**：第十八轮的现场是 playurl 成功、
+  `已拉起 mpv（pid …）`也写了，却查不到进程为什么秒退。当时加过一版"stderr 逐行进日志"，
+  后来按用户定稿撤掉了（第 4.3 节：**不接文本输出，状态一律走 IPC**），而且 mpv 的消息默认写
+  **stdout**（`common/msg.c:190-202`），只接 stderr 等于什么都没接。
+  留住的手法是：拿真 mpv 在本机把同一套参数跑一遍，让它自己把 `Exiting... (Fatal error)` 喊出来。
 - **换清晰度现在是"重开一个实例"**（P4a 的临时做法）：重新 playurl + 重新 `launch`，
   代价是窗口回到开头。等命名管道 IPC 通了改成同实例 `loadfile` + `audio-remove`/`audio-add`。
   先把按钮做出来是有意义的：它能立刻暴露"哪个档位其实取不到流"这类真机问题。
@@ -433,6 +440,43 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 - **结果只认最近一次点击的 cid**：`planning_cid` 守卫——用户点了 P3 又点 P5，
   P3 的地址回来时直接丢，否则会起一个播错分 P 的窗口。
 
+### 4.14 遥控（P4b-1）：连上 mpv 的命名管道，状态只信它报回来的
+
+范围：**订阅属性 + 显示进度 + 暂停/±10 秒/quit + 断连检测**。同实例换清晰度与 `sub-add` 是 P4b-2。
+
+- **一条连接同时负责读与写**：`observe_property` 的注册是按连接算的，连接一断注册即失效
+  （`ref/mpv/DOCS/man/ipc.rst:280-289` 的 warning，还专门说"用两次 socat 分别收发"会看起来不工作）。
+  所以订阅、命令、事件全走这同一条管道，并且这条连接必须一直开着。
+- **为什么用 tokio 而不是 std**：mpv 文档明说 Windows 上的客户端要"同时读写这条管道"必须用
+  overlapped I/O（`DOCS/man/ipc.rst:69-73`）。std 的同步句柄做不到——同一个句柄上阻塞读会把写
+  一起挡住。`tokio::net::windows::named_pipe` 的 `try_read`/`try_write`/`ready` **都取 `&self`**，
+  所以一个任务里就能读写交错，overlapped 的细节在 tokio 内部处理。为此 tokio 加了 `net` feature
+  （`mio`/`socket2`/`windows-sys` 本来就在依赖图里，Cargo.lock 没动）。
+- **pump 任务的形状**（`player::ipc::pump`）：一个循环，`select!` 同时等
+  "管道可读" 与 "界面塞了新命令"；读到的字节攒进 `incoming` 按 `\n` 切行、逐行 `parse_line`，
+  待发的字节攒进 `pending` 用 `try_write` 抽干（一次写不完就下轮接着写）。
+  没待发时**故意只等 `READABLE`**：连着等 `WRITABLE` 会被"一直可写"叫醒空转。
+- **建连要重试**：mpv 建管道晚于我们 `spawn()` 返回，`ClientOptions::open`（底层 `CreateFileW`）
+  在服务端还没实例时**立即返回错误**而不是阻塞，所以重试 40 次 ×120 ms；超时就是 mpv 没起来，
+  界面直接显示"连上 mpv 管道失败：试了 40 次仍连不上 …"。
+- **状态只信 mpv**（`player/state.rs`）：按暂停时**不**本地翻转 `paused`，
+  等 `property-change` 回来再改——本地猜一次，命令失败时就留下一个和实际不符的按钮。
+  `time-pos`/`duration` 可能是 `null`（流还没载入），所以一律 `Option`，没进度就写 `--:--`，
+  **不编一个 `00:00` 出来**（"还没开始"与"从 0 秒开始"是两件事）；只有位置没有时长时也不硬造总长。
+  进度文案的口径放在 `player/state.rs`（`PlayState::progress_text`/`mode_text`/`line`），
+  和"api 层直接产出中文读法"（`format_count`、`duration_text`）是同一个取向：
+  **格式化规则集中一处，页面只做装配**，否则每个页面都会各自写一遍 `--:--` 的判空。
+- **命令失败必须看得见**：回包 `{"error":…}` 里非 `success` 的会进 `last_error`，直接拼在进度行后面。
+  mpv 的文本输出我们不接（第 4.3 节），所以这条是唯一能告诉用户"你那一下没生效"的通道。
+- **`Closed` 就当 mpv 已经走了**：放下 `Child` 与链路。留着句柄最坏的情况是——用户自己关了 mpv 窗口，
+  pid 被系统复用，我们 `Drop` 里那句 `kill` 会打到别人的进程上。
+- **`loadfile` 的回复早于真正切完文件**（`DOCS/man/input.rst:542-548`：替换当前文件的 `loadfile`
+  会在当前文件还没停、新文件还没开始加载时就返回），所以**不能拿它的回包判断"流开没开成"**；
+  P4b-2 的备用地址换用要靠 `idle-active`/`eof-reached` 这类属性，或者 `file-loaded` 事件。
+- 属性名与命令形状都对着源码核过：`time-pos`/`eof-reached`/`paused-for-cache`/`idle-active` 在
+  `ref/mpv/player/command.c:4708-4743`，`seek <target> [relative]` 在 `input.rst:300-308`
+  （默认就是 relative，我们仍写明），`loadfile`/`audio-add` 在 `input.rst:542/767`。
+
 ## 5. 阶段进度
 
 | 阶段 | 内容 | 状态 |
@@ -442,8 +486,9 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | P2a | 登录：扫码（取码/轮询/过期重载）+ 凭据落盘 + 启动判定 + 登录后进主界面 | **完成**（第十一轮产物真机扫码登录通过，凭据已写出） |
 | P2b | 个人：我的信息 / 收藏 / 历史 入口与页面 | **完成**（第十五轮产物真机通过；外壳 + 懒加载 + 三路并发，第 4.11 节） |
 | P3 | 详情：`video().view()`、多 P、tags/related、字幕列表 | **完成**（第十七轮产物真机通过；机制见第 4.12 节。发布时间/分区按用户决定**不做**——live 的 `VideoView` 没有这两个字段） |
-| P4a | 起播：playurl 取地址 + 选流 + 拉起外置 mpv（不遥控） | 第十八轮编译通过但**真机失败**（mpv 窗口没出现，根因是 `--opt value` 写法，第 4.3 节）→ 第十九轮修好（`--opt=value` + 运行目录 mpv.exe + stderr 进日志；43 passed、零 warning），待真机复看 |
-| P4b | 遥控：管道 IPC 读写、进度/暂停观测、同实例换清晰度、`sub-add`、备用域名换用 | 未开始（`player/ipc.rs` 只有命令构造与管道命名） |
+| P4a | 起播：playurl 取地址 + 选流 + 拉起外置 mpv（不遥控） | **完成**（第十八轮真机失败：mpv 窗口没出现，根因是 `--opt value` 写法 + mpv 该从运行目录取；第十九轮修好，43 passed、零 warning，真机确认能起播出声） |
+| P4b-1 | 遥控（一）：连上命名管道、订阅属性、界面显示进度/状态、暂停、±10 秒、`quit`、断连检测 | 代码完成（机制见第 4.14 节），待编译与真机 |
+| P4b-2 | 遥控（二）：同实例换清晰度（`loadfile` + `audio-add`，保住窗口与进度）、`sub-add` 挂字幕、备用地址换用 | 未开始（命令构造已就绪，缺的是页面这一层的编排与失败判定） |
 | P5 | 打磨：详情页覆盖式布局、骨架屏、快捷键、续播进度 | 未开始 |
 
 ## 6. 已知风险与待验证
@@ -463,7 +508,8 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | 11 | 扫码成功的响应 cookie 里没有 `buvid3`，而 `Account::validate_complete` 要它 → 登录在最后一步失败 | `poll_qr` 在 `code==0` 且缺 buvid3 时调 `misc().buvid()`（`/x/frontend/finger/spi`）补一个，见第 4.10 节 |
 | 12 | 收藏/历史那几个响应结构**没有 `#[serde(default)]`**（`HistoryListData.cursor/tab/list`、`FavListDetailData.info/has_more/ttl` 等），B 站少给任何一个字段就变成 `BpiError::parse` | 症状可控：那一块显示自己的错误位而不是整页空白（第 4.11 节），日志里有原始错误文本可判断缺哪个字段 |
 | 13 | 播放直链有**时效**（URL 里的 `deadline`），放久了或跨网络就 403；`backupUrl` 也只在同一次响应里有效 | P4a 每次都现取现用（不缓存 `StreamChoice` 去起播）；真机若出现"窗口开了但黑屏"，先对照 `debug.log` 里 playurl 与 launch 的时间差。P4b 再加失败换备用域名 |
-| 14 | 目标机 i5-6200U 是 Skylake：**没有 AV1 硬解**，HEVC 只到 8bit；`--hwdec=auto` 选不到就退软解，1080P AV1 大概率丢帧 | 选流已把 HEVC 排在 AV1 之前（第 4.2 节），`player_note` 会打出实际 `codecs`；真机先看那串是 `hev1/hvc1` 还是 `avc1/av01`，再谈要不要在封顶档内偏好某一编码 |
+| 14 | 目标机 i5-6200U 是 Skylake：**没有 AV1 硬解**，HEVC 只到 8bit；`--hwdec=auto` 选不到就退软解，1080P AV1 大概率丢帧 | 选流已把 HEVC 排在 AV1 之前（第 4.2 节），`player_note` 会打出实际 `codecs`；真机先看那串是 `hev1/hvc1` 还是 `avc1/av01`，再谈要不要在封顶档内偏好某一编码。第十九轮真机报的是 `hev1.1.6.L150.90` ✅ |
+| 15 | P4b-1 第一次真机用管道遥控：界面显示"遥控未连接" | 看 `debug.log` 里 `IPC：` 那几行——连不上会打出"试了 40 次仍连不上 …（最后一次：…）"，属性与回包都有日志。最常见的原因是 mpv 秒退（参数或直链问题），此时进度行会同时留着起播那句提示 |
 
 ## 7. 维护规则
 

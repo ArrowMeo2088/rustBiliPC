@@ -51,6 +51,9 @@
   **不走 PATH**：PATH 先命中 `mpv.com`（PATHEXT 把 `.COM` 排在 `.EXE` 前），它会再派生一个
   mpv.exe，我们 `kill` 不到真正的播放器；用户装的那份还是 mpv-lazy 懒人包，带自己的
   `portable_config` 与单实例启动器。`which` 依赖因此已删除。
+- **不接 mpv 的文本输出**（用户定稿，2026-10-23）：`launch()` 把 stdout/stderr 都设 `null()`，
+  播放状态、命令成败一律走命名管道（`player/ipc.rs`）。别"顺手"改成 `piped()`：接了没人抽水，
+  缓冲区写满会把 mpv 的写阻塞住。要查 mpv 为什么不动，就在本机把同一套参数复跑一遍看它自己说什么。
 - 凭据：明文 JSON 存 `<exe 同目录>/data/cookies.json`（用户知情选择）。要改加密只动
   `src/store/credentials.rs` 的 `save`/`load`。
 - **每个 `cx.spawn` 返回的 `gpui::Task` 必须持有或 `.detach()`**：Task 被 drop 即取消任务

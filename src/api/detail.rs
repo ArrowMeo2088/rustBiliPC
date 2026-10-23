@@ -77,7 +77,7 @@ pub struct RelatedBrief {
     pub play_text: String,
 }
 
-/// 一条字幕。P3 只列出来，P4 才把 `url` 喂给 mpv 的 `sub-add`。
+/// 一条字幕。P3 只列出来，P4b-2 才把 `url` 喂给 mpv 的 `sub-add`。
 #[derive(Clone, Debug)]
 pub struct SubtitleBrief {
     /// 语言显示名（`lan_doc`）。

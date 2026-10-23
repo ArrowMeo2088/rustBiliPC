@@ -20,6 +20,20 @@
 //! [`OpenVideo`](crate::pages::OpenVideo) 事件——外壳收到就往栈里再压一层详情页，
 //! 所以"相关推荐 → 进去 → 返回"是连续的，页面自己不做导航决定。
 //!
+//! ## 遥控（P4b）
+//!
+//! 起播成功后我们**再连一条 mpv 的命名管道**（`player::ipc::open`），订阅
+//! `time-pos`/`duration`/`pause`/`eof-reached`/`idle-active`/`paused-for-cache`，
+//! 于是界面能显示进度与状态，也能发暂停、±10 s、`quit`。
+//! 三个写法上的定稿：
+//! - **状态只信 mpv**：按暂停时不本地翻转 `paused`，等 `property-change` 回来再改；
+//!   否则命令失败时按钮会和实际不符（见 `player/state.rs`）。
+//! - **一条常驻 watch 任务 + 代数守卫**：`player_generation` 每次起播加一，
+//!   旧任务发现自己被取代就直接丢事件。**不要**用 drop Task 来停旧循环（第 4.9 节）。
+//! - **管道断开就当 mpv 已经走了**：`IpcEvent::Closed` 时把 `Child` 与链路一起放下，
+//!   否则用户自己关掉 mpv 窗口之后，我们 `Drop` 里那句 `kill` 会打到别人的 pid 上
+//!   （pid 会被复用，这不是洁癖）。
+//!
 //! ## gpui 写法上的两个约束（本文件因此的样子）
 //!
 //! - 交互方法（`on_click`）只在 `Stateful<Div>` 上有，所以链式顺序固定为
@@ -35,6 +49,8 @@ use gpui_kit::*;
 use crate::api::detail::{self, PageInfo, SubtitleBrief, VideoDetailInfo};
 use crate::api::stream::{self, StreamChoice};
 use crate::pages::OpenVideo;
+use crate::player::ipc::{self, EventStream, IpcEvent, PlayerLink};
+use crate::player::state::PlayState;
 use crate::store::credentials::SavedCredential;
 use crate::ui::cover;
 use crate::ui::video_card::{self, VideoCardData};
@@ -67,6 +83,12 @@ pub struct DetailPage {
     player: Option<std::process::Child>,
     /// 正在为哪个 cid 取地址；取回来时不是它就丢掉（用户可能又点了别的 P）。
     planning_cid: Option<u64>,
+    /// 与 mpv 之间的那条命名管道（起播成功后才有）。drop 它 = 结束对面那个管道任务。
+    link: Option<PlayerLink>,
+    /// mpv 回传属性折出来的播放状态。**只信它**，不按按钮时不本地翻转。
+    state: PlayState,
+    /// 第几次起播：上一轮的 watch 任务靠它发现自己已过时（第 4.9 节的规矩：不能用 drop Task 停）。
+    player_generation: u32,
 }
 
 /// 详情页退出时必须带走自己拉起的 mpv：外壳把这一层 pop 掉（或整个窗口关掉）时，
@@ -97,6 +119,9 @@ impl DetailPage {
             player_note: "".into(),
             player: None,
             planning_cid: None,
+            link: None,
+            state: PlayState::default(),
+            player_generation: 0,
         };
         this.load(cx);
         this
@@ -244,7 +269,7 @@ impl DetailPage {
                 match outcome {
                     Ok(plan) => {
                         view.plan = Some(plan);
-                        view.start_playback();
+                        view.start_playback(cx);
                     }
                     Err(message) => {
                         view.plan = None;
@@ -257,8 +282,8 @@ impl DetailPage {
         .detach();
     }
 
-    /// 用已取到的地址拉起 mpv（独立窗口）。不 notify，调用方负责。
-    fn start_playback(&mut self) {
+    /// 用已取到的地址拉起 mpv（独立窗口）并接上遥控管道。不 notify，调用方负责。
+    fn start_playback(&mut self, cx: &mut Context<Self>) {
         let Some(plan) = self.plan.clone() else { return };
 
         // 上一次也是我们拉起的实例：先收掉，否则点几次就堆几个窗口。
@@ -278,20 +303,27 @@ impl DetailPage {
             Ok((child, pipe_name)) => {
                 let pid = child.id();
                 self.player = Some(child);
+                // 旧链路的发送端一 drop，对面那个管道任务就自己结束了（pump 里 select 到 None）。
+                self.link = None;
+                self.state = PlayState::default();
+                self.player_generation += 1;
+                let mut link = ipc::open(pipe_name.clone());
+                if let Some(events) = link.take_events() {
+                    self.watch_ipc(events, self.player_generation, cx);
+                }
+                self.link = Some(link);
+
                 let track = match (plan.is_dash, plan.audio_url.as_ref()) {
                     (true, Some(_)) => "DASH 双流",
                     (true, None) => "DASH 只有视频轨（音频接口没给流）",
                     (false, _) => "durl 单文件",
                 };
-                log::info!("详情页：mpv 管道名 {pipe_name}");
                 self.player_note = format!(
-                    "已拉起 mpv（pid {pid}）：{} · {} · {} · 备用地址 {} 个（P4b 才自动换）· mpv 自己的输出逐行进 debug.log",
-                    plan.quality_label,
-                    plan.codecs,
-                    track,
-                    plan.backup_urls.len()
+                    "已拉起 mpv（pid {pid}）：{} · {} · {} · 备用地址 {} 个（P4b-2 才自动换）",
+                    plan.quality_label, plan.codecs, track, plan.backup_urls.len()
                 )
                 .into();
+                log::info!("详情页：起播后去连遥控管道 {pipe_name}");
             }
             Err(error) => {
                 self.player_note = format!("起播失败：{error}").into();
@@ -299,15 +331,86 @@ impl DetailPage {
         }
     }
 
-    /// 播放区：起播按钮 + 状态行 + 一排清晰度。
-    fn player_block(&self, cx: &mut Context<Self>) -> AnyElement {
-        // SharedString 而不是 &str：`IntoElement` 那条实现是按 `SharedString`/`String` 来的，
-        // 借来的 &str 生命周期不保证能进元素树。
-        let status: SharedString = if self.player_note.is_empty() {
-            "还没起播。".into()
-        } else {
-            self.player_note.clone()
+    /// 收 mpv 的事件并写进状态。
+    ///
+    /// 接收端 move 进这条任务，所以一个 `PlayerLink` 只能被 watch 一次（`take_events` 的原因）。
+    /// `generation` 不匹配就什么也不做——那是上一次起播留下的任务在送旧事件。
+    fn watch_ipc(&mut self, mut events: EventStream, generation: u32, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            while let Some(event) = events.recv().await {
+                let closed = matches!(event, IpcEvent::Closed);
+                let Some(view) = this.upgrade() else {
+                    log::debug!("详情页：实体已释放，结束遥控任务");
+                    return;
+                };
+                view.update(cx, move |view, cx| {
+                    if view.player_generation != generation {
+                        log::debug!("详情页：遥控事件属于代 {generation}，已被取代，丢弃");
+                        return;
+                    }
+                    if let Some(note) = view.state.apply(event) {
+                        view.player_note = note.into();
+                    }
+                    if closed {
+                        // mpv 自己走了（用户点 X，或 quit 生效）。句柄必须放下：
+                        // pid 会被系统复用，留着它到 `Drop` 里 kill 就打的是别人的进程。
+                        view.player = None;
+                        view.link = None;
+                    }
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
+    }
+
+    /// 往 mpv 发一条命令。链路不在（或已经断了）就把原因写进状态：按钮按下去必须有反馈，
+    /// 否则用户只会觉得"这按钮没反应"。
+    fn with_link(
+        &mut self,
+        cx: &mut Context<Self>,
+        what: &'static str,
+        send: impl FnOnce(&PlayerLink) -> bool,
+    ) {
+        let sent = match self.link.as_ref() {
+            Some(link) => send(link),
+            None => false,
         };
+        if !sent {
+            self.player_note = format!("遥控没连上，{what}没发出去。").into();
+        }
+        cx.notify();
+    }
+
+    /// 暂停 / 继续。取反的是 **mpv 报回来的** `paused`，本地不翻转（见 `player/state.rs`）。
+    fn toggle_pause(&mut self, cx: &mut Context<Self>) {
+        let want = !self.state.paused;
+        let what = if want { "暂停" } else { "继续" };
+        self.with_link(cx, what, move |link| link.set_pause(want));
+    }
+
+    /// 相对跳转，秒（负数是倒退）。
+    fn nudge(&mut self, seconds: f64, cx: &mut Context<Self>) {
+        let what = if seconds >= 0.0 { "快进" } else { "倒退" };
+        self.with_link(cx, what, move |link| link.seek_by(seconds));
+    }
+
+    /// 请 mpv 自己退出（比 `kill` 干净；`Closed` 回来后我们就不再有句柄）。
+    fn quit_player(&mut self, cx: &mut Context<Self>) {
+        self.with_link(cx, "关闭播放器", |link| link.quit());
+    }
+
+    /// 播放区：起播按钮 + 状态行 + 遥控按钮一排 + 清晰度一排。
+    fn player_block(&self, cx: &mut Context<Self>) -> AnyElement {
+        // 口径都在 `player::state::PlayState::line`：连上遥控就显示 mpv 报回来的进度与状态，
+        // 没连上才退回起播那句提示（"起播失败：…"、"mpv 已退出（管道断开）"…）。
+        let note = if self.state.connected {
+            ""
+        } else {
+            self.player_note.as_str()
+        };
+        let status = SharedString::from(self.state.line(note));
+        let pause_label = if self.state.paused { "继续" } else { "暂停" };
 
         let mut block = div()
             .flex()
@@ -324,7 +427,35 @@ impl DetailPage {
                         .on_click(cx.listener(|this, _, _window, cx| this.play_selected(cx))),
                 ),
             )
-            .child(div().text_sm().child(status));
+            .child(div().text_sm().child(status))
+            // 遥控这一排在"连上管道"之前也应该在：按下去会写明"遥控没连上"，
+            // 比按钮凭空消失好排查（第十八轮的教训就是界面不给原因）。
+            .child(
+                div()
+                    .flex()
+                    .gap_1()
+                    .items_center()
+                    .child(
+                        Button::new("detail-pause")
+                            .label(pause_label)
+                            .on_click(cx.listener(|this, _, _window, cx| this.toggle_pause(cx))),
+                    )
+                    .child(
+                        Button::new("detail-back")
+                            .label("-10 秒")
+                            .on_click(cx.listener(|this, _, _window, cx| this.nudge(-10.0, cx))),
+                    )
+                    .child(
+                        Button::new("detail-forward")
+                            .label("+10 秒")
+                            .on_click(cx.listener(|this, _, _window, cx| this.nudge(10.0, cx))),
+                    )
+                    .child(
+                        Button::new("detail-quit")
+                            .label("关闭播放器")
+                            .on_click(cx.listener(|this, _, _window, cx| this.quit_player(cx))),
+                    ),
+            );
 
         if let Some(plan) = self.plan.as_ref() {
             let options = plan.available.clone();

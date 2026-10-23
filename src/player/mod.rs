@@ -2,7 +2,8 @@
 //!
 //! ## 设计定稿
 //!
-//! 视频不由 gpui 渲染。我们只负责**拼好启动参数、拉起 mpv 进程**（命名管道遥控在 P4b）。
+//! 视频不由 gpui 渲染。我们只负责**拼好启动参数、拉起 mpv 进程**，再用命名管道遥控它
+//! （[`ipc`]，P4b）。
 //! 好处是进度条/音量/全屏/字幕显示全部由 mpv 自带的 OSC 负责，我们不用造播放器的轮子；
 //! 代价是播放器是另一个窗口，详情页只做"发起 + 观测状态"。
 //!
@@ -66,13 +67,23 @@
 //! （`http-header-fields`/`user-agent`/`referrer` 在 `stream/network.c:34-40`，
 //! `input-ipc-server` 在 `options/options.c:922`）都是无条件的，才留在名单上。
 //!
-//! ## mpv 的输出必须进我们的日志
+//! ## 不接 mpv 的文本输出：状态只信 IPC
 //!
-//! GUI 进程没有控制台，mpv 又是"参数写错就静默退出"的程序。第十八轮的排查全靠猜，
-//! 因为现场连一行 mpv 的报错都没落下来。`launch()` 现在把 mpv 的 stderr 逐行读进 `debug.log`
-//! （前缀 `mpv:`），窗口没了至少能看到它为什么走。
+//! mpv 是"参数写错就静默退出"的程序，GUI 宿主又没有控制台可以看见它，所以很容易误以为
+//! 必须把它的 stdout/stderr 抄进 `debug.log`。**定稿是不接**（2026-10-23 用户拍）：
+//! 播放状态、命令成败一律走命名管道（[`ipc`]），日志里再抄一份 mpv 自己的话没有意义。
+//!
+//! 但 `launch()` 必须把它们设成 `Stdio::null()` 而不是 `piped()`：`piped()` 之后没人抽水，
+//! 缓冲区写满就会**把 mpv 的写阻塞住**，症状是"播着播着卡住、又没报错"。
+//! 顺带记一条事实，免得以后又踩：mpv 的消息默认写 **stdout**，只有 `force_stderr` 才走
+//! stderr（`ref/mpv/common/msg.c:190-202` 的 `term_msg_fileno`）——本机实测一次失败的打开，
+//! stdout 613 字节、stderr 0 字节。
+//!
+//! 真要查 mpv 为什么不播，就在本机把同一套参数复跑一遍看它自己说什么：第十八轮的
+//! `--opt value` 致命错误（文件头那条）就是这样定位的，一次本地复现比一轮编译便宜。
 
 pub mod ipc;
+pub mod state;
 
 /// 下一个 mpv 实例的序号，用来让管道名在同一进程内也不重复。
 static NEXT_INSTANCE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(1);
@@ -156,7 +167,8 @@ pub fn build_arguments(
 /// 管道名带**实例序号**而不只是我们的 pid：再次起播时我们先 `kill` 上一个 mpv，
 /// 但那只等十几毫秒，上一个实例可能还持有同名管道的句柄。mpv 建管道用的是
 /// `PIPE_UNLIMITED_INSTANCES`（`ref/mpv/input/ipc-win.c:387`），同名不会报错，
-/// 后果是**两个 mpv 都在听这条管道**、我们的命令会发给任意一个——P4b 之前必须避免。
+/// 后果是**两个 mpv 都在听这条管道**、我们的命令会发给任意一个——遥控已经接上了
+/// （[`ipc::open`]），所以这条是真会咬人的：串了实例就会出现"按了暂停的是上一个窗口"。
 pub fn launch(
     video_url: &str,
     audio_url: Option<&str>,
@@ -174,11 +186,18 @@ pub fn launch(
 
     let mut command = std::process::Command::new(&exe);
     command.args(&args);
-    // stdout 不要：mpv 的消息走 stderr，两个都接只会让日志翻倍。
+    // **mpv 的文本输出我们不接**（用户定稿，2026-10-23）：播放状态一律以命名管道为准
+    // （见 [`ipc`]），日志里再抄一份 mpv 自己的话没有意义。
+    //
+    // 但必须给 `null()` 而不是 `piped()`：`piped()` 之后没人读，管道缓冲区（默认几 KB）
+    // 写满就会把 mpv 的写阻塞住——那是"看着像卡住、其实是我们自己没抽水"的经典坏法。
+    // mpv 的消息默认写 stdout（`ref/mpv/common/msg.c:190-202` 的 `term_msg_fileno`，
+    // 只有 `force_stderr` 才走 stderr），所以两条都得堵掉。
+    //
+    // 真要查 mpv 为什么不动，就在本机把同一套参数复跑一遍看它自己说什么——
+    // 第十八轮那条 `--opt value` 致命错误就是这么定位的（第 8 节有原文）。
     command.stdout(std::process::Stdio::null());
-    // **接住 stderr**：GUI 进程没有控制台，mpv 报"参数错了/打不开流"就静默退出，
-    // 第十八轮"窗口没出现"因此完全无从排查。逐行落进 debug.log，见文件头。
-    command.stderr(std::process::Stdio::piped());
+    command.stderr(std::process::Stdio::null());
     #[cfg(windows)]
     {
         // mpv.exe 是 GUI 子系统程序，正常不需要这个；留着是为了万一放进来的是控制台版构建。
@@ -187,7 +206,7 @@ pub fn launch(
         command.creation_flags(CREATE_NO_WINDOW);
     }
 
-    let mut child = command
+    let child = command
         .spawn()
         .map_err(|error| anyhow::anyhow!("拉起 {} 失败: {error}", exe.display()))?;
     log::info!(
@@ -197,24 +216,6 @@ pub fn launch(
         audio_url.is_some(),
         extra_headers.len()
     );
-
-    if let Some(stderr) = child.stderr.take() {
-        // 独立线程读，绝不能在读完之后 join——那等于等 mpv 退出，会把主线程或调用方卡住。
-        // 句柄必须绑住：`JoinHandle` 是 `#[must_use]`，而本项目把 `unused_must_use` 设成了
-        // deny（第 4.9 节那条规矩的副作用），裸写一行 spawn 会直接编译失败。
-        let _reader = std::thread::spawn(move || {
-            use std::io::BufRead;
-            for line in std::io::BufReader::new(stderr).lines() {
-                match line {
-                    Ok(text) => log::info!("mpv: {text}"),
-                    Err(error) => {
-                        log::debug!("mpv stderr 读完了：{error}");
-                        break;
-                    }
-                }
-            }
-        });
-    }
 
     Ok((child, pipe_name))
 }

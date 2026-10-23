@@ -214,8 +214,12 @@ bpi-rs 自己请求时会加 `User-Agent` + `Referer: https://www.bilibili.com/`
 | 单独一路音频 URL | `--audio-file=<file>`（= `--audio-files-append` 别名，可重复） | `options.rst:2362-2367`；`player/loadfile.c:962` 走 `mp_is_url` → 接受远程 URL |
 | 运行中加音频 | IPC `audio-add <url> [flags [title [lang]]]` | `input.rst:767` |
 | HTTP 头 | `--http-header-fields`、`--user-agent`、`--referrer`、`--cookies-file` | `options.rst:5770`；`stream/network.c:34` 全在 `mp_network_conf` 组 → **实例级全局生效**；`--http-header-fields` 是 string list，**按 `,` 切分**且**重复给同一选项是替换**（`m_option.c:1403-1440`、`m_option.h:644`），故多条头拼成一个参数一次给出 |
-| Windows IPC | `--input-ipc-server=\\.\pipe\<name>`，前缀缺失会自动补 | `options.rst:4655`、`ipc.rst:64`；`input/ipc-win.c:387` 用 `PIPE_UNLIMITED_INSTANCES` ⇒ **同名不报错**，所以管道名必须每次起播都换序号 |
-| 订阅状态 | `observe_property <id> <name>` → `property-change` | `ipc.rst:279`（连接断开即失效） |
+| Windows IPC | `--input-ipc-server=\\.\pipe\<name>`，前缀缺失会自动补 | `options.rst:4655`、`ipc.rst:64`；`input/ipc-win.c:352-359` 服务端建法是 `PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED` + `PIPE_TYPE_MESSAGE | PIPE_READMODE_BYTE` + `PIPE_UNLIMITED_INSTANCES` + `PIPE_REJECT_REMOTE_CLIENTS` ⇒ 多客户端合法、**同名不报错**，所以管道名必须每次起播都换序号 |
+| 客户端要同时读写这条管道 | 必须用 overlapped I/O（或封装好的库） | `ipc.rst:69-73` 原文：要像 Linux 那样同时读写，"得写一个用 overlapped file I/O（或 .NET `NamedPipeClientStream` 那种封装）的程序"。我们选 `tokio::net::windows::named_pipe`：`try_read`/`try_write`/`ready` 都取 `&self`，同一个任务里读写能交错，overlapped 由 tokio 内部处理（因此 Cargo.toml 给 tokio 开了 `net`） |
+| 订阅状态 | `observe_property <id> <name>` → `property-change` | `ipc.rst:269-289`：id 只要在同一条连接内唯一；**连接一断注册即失效**（文档专门警告"用两次 socat 分别收发"会看起来不工作）⇒ 订阅与命令必须走同一条一直开着的连接 |
+| 属性名的出处 | `time-pos` / `duration` / `pause` / `eof-reached` / `idle-active` / `paused-for-cache` | `ref/mpv/player/command.c`：`duration` :4697、`time-pos` :4708、`eof-reached` :4727、`paused-for-cache` :4737、`idle-active` :4743。值可能是 `null`，界面要能分开"没进度"与"0 秒" |
+| 跳转与换档 | `seek <秒> [relative]`、`loadfile <url> [flags]`、`audio-add <url>` | `input.rst:300-308`（默认就是 relative）、`:542`、`:767`。**坑**：`:546-548` 明说替换当前文件的 `loadfile` 会在旧文件还没停、新文件还没开始加载时就返回 ⇒ **不能拿它的回包判断流开没开成** |
+| 文本消息走 **stdout** | 我们**不接**（`launch()` 一律 `null()`） | `common/msg.c:190-202` 的 `term_msg_fileno`：只有 `force_stderr` 才走 stderr；本机实测一次失败的打开 stdout 613 字节、stderr 0 字节。记这条是为了以后别又"只接 stderr" |
 | 窗口行为 | `--force-window`、`--keep-open`、`--idle=once`、`--taskbar-progress` | `options.rst` 对应条目 |
 | 时间轴对齐 | `--rebase-start-time=yes`（默认即 yes） | `options.rst:251` |
 | 隔离用户配置 | `--no-config`、`--config-dir` | 仅命令行生效 |
