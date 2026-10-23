@@ -82,23 +82,25 @@ src/
 │   ├── favorites.rs   收藏夹：fav().created_list() + collected_list()，合并成一个 DTO
 │   ├── history.rs     观看历史：historytoview().history_list()（游标分页）+ 秒数格式化纯函数
 │   ├── search.rs      搜索封装：DTO（SearchHit/PageInfo/SearchSort）+ 标签清洗 + 播放量格式化
+│   ├── stream.rs      播控：video().play_url() 取地址 + 选流成 StreamChoice（DASH 双流 / durl 单文件）
 │   └── stream_select.rs  DASH 选择纯函数（HEVC 优先、画质档封顶 116）
 ├── store/
-│   └── credentials.rs 明文 JSON 凭据落盘（<exe>/data/cookies.json）
+│   └── credentials.rs 明文 JSON 凭据落盘（<exe>/data/cookies.json）+ cookie_header() 给 mpv
 ├── player/
-│   ├── mod.rs         mpv 参数构造 + Referer/UA 常量 + PATH 查找
-│   └── ipc.rs         mpv JSON IPC 的命令构造（纯数据，管道 I/O 在 P4）
+│   ├── mod.rs         mpv 参数构造 + launch() 拉起进程 + Referer/UA 常量 + PATH 查找
+│   └── ipc.rs         mpv JSON IPC 的命令构造（纯数据，管道 I/O 在 P4b）
 ├── pages/
 │   ├── mod.rs         页面层出口 + 共用导航事件 `OpenVideo`（三个页面发同一个信号）
 │   ├── root.rs        窗口根视图：无凭据→登录页，有凭据→主界面外壳；登录成功后原地切换
 │   ├── shell/         外壳：顶部"搜索 / 我的"、**详情页栈**（打开 push、返回 pop），订阅 OpenVideo
 │   ├── login/         扫码登录页（二维码 + 1.5s 轮询 + 过期自动重载）
 │   ├── mine/          个人中心页（资料 + 收藏夹 + 历史，三路并发各自显示错误；懒加载）
-│   ├── detail/        详情页（主体 + 选集 + 字幕 + 相关推荐；播放留给 P4）
+│   ├── detail/        详情页（主体 + 选集 + **播放** + 字幕 + 相关推荐；持 mpv 子进程并在 Drop 时收掉）
 │   └── search/        阶段一页面（view.rs 为根视图）
 ├── ui/
 │   ├── qr.rs          二维码：qrcode-generator 出布尔矩阵，div 网格绘制
-│   └── video_card.rs  卡片视图（封面走 gpui URI 图片加载 + 时长角标）
+│   ├── cover.rs       封面显示前必过：补协议 + hdslb 图床 `@{w}w_{h}h.jpg` 缩略图后缀
+│   └── video_card.rs  卡片视图（封面走 gpui URI 图片加载 + 时长角标 + clickable）
 └── tests/             单元测试集中地（纯逻辑）
 ```
 
@@ -150,7 +152,8 @@ cx.spawn(async move |this, cx| {
 - `--http-header-fields` / `--user-agent` / `--referrer` 是**实例级全局**（`mp_network_conf`），
   对同实例的所有 HTTP 流生效，所以 URL 必须与这套头成对出现，否则 403。
 - 控制走命名管道 `\\.\pipe\rustbilipc-<pid>`，JSON 行协议 + `observe_property`；
-  连接断开即视为 mpv 已退出。
+  连接断开即视为 mpv 已退出。**这条还没接上**：P4a 只拉起进程、不读写管道（第 4.13 节），
+  `player/ipc.rs` 目前只有命令构造与管道命名。
 - `--no-config` 隔离用户自己的 `mpv.conf`，避免别人的 `vo`/`hwdec` 设置干扰。
 - mpv 不在 PATH 是常态：底部状态条从 P0 起就显示查找结果，登录/播放阶段要给明确提示。
 
@@ -360,9 +363,43 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
   （`model.rs:6-26`）；简介另问 `desc()`，总时长用 `pages[].duration`（数字秒）累加。
   `ref/bpi-rs/src/video/info/` 那一整块虽然有 `desc/pubdate/tname/duration`，但
   **没有任何方法返回它**（死代码）——编译得过、永远拿不到数据，别 import。
-- **播放相关的准备**：选中哪个 P 记在 `selected`（cid 在 `PageInfo.cid`），
-  界面上写明"播放接下一阶段"。注意 P4 拿时长时，`PlayUrlResponseData.timelength` 是**毫秒**，
-  而 `VideoPage.duration` 是**秒**。
+- **播放相关的准备**：选中哪个 P 记在 `selected`（cid 在 `PageInfo.cid`），起播就是拿这个 cid 去问播控。
+  注意 `PlayUrlResponseData.timelength` 是**毫秒**，而 `VideoPage.duration` 是**秒**（第 4.13 节）。
+
+### 4.13 起播（P4a）：取地址 + 拉起 mpv，先不遥控
+
+三段各管一件事，`StreamChoice` 是它们之间唯一的交接物：
+
+| 段 | 文件 | 只管 |
+| --- | --- | --- |
+| 取地址、选流 | `src/api/stream.rs` | playurl 请求参数、DASH/durl 两条路、清晰度中文档 |
+| 拼参数、开进程 | `src/player/mod.rs` 的 `launch()` | PATH 找 mpv、请求头、管道名、`CREATE_NO_WINDOW` |
+| 发起、显示状态、收进程 | `src/pages/detail/view.rs` 的播放块 | 按钮/清晰度/`player_note`、`Child` 的生命周期 |
+
+- **fnval 是 `16 | 2048`（DASH + AV1）**：**没有单独的 HEVC 位**——开了 DASH 之后
+  `dash.video[]` 把 HEVC/AVC/AV1 一起给，靠 `codecs` 前缀区分（选流规则见第 4.2 节）。
+  4K/HDR/杜比那几位（128/64/256/512/1024）不开，再叠 `.fourk(false)`，与
+  `MAX_QUALITY_ID = 116` 一起把画质封在 1080P。
+- **请求的档 ≠ 拿到的档**：B 站按账号权限回落到实际能给的 `quality`，所以界面报的是
+  选中那条流的 `video.id`（`StreamChoice.quality`），不是我们请求的 `want_qn`。
+- **`dash` 与 `durl` 是两条不同的路**：`durl`（FLV/MP4 单文件）里已经含音频，
+  此时 `audio_url = None`，`build_arguments` **不能**再加 `--audio-file=`——
+  空值会让 mpv 直接报错退出。这条由单测 `single_file_playback_adds_no_audio_argument` 守住。
+- **直链必须和头成对出现**：Referer + UA + **登录 Cookie**。bpi-rs 不会把它自己那份 cookie jar
+  交出来（`jar` 是私有字段），所以由 `SavedCredential::cookie_header()` 现拼一条
+  `Cookie: DedeUserID=…; SESSDATA=…; bili_jct=…; buvid3=…` 塞进 `--http-header-fields`；
+  缺它就是 403/-101，而症状与"地址过期"长得一样，所以 `player_note` 把档位/编码/轨数都写出来。
+- **`Child` 的 drop 不杀子进程**（`std::process::Child` 文档明确）。"关掉详情页但声音还在放"
+  是这类播放器最难查的 bug，所以两处显式 `kill()`：再次起播先收掉上一个实例，
+  以及 `impl Drop for DetailPage` 在实体被弹出栈（或整个窗口关闭）时收掉。
+  mpv 侧配 `--keep-open=yes`，播完不自己退，生命周期完全归我们。
+- **mpv 不在 PATH 是常态**：`find_mpv_in_path()` 返回 `Option`，找不到就在 `player_note`
+  写明"请先安装 mpv 并加入 PATH"，不 panic、不静默。搜索页那行 mpv 状态（P0 起就有）也一并当提示。
+- **换清晰度现在是"重开一个实例"**（P4a 的临时做法）：重新 playurl + 重新 `launch`，
+  代价是窗口回到开头。等命名管道 IPC 通了改成同实例 `loadfile` + `audio-remove`/`audio-add`。
+  先把按钮做出来是有意义的：它能立刻暴露"哪个档位其实取不到流"这类真机问题。
+- **结果只认最近一次点击的 cid**：`planning_cid` 守卫——用户点了 P3 又点 P5，
+  P3 的地址回来时直接丢，否则会起一个播错分 P 的窗口。
 
 ## 5. 阶段进度
 
@@ -372,8 +409,9 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | P1 | 搜索接线：`search().video()`、结果转换（剥 `<em>`）、封面网络图（gpui 原生 URI 加载）、分页/排序 | 代码与 CI 均完成；真机确认列表/分页可用，**但封面一直是空的**——第十六轮按日志找到真因（协议相对地址被当成内置资源，第 4.5 节）并修好，待下一轮真机复看 |
 | P2a | 登录：扫码（取码/轮询/过期重载）+ 凭据落盘 + 启动判定 + 登录后进主界面 | **完成**（第十一轮产物真机扫码登录通过，凭据已写出） |
 | P2b | 个人：我的信息 / 收藏 / 历史 入口与页面 | **完成**（第十五轮产物真机通过；外壳 + 懒加载 + 三路并发，第 4.11 节） |
-| P3 | 详情：`video().view()`、多 P、tags/related、字幕列表 | 代码与 CI 均完成（第十七轮 37 passed，机制见第 4.12 节），待真机复验；播放仍在 P4 |
-| P4 | 播放：拉起 mpv、管道 IPC 读写、换清晰度（`loadfile` + `audio-remove`/`audio-add`）、`sub-add` | 未开始 |
+| P3 | 详情：`video().view()`、多 P、tags/related、字幕列表 | 代码与 CI 均完成（第十七轮 37 passed，机制见第 4.12 节），待真机复验；发布时间/分区按用户决定**不做**（live 类型里没有这俩字段） |
+| P4a | 起播：playurl 取地址 + 选流 + 拉起外置 mpv（不遥控） | 代码完成（机制见第 4.13 节），待编译与真机复验 |
+| P4b | 遥控：管道 IPC 读写、进度/暂停观测、同实例换清晰度、`sub-add`、备用域名换用 | 未开始（`player/ipc.rs` 只有命令构造与管道命名） |
 | P5 | 打磨：详情页覆盖式布局、骨架屏、快捷键、续播进度 | 未开始 |
 
 ## 6. 已知风险与待验证
@@ -392,6 +430,8 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | 10 | **`cx.spawn` 的 `Task` 被丢弃 = 任务立即取消**（症状：请求发出去了、界面永远停在加载态，日志里连闭包第一行都没有） | 已修：所有 spawn 一律 `.detach()` 或存进实体字段，并用 `[lints.rust] unused_must_use = "deny"` 让这类写法编译失败，见第 4.9 节 |
 | 11 | 扫码成功的响应 cookie 里没有 `buvid3`，而 `Account::validate_complete` 要它 → 登录在最后一步失败 | `poll_qr` 在 `code==0` 且缺 buvid3 时调 `misc().buvid()`（`/x/frontend/finger/spi`）补一个，见第 4.10 节 |
 | 12 | 收藏/历史那几个响应结构**没有 `#[serde(default)]`**（`HistoryListData.cursor/tab/list`、`FavListDetailData.info/has_more/ttl` 等），B 站少给任何一个字段就变成 `BpiError::parse` | 症状可控：那一块显示自己的错误位而不是整页空白（第 4.11 节），日志里有原始错误文本可判断缺哪个字段 |
+| 13 | 播放直链有**时效**（URL 里的 `deadline`），放久了或跨网络就 403；`backupUrl` 也只在同一次响应里有效 | P4a 每次都现取现用（不缓存 `StreamChoice` 去起播）；真机若出现"窗口开了但黑屏"，先对照 `debug.log` 里 playurl 与 launch 的时间差。P4b 再加失败换备用域名 |
+| 14 | 目标机 i5-6200U 是 Skylake：**没有 AV1 硬解**，HEVC 只到 8bit；`--hwdec=auto` 选不到就退软解，1080P AV1 大概率丢帧 | 选流已把 HEVC 排在 AV1 之前（第 4.2 节），`player_note` 会打出实际 `codecs`；真机先看那串是 `hev1/hvc1` 还是 `avc1/av01`，再谈要不要在封顶档内偏好某一编码 |
 
 ## 7. 维护规则
 

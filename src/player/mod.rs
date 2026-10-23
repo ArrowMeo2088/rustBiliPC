@@ -37,7 +37,8 @@ pub const MPV_USER_AGENT: &str =
 
 /// 构造一次播放所需的 mpv 命令行参数（不含可执行文件名）。
 ///
-/// `pipe_name` 由 [`ipc::pipe_name_for`] 生成；`extra_headers` 用于以后追加 Cookie。
+/// `pipe_name` 由 [`ipc::pipe_name_for`] 生成；`extra_headers` 用于追加 `Cookie: …`
+/// （**必须带**：B 站的 m4s 直链校验 Referer，而 1080P 还要校验登录 cookie）。
 ///
 /// 参数取舍说明：
 /// - `--no-config`：不读用户的 `mpv.conf`，避免别人配的 `vo`/`hwdec` 影响我们；
@@ -45,9 +46,12 @@ pub const MPV_USER_AGENT: &str =
 /// - `--keep-open=yes`：播完不退出，进程生命周期由我们控制；
 /// - `--hwdec=auto`：优先硬解，选不到自动软解（HEVC 在 6 代酷睿上可硬解 8bit）；
 /// - `--rebase-start-time=yes`：双 demuxer 的时间轴对齐主要靠它（默认即 yes，写明以免误解）。
+///
+/// `audio_url` 是 `Option`：B 站给 DASH 时才有单独的音频轨；万一回退成 `durl`
+/// （FLV/MP4 一段文件、里面已含音频），多一个空的 `--audio-file=` 反而会让 mpv 报错。
 pub fn build_arguments(
     video_url: &str,
-    audio_url: &str,
+    audio_url: Option<&str>,
     pipe_name: &str,
     extra_headers: &[String],
 ) -> Vec<String> {
@@ -69,13 +73,51 @@ pub fn build_arguments(
         "--http-header-fields".to_string(),
         header_fields.join(","),
         "--rebase-start-time=yes".to_string(),
-        // 外部音频轨：B 站 DASH 的音频单独一路 URL。
-        format!("--audio-file={audio_url}"),
-        // 主文件必须是最后一个位置参数。
-        video_url.to_string(),
     ];
-    args.shrink_to_fit();
+    // 外部音频轨：B 站 DASH 的音频单独一路 URL。
+    if let Some(audio_url) = audio_url {
+        args.push(format!("--audio-file={audio_url}"));
+    }
+    // 主文件必须是最后一个位置参数。
+    args.push(video_url.to_string());
     args
+}
+
+/// 拉起 mpv（独立进程、独立窗口），返回子进程句柄与这条实例的管道名。
+///
+/// 子进程句柄要留着：留着才不会在 Windows 上泄漏进程句柄，也才有办法在用户再次起播时
+/// 收掉上一个实例。丢掉它不会杀掉 mpv（`std::process::Child` 的 drop 不管子进程），
+/// 所以"关掉详情页但视频还在放"这种事要避免——见 `pages/detail/view.rs` 的处理。
+pub fn launch(
+    video_url: &str,
+    audio_url: Option<&str>,
+    extra_headers: &[String],
+) -> anyhow::Result<(std::process::Child, String)> {
+    let exe = find_mpv_in_path()
+        .ok_or_else(|| anyhow::anyhow!("PATH 里找不到 mpv，请先安装 mpv 并把它加入 PATH"))?;
+    let pipe_name = ipc::pipe_name_for(std::process::id());
+    let args = build_arguments(video_url, audio_url, &pipe_name, extra_headers);
+
+    let mut command = std::process::Command::new(&exe);
+    command.args(&args);
+    #[cfg(windows)]
+    {
+        // 万一用户 PATH 里是 mpv.com（命令行启动器），也别给我们闪一个控制台窗口。
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
+
+    let child = command
+        .spawn()
+        .map_err(|error| anyhow::anyhow!("拉起 {} 失败: {error}", exe.display()))?;
+    log::info!(
+        "已拉起 mpv：pid={} 管道={pipe_name} 音频={} 附加头={} 条",
+        child.id(),
+        audio_url.is_some(),
+        extra_headers.len()
+    );
+    Ok((child, pipe_name))
 }
 
 /// 在 PATH 中查找 mpv 可执行文件。

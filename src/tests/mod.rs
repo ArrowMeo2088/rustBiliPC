@@ -42,22 +42,48 @@ mod player_tests {
 
     #[test]
     fn video_url_is_the_last_positional_argument() {
-        let args = build_arguments("https://v/video.m4s", "https://a/audio.m4s", r"\\.\pipe\x", &[]);
+        let args = build_arguments(
+            "https://v/video.m4s",
+            Some("https://a/audio.m4s"),
+            r"\\.\pipe\x",
+            &[],
+        );
         assert_eq!(args.last().map(String::as_str), Some("https://v/video.m4s"));
     }
 
     #[test]
     fn separate_audio_stream_is_passed_as_external_track() {
         // B 站音视频是两条 DASH 流，音频只能靠 --audio-file 附加。
-        let args = build_arguments("https://v/video.m4s", "https://a/audio.m4s", r"\\.\pipe\x", &[]);
+        let args = build_arguments(
+            "https://v/video.m4s",
+            Some("https://a/audio.m4s"),
+            r"\\.\pipe\x",
+            &[],
+        );
         assert!(args
             .iter()
             .any(|arg| arg == "--audio-file=https://a/audio.m4s"));
     }
 
     #[test]
+    fn single_file_playback_adds_no_audio_argument() {
+        // durl 回退时文件里已经含音频；这时再给一个空的 --audio-file= 会让 mpv 直接报错。
+        let args = build_arguments("https://v/video.mp4", None, r"\\.\pipe\x", &[]);
+        assert!(
+            !args.iter().any(|arg| arg.starts_with("--audio-file")),
+            "{args:?}"
+        );
+        assert_eq!(args.last().map(String::as_str), Some("https://v/video.mp4"));
+    }
+
+    #[test]
     fn referer_header_is_present_and_global() {
-        let args = build_arguments("https://v/v.m4s", "https://a/a.m4s", r"\\.\pipe\x", &[]);
+        let args = build_arguments(
+            "https://v/v.m4s",
+            Some("https://a/a.m4s"),
+            r"\\.\pipe\x",
+            &[],
+        );
         let index = args
             .iter()
             .position(|arg| arg == "--http-header-fields")
@@ -69,7 +95,7 @@ mod player_tests {
     fn extra_headers_are_appended() {
         let args = build_arguments(
             "https://v/v.m4s",
-            "https://a/a.m4s",
+            Some("https://a/a.m4s"),
             r"\\.\pipe\x",
             &[format!("Cookie: SESSDATA=x")],
         );
@@ -427,6 +453,72 @@ mod detail_tests {
         assert_eq!(seconds_to_u32(0), 0);
         // 顺带确认"正好一小时"这一边界在 api 层的格式化函数上。
         assert_eq!(format_seconds(3_600), "1:00:00");
+    }
+}
+
+#[cfg(test)]
+mod playback_tests {
+    use crate::api::stream::{quality_label, quality_options};
+    use crate::store::credentials::SavedCredential;
+
+    fn support(quality: u64, new_description: &str, display_desc: &str) -> bpi_rs::video::videostream_url::SupportFormat {
+        bpi_rs::video::videostream_url::SupportFormat {
+            quality,
+            format: "mp4".to_string(),
+            new_description: new_description.to_string(),
+            display_desc: display_desc.to_string(),
+            superscript: String::new(),
+            codecs: None,
+        }
+    }
+
+    #[test]
+    fn label_prefers_the_new_support_formats_field() {
+        let formats = vec![support(80, "1080P 高清", "1080P"), support(64, "720P", "720P")];
+        assert_eq!(quality_label(&formats, &[], &[], 80), "1080P 高清");
+        // support_formats 里没有这一档时，退回 accept_* 的下标配对。
+        let accept_quality = vec![116u64, 80, 64];
+        let accept_description = vec!["1080P60".to_string(), "1080P".to_string(), "720P".to_string()];
+        assert_eq!(
+            quality_label(&formats, &accept_quality, &accept_description, 116),
+            "1080P60"
+        );
+        // 两处都没有：至少把档号写出来，日志看得懂。
+        assert_eq!(quality_label(&[], &[], &[], 32), "32P");
+    }
+
+    #[test]
+    fn support_formats_without_description_fall_back_to_display_desc() {
+        let formats = vec![support(64, "", "720P 准高清")];
+        assert_eq!(quality_label(&formats, &[], &[], 64), "720P 准高清");
+        let options = quality_options(&formats, &[], &[]);
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].label, "720P 准高清");
+    }
+
+    #[test]
+    fn cookie_header_lists_only_what_we_have() {
+        let credential = SavedCredential {
+            dede_user_id: "42".to_string(),
+            sessdata: "sess".to_string(),
+            bili_jct: "csrf".to_string(),
+            buvid3: "buvid".to_string(),
+            refresh_token: String::new(),
+            saved_at_unix: 0,
+        };
+        assert_eq!(
+            credential.cookie_header(),
+            "DedeUserID=42; SESSDATA=sess; bili_jct=csrf; buvid3=buvid"
+        );
+
+        let partial = SavedCredential {
+            sessdata: String::new(),
+            ..credential
+        };
+        assert_eq!(
+            partial.cookie_header(),
+            "DedeUserID=42; bili_jct=csrf; buvid3=buvid"
+        );
     }
 }
 

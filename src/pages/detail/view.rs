@@ -1,10 +1,11 @@
 //! 详情页（P3）。
 //!
-//! ## 这一页只做到"看得清 + 选得了 P"
+//! ## 这一页做到"看得清 + 选得了 P + 起得了播"
 //!
 //! 主体（标题/封面/UP 主/统计/简介/标签/分P/相关推荐）来自 `api/detail.rs`，字幕列表来自
-//! `api/detail::fetch_subtitles`。**播放不在这一轮**：P4 才接 mpv，所以选中的 P 现在只是
-//! 高亮 + 记下 cid，界面写明"播放接下一阶段"，不假装能播。
+//! `api/detail::fetch_subtitles`。播放是 P4a：**取播控地址 → 拉起一个独立的 mpv 进程**，
+//! 我们只发起、不遥控（暂停/进度/换清晰度保住进度都要等命名管道 IPC，即 P4b）。
+//! 因此清晰度按钮现在是"重新取地址 + 重开一个 mpv"，界面与 `player_note` 都照实这么写。
 //!
 //! ## 为什么字幕要等主体回来才去取
 //!
@@ -28,10 +29,13 @@
 
 use std::sync::Arc;
 
+use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::*;
 
-use crate::api::detail::{self, SubtitleBrief, VideoDetailInfo};
+use crate::api::detail::{self, PageInfo, SubtitleBrief, VideoDetailInfo};
+use crate::api::stream::{self, StreamChoice};
 use crate::pages::OpenVideo;
+use crate::store::credentials::SavedCredential;
 use crate::ui::cover;
 use crate::ui::video_card::{self, VideoCardData};
 
@@ -54,6 +58,27 @@ pub struct DetailPage {
     /// 当前选中的分 P（`pages` 里的下标）。P4 播放时用它取 cid 与标题。
     selected: usize,
     seq: u32,
+    /// 播放那一块：已取到的流地址（None = 还没取或取失败）。
+    plan: Option<StreamChoice>,
+    /// 播放块的提示：取地址中 / 失败原因 / 已拉起 mpv。
+    player_note: SharedString,
+    /// 我们为这个详情页拉起的 mpv。留着它是为了：再次起播时收掉上一个实例、
+    /// 以及本实体被弹出详情页栈时把子进程一起收掉（见本文件的 `Drop`）。
+    player: Option<std::process::Child>,
+    /// 正在为哪个 cid 取地址；取回来时不是它就丢掉（用户可能又点了别的 P）。
+    planning_cid: Option<u64>,
+}
+
+/// 详情页退出时必须带走自己拉起的 mpv：外壳把这一层 pop 掉（或整个窗口关掉）时，
+/// 留下一条在放视频、又没人再能遥控它的 mpv 是最难查的"声音还在"问题。
+/// `std::process::Child` 的 drop 不会杀子进程，所以这里显式 kill。
+impl Drop for DetailPage {
+    fn drop(&mut self) {
+        if let Some(child) = self.player.as_mut() {
+            log::info!("详情页退出，收掉 mpv pid={}", child.id());
+            let _ = child.kill();
+        }
+    }
 }
 
 impl DetailPage {
@@ -68,6 +93,10 @@ impl DetailPage {
             subtitle_note: "字幕加载中…".into(),
             selected: 0,
             seq: 0,
+            plan: None,
+            player_note: "".into(),
+            player: None,
+            planning_cid: None,
         };
         this.load(cx);
         this
@@ -159,6 +188,160 @@ impl DetailPage {
         .detach();
     }
 
+    /// 当前选中的分 P。
+    fn selected_page(&self) -> Option<PageInfo> {
+        let info = self.detail.as_ref()?;
+        info.pages.get(self.selected).cloned().or_else(|| info.pages.first().cloned())
+    }
+
+    /// 播放选中的那一 P（想要封顶档，B 站会给到它能给的最高）。
+    fn play_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(page) = self.selected_page() else {
+            self.player_note = "这条稿件没有可播的分 P".into();
+            cx.notify();
+            return;
+        };
+        self.request_plan(page.cid, stream::DEFAULT_REQUEST_QN, cx);
+    }
+
+    /// 换清晰度。
+    ///
+    /// 现在（P4a）的做法是**重新取地址并换一个 mpv 实例**；等管道 IPC 通了（P4b）再改成
+    /// 在同一实例里 `loadfile` + `audio-remove`/`audio-add`，那样窗口和进度都能保住。
+    /// 先把按钮做出来是有意义的：它能立刻暴露"哪个档位其实拿不到流"这类问题。
+    fn play_with_quality(&mut self, qn: u64, cx: &mut Context<Self>) {
+        let Some(page) = self.selected_page() else {
+            self.player_note = "这条稿件没有可播的分 P".into();
+            cx.notify();
+            return;
+        };
+        self.request_plan(page.cid, qn, cx);
+    }
+
+    /// 为一个 cid 取播控地址。结果回来时如果用户已经改点了别的 P，这份结果就丢掉。
+    fn request_plan(&mut self, cid: u64, qn: u64, cx: &mut Context<Self>) {
+        let Some(bvid) = self.detail.as_ref().map(|info| info.bvid.clone()) else {
+            return;
+        };
+        self.planning_cid = Some(cid);
+        self.player_note = format!("取播控地址…（想要 qn={qn}）").into();
+        cx.notify();
+
+        let join = stream::fetch_streams(Arc::clone(&self.client), bvid, cid, qn);
+        cx.spawn(async move |this, cx| {
+            let outcome = match join.await {
+                Ok(inner) => inner.map_err(|error| error.to_string()),
+                Err(join_error) => Err(crate::app::describe_join_error(join_error)),
+            };
+            log::debug!("详情页：播控地址已回到前台（cid={cid}）");
+
+            let Some(view) = this.upgrade() else { return };
+            view.update(cx, |view, cx| {
+                if view.planning_cid != Some(cid) {
+                    log::debug!("详情页：cid={cid} 的地址已过时，丢弃");
+                    return;
+                }
+                match outcome {
+                    Ok(plan) => {
+                        view.plan = Some(plan);
+                        view.start_playback();
+                    }
+                    Err(message) => {
+                        view.plan = None;
+                        view.player_note = format!("取播控地址失败：{message}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 用已取到的地址拉起 mpv（独立窗口）。不 notify，调用方负责。
+    fn start_playback(&mut self) {
+        let Some(plan) = self.plan.clone() else { return };
+
+        // 上一次也是我们拉起的实例：先收掉，否则点几次就堆几个窗口。
+        if let Some(mut previous) = self.player.take() {
+            log::info!("再次起播，收掉上一个 mpv pid={}", previous.id());
+            let _ = previous.kill();
+        }
+
+        // 1080P/高码率的 m4s 直链要校验登录 cookie；bpi-rs 不把它的 cookie jar 交出来，
+        // 所以由我们从凭据里拼一条，和 Referer/UA 一起给 mpv（见 player 模块注释）。
+        let extra_headers = match SavedCredential::load() {
+            Some(credential) => vec![format!("Cookie: {}", credential.cookie_header())],
+            None => Vec::new(),
+        };
+
+        match crate::player::launch(&plan.video_url, plan.audio_url.as_deref(), &extra_headers) {
+            Ok((child, pipe_name)) => {
+                let pid = child.id();
+                self.player = Some(child);
+                let track = match (plan.is_dash, plan.audio_url.as_ref()) {
+                    (true, Some(_)) => "DASH 双流",
+                    (true, None) => "DASH 只有视频轨（音频接口没给流）",
+                    (false, _) => "durl 单文件",
+                };
+                log::info!("详情页：mpv 管道名 {pipe_name}");
+                self.player_note = format!(
+                    "已拉起 mpv（pid {pid}）：{} · {} · {} · 备用地址 {} 个（P4b 才自动换）",
+                    plan.quality_label,
+                    plan.codecs,
+                    track,
+                    plan.backup_urls.len()
+                )
+                .into();
+            }
+            Err(error) => {
+                self.player_note = format!("起播失败：{error}").into();
+            }
+        }
+    }
+
+    /// 播放区：起播按钮 + 状态行 + 一排清晰度。
+    fn player_block(&self, cx: &mut Context<Self>) -> AnyElement {
+        // SharedString 而不是 &str：`IntoElement` 那条实现是按 `SharedString`/`String` 来的，
+        // 借来的 &str 生命周期不保证能进元素树。
+        let status: SharedString = if self.player_note.is_empty() {
+            "还没起播。".into()
+        } else {
+            self.player_note.clone()
+        };
+
+        let mut block = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .gap_1()
+            .px_4()
+            .p_2()
+            .child(
+                div().flex().gap_2().items_center().child(
+                    Button::new("detail-play")
+                        .label("播放选中分P")
+                        .primary()
+                        .on_click(cx.listener(|this, _, _window, cx| this.play_selected(cx))),
+                ),
+            )
+            .child(div().text_sm().child(status));
+
+        if let Some(plan) = self.plan.as_ref() {
+            let options = plan.available.clone();
+            block = block.child(
+                div().flex().gap_1().children(options.into_iter().map(|option| {
+                    let qn = option.qn;
+                    Button::new(format!("detail-qn-{qn}"))
+                        .label(option.label.clone())
+                        .on_click(cx.listener(move |this, _, _window, cx| {
+                            this.play_with_quality(qn, cx);
+                        }))
+                })),
+            );
+        }
+        block.into_any_element()
+    }
+
     /// 相关推荐的卡片：点它 = 让外壳再压一层详情页。
     fn related_cards(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let cards: Vec<VideoCardData> = self
@@ -235,7 +418,7 @@ impl DetailPage {
             }))
     }
 
-    /// 字幕列表（P4 会把选中的那条喂给 mpv 的 `sub-add`）。
+    /// 字幕列表（P4b 会把选中的那条喂给 mpv 的 `sub-add`）。
     fn subtitles_body(&self) -> impl IntoElement {
         if !self.subtitle_note.is_empty() {
             return div().px_4().p_2().text_sm().child(self.subtitle_note.clone());
@@ -313,7 +496,7 @@ impl DetailPage {
                 info.stat.like_text,
             )))
             .child(div().text_sm().child(format!(
-                "共 {} P · 总时长 {}（播放接到下一阶段）",
+                "共 {} P · 总时长 {}",
                 info.videos, info.total_duration_text
             )))
             .child(if tags.is_empty() {
@@ -334,6 +517,8 @@ impl DetailPage {
             })
             .child(Self::section("选集"))
             .child(self.pages_body(cx))
+            .child(Self::section("播放"))
+            .child(self.player_block(cx))
             .child(Self::section("字幕"))
             .child(self.subtitles_body())
             .child(Self::section("相关推荐"))

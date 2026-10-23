@@ -15,7 +15,8 @@
 
 - `stream_select_tests`：画质档封顶边界（16/32/64/80/112/116 允许，120/125/126/127 排除）。
 - `player_tests`：mpv 参数形状——视频 URL 必须是最后一个位置参数、`--audio-file=` 单独一路、
-  `Referer` 头存在、附加头能追加、IPC JSON 命令形状、管道命名格式。
+  **durl 单文件时不能出现 `--audio-file`**（空值会让 mpv 直接报错退出）、`Referer` 头存在、
+  附加头能追加、IPC JSON 命令形状、管道命名格式。
 - `credentials_tests`：JSON 往返、缺省字段容错（老文件不能读不回）、完整性判定、
   与 `bpi_rs::Account` 的字段映射。
 - `search_format_tests`：标题高亮标签清洗、播放量的中文读法（万/亿与尾零截断、边界值）、
@@ -29,6 +30,13 @@
 - `cover_tests`：**协议相对地址 `//host/path` 必须补成 `https://`**（第十五轮真机封面全空的根因，
   gpui 用 `Url::parse` 判 URL，补不上就变成"内置资源找不到"）、只有 `hdslb.com` 才升 https 与拼
   `@Ww_Hh.jpg` 缩略图后缀、已带 `@` 与 GIF 不动、空地址仍是空（空串不能变成 `https://`）。
+- `detail_tests`：详情 DTO 的三处边界——`favorite`/`fav` 两个字段名取新舍旧、字幕地址补协议
+  （B 站给 `//host` 时不补就是死链）、`seconds_to_u32` 在超过 `u32` 时**截断而不回绕**
+  （回绕会把长视频变成几秒，比报错更难发现）。
+- `playback_tests`：**清晰度中文档的兜底顺序**（`new_description` → `display_desc` →
+  `accept_quality`/`accept_description` 下标配对 → `"{qn}P"`）、`quality_options` 在没有
+  `support_formats` 时能退回 `accept_*` 列表、`cookie_header()` 只列出**实际有值**的 cookie
+  （缺一个字段就少一条，不拼 `SESSDATA=` 这种空项——空值与"没带"在排查时容易被当成同一回事）。
 - `scaffold_tests`：版本号非空且以数字开头。
 
 ## 不测什么

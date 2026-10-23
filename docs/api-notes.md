@@ -164,6 +164,33 @@ pub async fn play_url(&self, params: VideoPlayUrlParams) -> BpiResult<PlayUrlRes
 bpi-rs 自己请求时会加 `User-Agent` + `Referer: https://www.bilibili.com/` + `Origin`
 （`src/client.rs:68-72,394-413`），但**没有对外导出的 header 构造函数**，
 所以给 mpv 的头要在 `src/player/mod.rs` 里单独维护，改动时要两边对齐。
+1080P 及以上还要**登录 cookie**：`SavedCredential::cookie_header()` 从我们自己的凭据现拼一条
+`Cookie: DedeUserID=…; SESSDATA=…; bili_jct=…; buvid3=…` 塞进 `--http-header-fields`
+（bpi-rs 的 cookie jar 是私有字段，拿不到）。
+
+### P4a 落地时核对到的事实（代码已按这些写）
+
+- **请求档 ≠ 得到档**：`.quality(116)` 之后 B 站按账号权限回落，实际能给的高清档写在
+  `data.quality`，而每条流自己还带 `DashStream.id`。界面报的是**选中那条流的 `id`**，
+  只有 `durl` 回退时才退回 `data.quality`。
+- **`timelength` 单位是毫秒**，`DashInfo.duration` 与 `VideoPage.duration` 是秒；
+  DTO 里那个字段一律叫 `timelength_ms`，避免又一次单位事故。
+- **`support_formats` 才是给人看的清晰度列表**：`SupportFormat`
+  （`src/video/videostream_url.rs:93`）= `{ quality, format, new_description,
+  display_desc, superscript, codecs: Option<Vec<String>> }`。
+  `new_description` 是"1080P 高清"这种中文，`display_desc` 是"1080P"这种短标签，
+  优先前者（`api::stream::quality_label` 的顺序：`new_description` → `display_desc` →
+  `accept_quality`/`accept_description` 按下标配对 → 兜底 `"{qn}P"`）。
+- **`durl` 与 `dash` 互斥**：`durl: Vec<DurlInfo>` 是已经合成好的一路文件
+  （`DurlInfo` = `{ order, length, size, ahead, vhead, url, backup_url }`），里面**已含音频**，
+  所以 `audio_url = None`；此时 `codecs` 那格填 `data.accept_format`（没有具体串可报）。
+  `backup_url` 两处都有 `deserialize_with = "deserialize_vec_or_default"`，
+  B 站给 `null` 也不会炸，可以放心 `.clone()` 出来当备用地址列表。
+- **响应结构全无 `#[serde(default)]`**（`videostream_url.rs:104-125`）：`from`/`result`/`message`/
+  `video_codecid`/`seek_param`/`seek_type`/`last_play_time`/`last_play_cid` 少任何一个、
+  或 `dash` 里少 `duration`，整次 playurl 就变成 `BpiError::parse`。
+  **真机如果起播失败并打出一段解析错误原文，第一反应是"字段缺失"，不是登录或会员问题**——
+  这两类症状在界面上都是"取播控地址失败：…"。
 
 ## 6. bpi-rs 需要我们补齐的空白
 
@@ -175,7 +202,7 @@ bpi-rs 自己请求时会加 `User-Agent` + `Referer: https://www.bilibili.com/`
 | `cookie_refresh.rs` 空文件 | `src/login/cookie_refresh.rs` | 自己实现失效检测与重新登录提示 |
 | 无自动重试 / 风控处理 | `err/error.rs`、`err/code.rs` | 按 `is_risk_control()`(-352/-412/412)、`requires_login()`(-101)、`requires_vip()`(-106/-650) 分类处理 |
 | 扫码成功不补 buvid3（`validate_complete` 却要求它） | `src/login/client.rs:211-223` 只搬响应 cookie | `poll_qr` 在 `code==0` 且缺 buvid3 时调 `misc().buvid()` 补，见第 2 节与 architecture.md 第 4.10 节 |
-| 不外发请求头 | `src/client.rs:394-413` | `player::BILIBILI_REFERER` / `MPV_USER_AGENT` 常量 |
+| 不外发请求头，也不交出 cookie jar（`jar` 是私有字段） | `src/client.rs:394-413` | `player::BILIBILI_REFERER` / `MPV_USER_AGENT` 常量 + `SavedCredential::cookie_header()` 现拼一条 `Cookie:` 给 mpv |
 
 ## 7. mpv（`ref/mpv`，DOCS/man）
 

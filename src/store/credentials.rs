@@ -51,6 +51,28 @@ impl SavedCredential {
         crate::app::data_dir().join("cookies.json")
     }
 
+    /// 拼成给 mpv 用的 `Cookie` 头值（不含 `Cookie: ` 前缀）。
+    ///
+    /// B 站的 m4s 直链会校验这个：1080P/高码率没有登录 cookie 就是 403/-101，
+    /// 而 bpi-rs 不把它的 cookie jar 交出来（`jar` 是私有的），所以由我们自己拼。
+    /// 顺序与 B 站网页一致，纯为可读性；字段缺任何一个都少一条（不编造空值）。
+    pub fn cookie_header(&self) -> String {
+        let mut parts: Vec<String> = Vec::with_capacity(4);
+        if !self.dede_user_id.is_empty() {
+            parts.push(format!("DedeUserID={}", self.dede_user_id));
+        }
+        if !self.sessdata.is_empty() {
+            parts.push(format!("SESSDATA={}", self.sessdata));
+        }
+        if !self.bili_jct.is_empty() {
+            parts.push(format!("bili_jct={}", self.bili_jct));
+        }
+        if !self.buvid3.is_empty() {
+            parts.push(format!("buvid3={}", self.buvid3));
+        }
+        parts.join("; ")
+    }
+
     /// 是否够构造一个完整的 `Account`。
     pub fn is_complete(&self) -> bool {
         !self.dede_user_id.is_empty()

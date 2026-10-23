@@ -33,6 +33,7 @@ pub mod history;
 pub mod login;
 pub mod profile;
 pub mod search;
+pub mod stream;
 pub mod stream_select;
 
 use std::future::Future;
