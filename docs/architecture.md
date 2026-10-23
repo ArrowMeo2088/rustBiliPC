@@ -305,3 +305,16 @@ api 层在提交前、tokio 任务内请求前后（带 `Instant` 耗时与返�
 - 背景是第 4.7 节那次真机诊断：加载态永不结束 → 任务 panic 被 `JoinHandle::Err` 吞掉。
   现在两处（登录取码、轮询）都会把 `describe_join_error()` 的文案显示到界面上。
 - lock 只是本包依赖列表变化（新增直接依赖 `rustls`），包数仍 887。
+
+### 第八、九轮（run 39883479417）：日志埋点上机
+
+- 第八轮失败是我的两个流程错误叠加：上一轮没跑完就推新提交（白烧一轮），以及 `log::Level`
+  上用了不存在的方法 `is_enabled`（`log` 门面在调用 `log()` 前已按 `set_max_level` 过滤，
+  这层判断本就多余）。已把"一轮只烧一次"写进 QODER.md。
+- 第九轮全绿（28 passed），产物 31.9 MB；lock 因移除 `env_logger` 从 887 → 877 个包。
+- **重要观测（排除整类猜测）**：在同一台机器上用 `curl --noproxy '*'` 直连
+  `passport.bilibili.com/x/passport-login/web/qrcode/generate` 得到 `http=200`、TLS 0.19s、
+  总耗时 0.22s，并返回合法 `qrcode_key`；`/x/web-interface/nav` 同样正常（`-101 未登录` 是
+  预期响应，`wbi_img` 在里面）。所以"界面停在加载态"与网络、DNS、系统代理无关，
+  只可能是进程内的问题：任务没被 tokio 调度，或结果回到 gpui 前台的那一跳丢了。
+  对照第 4.8 节的埋点位置读 `debug.log` 即可分辨是哪一种。
