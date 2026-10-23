@@ -463,3 +463,10 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 - 有价值的信息：**整个 lib 只报了这一个错**，说明 P2b 那三个 api 封装（profile/favorites/history）、
   外壳、根视图的类型全部核对到位——`space_info` / `created_list` / `collected_list` /
   `history_list` 的签名与字段名都没猜错（逐个查 `ref/bpi-rs` 起作用了）。
+
+### 第十四轮（run 39895619637，commit `5c7c8ae`）：P2b 通过
+
+- 全步骤 success，**31 passed / 0 failed**（新增 `mine_tests` 两条：`format_seconds` 的边界、
+  `vip_label` 的口径），我们的 crate 编译 **35.13 秒**，整轮约 4 分钟；零 warning。
+- 这轮的产物**还没给用户测**：分支上新增了"个人中心懒加载"（第 4.11 节）那一个提交，
+  所以要再烧第十五轮，让被测二进制就是分支顶端。
