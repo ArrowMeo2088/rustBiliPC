@@ -39,10 +39,8 @@ impl log::Log for FileLogger {
     }
 
     fn log(&self, record: &log::Record) {
-        if !record.metadata().level().is_enabled() {
-            return;
-        }
-
+        // 不需要在这里再判级别：`log` 门面已按 `set_max_level` 过滤后才会调到本函数
+        // （`log::Level` 也没有 `is_enabled` 方法，CI 实测）。
         let line = format!(
             "{} {:>5} {}: {}\n",
             timestamp(),
