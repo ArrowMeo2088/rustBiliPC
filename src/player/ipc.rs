@@ -274,9 +274,12 @@ async fn pump(
         // 1) 先把待发命令写干净（一次写不完就留着，下轮接着写）。
         while !pending.is_empty() {
             match client.try_write(&pending) {
-                // 写进去多少就丢掉多少（`replace_range` 而不是 `drain`：后者返回迭代器，
-                // 不消费它会撞上本项目的 `unused_must_use = "deny"`）。
-                Ok(written) if written > 0 => pending.replace_range(..written, &[]),
+                // 写进去多少就丢掉多少。这里用 `split_off` 再赋值而不是 `drain(..n)`：
+                // `drain` 返回的迭代器不消费会撞上本项目的 `unused_must_use = "deny"`
+                // （第 4.9 节那条规矩的副作用），而 std 的 `Vec` **没有** `replace_range`
+                // （那是 `bstr::ByteVec` 的方法，第二十一轮就是这么报的 E0599）。
+                // 只有"一次没写完"这种少见的情况会多一次分配。
+                Ok(written) if written > 0 => pending = pending.split_off(written),
                 // **一次都没写进去就退出这一轮**，去等下一次可写。少了这个分支就是在这条
                 // runtime 线程上死转：`pending` 永远非空、`written` 永远是 0。
                 Ok(_zero) => break,
