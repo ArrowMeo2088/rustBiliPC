@@ -100,9 +100,11 @@ pub const OBSERVED_PROPERTIES: &[&str] = &[
 pub fn observe_batch(properties: &[&str]) -> Vec<Value> {
     properties
         .iter()
+        // `copied()` 把元素从 `&&str` 收成 `&str`，下面的 `(index, name)` 解构才是
+        // `(usize, &str)`；少了这一步就会拿 `&&str` 去填 `&str` 的位（第二十轮就是这么报的）。
+        .copied()
         .enumerate()
-        // 解构成 `&(index, name)`，这样 `name` 直接是 `&str`（否则是 `&&str`）。
-        .map(|&(index, name)| {
+        .map(|(index, name)| {
             let id = index as u64 + 1;
             observe_property(name, id, id)
         })
