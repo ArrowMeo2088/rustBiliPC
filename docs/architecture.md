@@ -558,7 +558,7 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | P3 | 详情：`video().view()`、多 P、tags/related、字幕列表 | **完成**（第十七轮产物真机通过；机制见第 4.12 节。发布时间/分区按用户决定**不做**——live 的 `VideoView` 没有这两个字段） |
 | P4a | 起播：playurl 取地址 + 选流 + 拉起外置 mpv（不遥控） | **完成**（第十八轮真机失败：mpv 窗口没出现，根因是 `--opt value` 写法 + mpv 该从运行目录取；第十九轮修好，43 passed、零 warning，真机确认能起播出声） |
 | P4b | 曾按"遥控"理解做过一版（连管道、订阅属性、进度行、暂停/±10 秒）——第二十三轮 57 passed 全绿，但**方向错了**：播放期 UI 归 mpv。已按范围删净，机制留在第 4.14 节 |
-| P5 | 视觉：照 `ref/Bili.Copilot` 的度量重做（色板/字号层级/卡片 232×238/网格/页头 56 + 侧栏 240/右栏 360/hover 换底色） | 代码完成，待编译与真机看效果（第 4.15 节） |
+| P5 | 视觉：照 `ref/Bili.Copilot` 的度量重做（色板/字号层级/卡片 232×238/网格/页头 56 + 侧栏 240/右栏 360/hover 换底色） | **编译与测试已绿**（第二十五轮 40 passed、零 Rust warning，产物 `89d97a7`）；**只剩他真机看过**（第 4.15 节） |
 | P6 | 播放之外的功能补全：主页（热门）、评论区、字幕 `sub-add`、换清晰度保住窗口与进度 | 未开始（这是范围定稿后剩下的正事） |
 
 ## 6. 已知风险与待验证
@@ -897,3 +897,28 @@ run 39941368216，SHA `12e63aa`，`cargo build` 在 2 分 23 秒后失败（10:4
   以及"`X` 与 `X.clone()` 在同类型分支里才对称"——`SharedString` 与 `String` 看着都能当文本，
   但元组/枚举的两个分支必须同型。**这类错本地能查：编译器已经把话说全了，是我没检查返回点。**
 - 下一轮（第二十五轮）修这两处，其余不动。
+
+### 第二十五轮（P5 视觉）：绿了，40 passed、零 Rust warning
+
+| 项 | 值 |
+| --- | --- |
+| run | 39943283279（手动触发，SHA `89d97a7`） |
+| 结果 | **success**：Build、Test、Collect、Upload 全绿 |
+| 测试 | `40 passed; 0 failed`（另两条 0 passed 是 bin 与集成测试的空集合） |
+| warning | **Rust 侧 0 条**；日志里那 7 条 warning 全是 runner 自己的（`save-always` 弃用、node 的 `--trace-deprecation`） |
+| 耗时 | 11:02:25 → 11:06:42（UTC），**4 分 17 秒**；`Compiling rustbilipc` 出现两次（build 与 test），`Finished … in 1m 08s` + `6.77s` |
+| 产物 | `rustbilipc.exe` 33,404,416 字节，md5 `a6796377…`（上一版含遥控时是 33,493,504 / `894054d8…`，**小了约 87 KB**，与"删掉整块 IPC + 收回 tokio `net` feature"的方向一致） |
+| Cargo.lock | 与库内**完全一致**（`diff` 无输出）——删 feature 不动 lock，这条再次确认 |
+
+- **为什么"快"这次可信**：不是只看时长，而是日志里确实有 `Compiling rustbilipc` 与 `Finished`，
+  且产物字节数与 md5 都变了（QODER.md 第 5 节那条）。缓存命中只重编本项目，符合预期。
+- **这一轮编出来的东西代表什么**：`ui/palette.rs`、`ui/layout.rs`、重写后的 `ui/video_card.rs`
+  与四个页面的排版**全部通过了类型检查**，包括 `hover(|style| style.bg(..))` 这个形状
+  （`StyleRefinement` 自己实现 `Styled`，`ref/gpui/gpui/src/style.rs:324`）。
+  所以宏生成的那些 tailwind 式方法名（`border_2`/`rounded`/`gap`/`min_h`/`h_full`…）都是真实存在的。
+- **还没证明的只有"好不好看"**：编译器不知道比例、留白、字号层级对不对。
+  交给真机看的四处（第 4.15 节末尾）：卡片网格节奏与留白、卡片文字三行顺序（UP 主在上）、
+  页头/侧栏比例、详情页右栏高度分配。
+- 本轮起交付物是 `publish/rustbilipc.exe`（**构建自 `89d97a7`**）；紧接着这一份 §8 记录是纯文档提交，
+  按 QODER.md 的例外不再烧一轮编译。
+
