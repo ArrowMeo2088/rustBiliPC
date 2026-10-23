@@ -34,9 +34,6 @@ use crate::ui::qr;
 /// 轮询间隔。B 站的 poll 接口对频率不敏感，1.5 秒既跟手又不刷接口。
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 
-/// 心跳次数，仅用于诊断（证明前台执行器能被后台事件唤醒）。
-const HEARTBEAT_TICKS: u8 = 5;
-
 /// 登录成功事件。根视图订阅它，把界面从登录切到主视图。
 #[derive(Clone, Debug)]
 pub struct LoginSucceeded;
@@ -69,7 +66,6 @@ impl LoginPage {
             generation: 0,
         };
         this.refresh_qr(cx);
-        this.start_heartbeat(cx);
         this
     }
 
@@ -118,19 +114,6 @@ impl LoginPage {
         .detach();
     }
 
-    /// 每 2 秒记一行，共 `HEARTBEAT_TICKS` 次；不显示任何界面内容。
-    fn start_heartbeat(&self, cx: &mut Context<Self>) {
-        cx.spawn(async move |_this, cx| {
-            for tick in 1..=HEARTBEAT_TICKS {
-                cx.background_executor()
-                    .timer(Duration::from_millis(2000))
-                    .await;
-                log::debug!("登录页心跳 {tick}/{HEARTBEAT_TICKS}（前台执行器在跑）");
-            }
-        })
-        .detach();
-    }
-
     /// 这一代任务是否还是最新的。
     fn is_current(&self, generation: u32) -> bool {
         self.generation == generation && !self.finished
@@ -174,7 +157,12 @@ impl LoginPage {
 
                 let join = login::poll_qr(Arc::clone(&client), key.clone());
                 let state = match join.await {
-                    Ok(Ok(state)) => state,
+                    Ok(inner) => {
+                        // 这行是"前台队列还在被排空"的常驻证据（原来靠一个只跑 5 次的心跳
+                        // 任务证明，任务本身是诊断脚手架，登录后就没用了，已删）。
+                        log::debug!("登录页：轮询结果已回到前台（代 {generation}）");
+                        inner
+                    }
                     // 网络抖动或接口错误：不打断用户，下一轮继续问。
                     Ok(Err(error)) => {
                         log::warn!("扫码轮询失败: {error}");

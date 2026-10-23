@@ -70,7 +70,7 @@ src/
 ├── main.rs            启动序列：logger → runtime → with_assets → init → theme → set_http_client → 开窗
 ├── lib.rs             模块树 + VERSION
 ├── app.rs             tokio runtime（OnceLock）、install_tls_provider()、describe_join_error()、exe_dir()/data_dir()
-├── logging.rs         debug.log 文件日志（写 %LOCALAPPDATA%\rustBiliPC\，每次启动清空、Debug 级、零依赖、同时写 stderr）
+├── logging.rs         debug.log 文件日志（写 exe 同目录，每次启动清空、Debug 级、零依赖、同时写 stderr）
 ├── theme.rs           全局主题覆盖：accent = #FB7299，accent_foreground = #1F1F1F
 ├── api/
 │   ├── mod.rs         spawn_on_api_runtime()：gpui ↔ tokio 的调用桥
@@ -209,18 +209,22 @@ bpi-rs 的 builder 默认 `no_proxy = true`、`timeout = 10s`、`connect_timeout
 
 GUI 程序双击启动时没有控制台，`stderr` 一律看不见，所以 `src/logging.rs` 自实现 `log::Log`：
 
-- 路径 `%LOCALAPPDATA%\rustBiliPC\debug.log`（取不到 `LOCALAPPDATA` 才退回 `<exe 目录>/data/`），
-  **每次启动 `File::create` 清空重写**，级别 `Debug`。不放在 `publish/`：那是构建输出目录，
-  每轮取产物都会覆盖它（我们真的因此删掉过用户的一份现场）。
+- 路径 **exe 同目录**的 `debug.log`（与 `data/cookies.json` 同一层，用户不用找系统目录），
+  **每次启动 `File::create` 清空重写**，级别 `Debug`。因为它落在构建输出目录 `publish/` 里，
+  取产物时**只搬 exe、绝不整目录清空**（`gh run download -D publish` 会因同名文件失败，
+  正确做法是解到临时目录再 copy——上一轮我们因此差点连现场一起删掉）。
 - 每行 `HH:MM:SS.mmm LEVEL target: message`，写完立即 `flush`（崩溃也不丢最后几行）；
 - 同时把同一行复制到 stderr，便于从命令行启动时直接看；
 - 零新依赖（原来的 `env_logger` 已移除）。
 
 约定：**异步链路的每一跳都要有日志**，否则无法区分"没发出/没回来/回来了但没写进界面"：
 api 层在提交前、tokio 任务内请求前后（带 `Instant` 耗时与返回码）各一条；视图层在 `await` 前后、
-`upgrade()` 失败、`update()` 闭包内部各一条。登录页还带一个 2 秒一次、共 `HEARTBEAT_TICKS`（当前 5）次
-的心跳，用来单独回答"前台队列到底会不会被后台事件唤醒"这个问题；根因定位到 Task 之后它只剩
-回归确认作用，登录跑通即可删。界面上会显示日志文件路径。
+`upgrade()` 失败、`update()` 闭包内部各一条。界面上会显示日志文件路径。
+
+诊断脚手架用完就删：登录页原先挂着一个"每 2 秒一行、共 5 行"的心跳任务，只为回答
+"前台队列到底会不会被后台事件唤醒"这一个问题（第 4.9 节）。根因确认并已修好后它不再说明任何东西，
+第十二轮删除，改由轮询循环自身的"轮询结果已回到前台（代 N）"作常驻证据——
+**心跳不是登录的驱动机制**，扫码在心跳跑完之后照样能登录成功，这一点真机已验证。
 
 ### 4.9 "请求发出去了但界面不动"的真实根因：Task 被丢弃即取消
 
@@ -280,7 +284,7 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | --- | --- | --- |
 | P0 | 依赖骨架、release CI、空窗口 + 中文输入框 + 假数据列表、`api/store/player` 纯逻辑层 | **完成**（run 39787252294 全绿） |
 | P1 | 搜索接线：`search().video()`、结果转换（剥 `<em>`）、封面网络图（gpui 原生 URI 加载）、分页/排序 | 代码与 CI 均完成（run 39795360593）；**验证并入登录之后**（定稿不做免登录搜索） |
-| P2a | 登录：扫码（取码/轮询/过期重载）+ 凭据落盘 + 启动判定 + 登录后进主界面 | 根因已修（第 4.9 节 Task 被丢弃即取消）+ buvid3 补齐（第 4.10 节），待编译与真机复验 |
+| P2a | 登录：扫码（取码/轮询/过期重载）+ 凭据落盘 + 启动判定 + 登录后进主界面 | **完成**（第十一轮产物真机扫码登录通过，凭据已写出） |
 | P2b | 个人：我的信息 / 收藏 / 历史 入口与页面 | 未开始 |
 | P3 | 详情：`video().detail()`、多 P、tags/related、字幕列表 | 未开始 |
 | P4 | 播放：拉起 mpv、管道 IPC 读写、换清晰度（`loadfile` + `audio-remove`/`audio-add`）、`sub-add` | 未开始 |
@@ -408,6 +412,13 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 - 依赖图缓存全命中：`bpi-rs`（因新增 `misc` feature 重编）+ 我们的 crate 共 **47 秒**编完，
   整轮约 5 分钟。`unused_must_use = "deny"` 没有绊倒任何东西——说明四处 `cx.spawn` 都持有了。
 - 唯一 warning 是登录页多余的 `ButtonVariants` 导入（这一页没用到 `.primary()`），已删。
-- **待真机验证**：二维码能否出现、扫码后状态能否推进到"已扫码→登录成功"、
-  `publish/data/cookies.json` 能否写出四个字段、`%LOCALAPPDATA%\rustBiliPC\debug.log` 里
-  应出现"qr_generate 结果已回到前台（代 1）"与 5 行心跳。
+- **真机已验证通过**（2026-10-23，第十一轮产物）：二维码正常显示、扫码后状态推进、
+  登录成功并写出 `publish/data/cookies.json`（四个字段齐全，`buvid3` 由 finger/spi 补取），
+  之后进入搜索页可用。心跳打满 5 次以后再扫码照样成功——证实心跳只是诊断脚手架、不参与登录。
+
+### 第十二轮：日志回到运行同目录，删掉心跳
+
+- `logging::log_dir()` 改回 `exe_dir()`：按定稿，日志与凭据同层（`publish/debug.log`），
+  每次启动 `File::create` 清空。同时把"取产物只搬 exe、不整目录清空"写成规矩（第 4.8 节）。
+- 删除登录页的心跳任务与 `HEARTBEAT_TICKS`，改为轮询循环里一条常驻的
+  "轮询结果已回到前台（代 N）"，证据力更强且不刷无用行。

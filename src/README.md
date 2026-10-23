@@ -9,7 +9,7 @@ Rust crate 根目录（crate 名 `rustbilipc`）。职责划分与维护契约�
 | --- | --- | --- |
 | `main.rs` | 启动序列 | **`logging::init()`** → tokio runtime → TLS provider → `BpiClient` → `with_assets` → `gpui_kit::init` → 主题 → `set_http_client` → 开窗，顺序有意义 |
 | `lib.rs` | 模块树 + `VERSION` | 逻辑都收敛在 lib crate 里便于 `cargo test` |
-| `logging.rs` | 文件日志 | `%LOCALAPPDATA%\rustBiliPC\debug.log`（取不到才退回落 exe 同目录 `data/`），每次启动清空、级别 Debug、每行 flush，同时复制到 stderr；自实现 `log::Log`，零依赖 |
+| `logging.rs` | 文件日志 | **exe 同目录**的 `debug.log`（与 `data/cookies.json` 同一层），每次启动清空、级别 Debug、每行 flush，同时复制到 stderr；自实现 `log::Log`，零依赖 |
 | `app.rs` | 进程级基础设施 | 全局 tokio runtime（`OnceLock`）、`install_tls_provider()`（rustls 双 provider 会 panic）、`describe_join_error()`（把任务 panic 变成可读文案）、`exe_dir()`/`data_dir()` |
 | `theme.rs` | 全局主题覆盖 | accent `#FB7299`，强调色前景改深色（对比度不足 4.5:1） |
 | `api/` | bpi-rs 封装 + DASH 选择 | `spawn_on_api_runtime` 是唯一的 gpui↔tokio 桥；`login.rs`（取码/轮询 + 码值翻译 + cookie→凭据 + **缺 buvid3 时向 `misc().buvid()` 补取**）、`search.rs` 出 DTO（`SearchHit`/`PageInfo`/`SearchSort`），bpi 类型不外泄；`stream_select` 是纯函数 |
