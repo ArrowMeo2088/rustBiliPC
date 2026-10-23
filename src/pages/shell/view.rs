@@ -39,7 +39,8 @@ impl MainShell {
         mid_raw: String,
     ) -> Self {
         let search = cx.new(|cx| SearchPage::new(window, cx, Arc::clone(&client)));
-        let mine = cx.new(|cx| MinePage::new(Arc::clone(&client), mid_raw, cx));
+        // 个人中心随外壳一起构造，但**第一次切到它才发请求**（懒加载见 MinePage::ensure_loaded）。
+        let mine = cx.new(|_cx| MinePage::new(Arc::clone(&client), mid_raw));
         Self {
             search,
             mine,
@@ -54,6 +55,10 @@ impl MainShell {
             .on_click(cx.listener(move |this, _, _window, cx| {
                 if this.tab != tab {
                     this.tab = tab;
+                    // 第一次进"我的"时触发它自己的首轮加载；已加载过就只是换个显示。
+                    if tab == ShellTab::Mine {
+                        this.mine.update(cx, |mine, cx| mine.ensure_loaded(cx));
+                    }
                     cx.notify();
                 }
             }));

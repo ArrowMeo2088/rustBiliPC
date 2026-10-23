@@ -59,29 +59,41 @@ pub struct MinePage {
     history_note: SharedString,
     /// 每次 `reload` 自增；旧任务发现自己不是最新一代就丢弃结果。
     seq: u32,
+    /// 有没有真的加载过。外壳第一次切到"我的"时才发请求（见 `pages/shell/view.rs`）。
+    loaded: bool,
 }
 
 impl MinePage {
-    /// 建页并立即拉一次数据。
-    pub fn new(client: Arc<bpi_rs::BpiClient>, mid_raw: String, cx: &mut Context<Self>) -> Self {
-        let mut this = Self {
+    /// 建页，但**不**立刻发请求：这一页随外壳一起构造，而用户可能根本不点"我的"，
+    /// 一上来就打三个接口既浪费，又可能在首屏多出三条与本意无关的错误行。
+    /// 真正的首次加载由外壳调 [`MinePage::ensure_loaded`] 触发。
+    pub fn new(client: Arc<bpi_rs::BpiClient>, mid_raw: String) -> Self {
+        Self {
             client,
             mid_raw,
             profile: None,
             folders: Vec::new(),
             history: Vec::new(),
             tab: MineTab::Favorites,
-            profile_note: "资料加载中…".into(),
-            folders_note: "收藏夹加载中…".into(),
-            history_note: "历史加载中…".into(),
+            profile_note: "".into(),
+            folders_note: "".into(),
+            history_note: "".into(),
             seq: 0,
-        };
-        this.reload(cx);
-        this
+            loaded: false,
+        }
+    }
+
+    /// 第一次被看到时加载一次；之后保持已有数据，要更新用"重新加载"按钮。
+    pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
+        if self.loaded {
+            return;
+        }
+        self.reload(cx);
     }
 
     /// 三路并发重新加载。
     fn reload(&mut self, cx: &mut Context<Self>) {
+        self.loaded = true;
         self.seq += 1;
         let seq = self.seq;
         self.profile_note = "资料加载中…".into();
