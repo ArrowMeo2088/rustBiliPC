@@ -76,9 +76,13 @@
   每次改完依赖都要把 CI 的 `cargo-lock` artifact 取回并连同改动一起提交。
 - CI 缓存步骤必须 `save-always: true` 且 key 只按 `Cargo.lock` 哈希：否则一次失败构建既不写缓存
   又让下一次全量重编（已踩，见 docs/architecture.md 第 8 节）。
+  **但改 `Cargo.lock` 并不会掉缓存**：`restore-keys` 写的是 `cargo-win-…-release-` **前缀**，
+  key 不精确命中时 Actions 会回退到最近一份同前缀缓存（第十九轮实测：删了 `which`、lock 变了，
+  仍然只重编 bpi-rs + 本项目，`Finished … in 40.69s`，整轮约 4 分钟）。
+  所以**别把"改 lock 要等十几分钟"当成判断依据**。
   **注意**：第十六轮起 Actions 报 `Input 'save-always' has been deprecated … does not work as intended`；
-  目前缓存仍然命中（我们的 crate 三十多秒编完），所以先不动 workflow。**一旦命中率变差，这条是
-  第一嫌疑**，届时改成 `post: true` 的独立保存步骤，而不是回头去猜。
+  目前缓存仍然命中，所以先不动 workflow。**一旦编译真的变回十几分钟，这条是第一嫌疑**，
+  届时改成 `post: true` 的独立保存步骤，而不是回头去猜。
 - 不要在前台长时间轮询 CI：用后台轮询或短探测，以日志证据为准。
   **判"跑完"要比对字段值，不要用子串匹配整段 JSON**：`gh run view --json status,conclusion`
   的输出里随时可能出现 `completed`（步骤级 `status`），第十八轮第一版轮询就把还在编译的 run

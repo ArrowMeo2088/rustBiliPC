@@ -442,7 +442,7 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | P2a | 登录：扫码（取码/轮询/过期重载）+ 凭据落盘 + 启动判定 + 登录后进主界面 | **完成**（第十一轮产物真机扫码登录通过，凭据已写出） |
 | P2b | 个人：我的信息 / 收藏 / 历史 入口与页面 | **完成**（第十五轮产物真机通过；外壳 + 懒加载 + 三路并发，第 4.11 节） |
 | P3 | 详情：`video().view()`、多 P、tags/related、字幕列表 | **完成**（第十七轮产物真机通过；机制见第 4.12 节。发布时间/分区按用户决定**不做**——live 的 `VideoView` 没有这两个字段） |
-| P4a | 起播：playurl 取地址 + 选流 + 拉起外置 mpv（不遥控） | 第十八轮编译通过但**真机失败**（mpv 窗口没出现，根因是 `--opt value` 写法，第 4.3 节）；第十九轮修：`--opt=value` + 运行目录 mpv.exe + stderr 进日志，待真机复看 |
+| P4a | 起播：playurl 取地址 + 选流 + 拉起外置 mpv（不遥控） | 第十八轮编译通过但**真机失败**（mpv 窗口没出现，根因是 `--opt value` 写法，第 4.3 节）→ 第十九轮修好（`--opt=value` + 运行目录 mpv.exe + stderr 进日志，43 passed 零 warning），待真机复看 |
 | P4b | 遥控：管道 IPC 读写、进度/暂停观测、同实例换清晰度、`sub-add`、备用域名换用 | 未开始（`player/ipc.rs` 只有命令构造与管道命名） |
 | P5 | 打磨：详情页覆盖式布局、骨架屏、快捷键、续播进度 | 未开始 |
 
@@ -693,3 +693,21 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
   中途试过加 `--no-ytdl`（想省掉一句没用的 `youtube-dl failed` 噪音），查源码发现它在
   `#if HAVE_LUA` 里、不带 Lua 的构建会当成未知选项，**遂放弃**：不能为了日志好看再引入一个
   "某些构建不出现窗口"的写法（第 4.3 节）。
+
+### 第十九轮（run 39910738892，commit `87e87e9`）：起播修好——`--opt=value`、运行目录 mpv、stderr 进日志
+
+- **43 passed / 0 failed**（上一轮 41 → 加 `options_never_take_their_value_as_a_separate_argument`
+  与 `mpv_is_resolved_from_the_run_directory_not_path`），**零 Rust warning**，
+  产物 33,353,216 字节（md5 `4905bb51…`）。
+- 删掉 `which` 依赖后 `Cargo.lock` 确实变了（我们的包少一行 `which`，`which 8.0.6` 仍在图里，
+  由 `gpui-pre-util` 带着）。**但没有冷编译**：整轮 4 分钟、`Finished … in 40.69s`，
+  日志里照样只有 `Compiling bpi-rs` + `Compiling rustbilipc`。
+  原因是 workflow 的 `restore-keys` 写了 `cargo-win-…-release-` **前缀**，key 未精确命中时
+  Actions 会回退到最近一份同前缀缓存。也就是说：**改 Cargo.lock 的代价不是重编依赖图**，
+  真正会掉缓存的是 `runner.os`/路径变化那类。这条修正了第 8 节早先"改 lock 就可能全量重编"的担心。
+- 三处真机取向一起落进代码：参数用 `--opt=value`、mpv 只认 `<exe 同目录>/mpv.exe`、
+  mpv 的 stderr 逐行进 `debug.log`（前缀 `mpv:`）。外加管道名带实例序号。
+- **待真机验证**（P4a 复看）：窗口应当出现并出声；`debug.log` 里应当能看到
+  `已拉起 mpv：pid=… exe=C:\…\publish\mpv.exe 管道=\.\pipe\rustbilipc-<pid>-1 …`
+  后面跟着 mpv 自己的几行（`cplayer: Playing…`、解码器/VO 的名字）。
+  如果这次还没窗口，日志里的 `mpv:` 行会直接给出原因，不用再猜。
