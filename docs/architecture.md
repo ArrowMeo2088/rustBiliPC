@@ -148,14 +148,36 @@ cx.spawn(async move |this, cx| {
 
 ### 4.3 播放：外置 mpv
 
+- **只把直链 URL 交给 mpv，在线流式播**。B 站是 DASH 音视频两条流，读字节、切片、缓存、seek
+  都归 mpv 自己的 demuxer；我们绝不先把片子下载到磁盘。
 - 音视频是两条 DASH URL：视频当主文件，音频走 `--audio-file=`（可接受远程 URL）。
 - `--http-header-fields` / `--user-agent` / `--referrer` 是**实例级全局**（`mp_network_conf`），
   对同实例的所有 HTTP 流生效，所以 URL 必须与这套头成对出现，否则 403。
-- 控制走命名管道 `\\.\pipe\rustbilipc-<pid>`，JSON 行协议 + `observe_property`；
+- 多条头拼成**一个**逗号分隔的 `--http-header-fields=`：列表选项按 `,` 切分
+  （`ref/mpv/options/m_option.c:1403-1440`），而命令行上重复给同一列表选项是**替换**不是追加。
+- **带值的选项一律 `--opt=value`**。mpv 的 CLI 只额外承认单连字符的 legacy 形式
+  `-opt value`（`ref/mpv/DOCS/man/mpv.rst:440-444`），`--opt value` 会被当成文件名并报
+  `Error parsing commandline option user-agent: option requires parameter` 然后
+  `Exiting... (Fatal error)`——**在建窗口之前**就退出。第十八轮"mpv 窗口没出现"就是它，
+  详见第 8 节末与第 4.13 节。
+- **mpv 的位置：`<exe 同目录>/mpv.exe`（不走 PATH）**。PATH 上 `PATHEXT` 先命中 `mpv.com`，
+  那是控制台版启动器，会再派生一个 mpv.exe：我们 `kill` 的只是外层，真正的播放器脱管。
+  懒人包（mpv-lazy）还带自己的 `portable_config` 和单实例管道，更不可控。
+- **mpv 的 stderr 逐行进 `debug.log`（前缀 `mpv:`）**：GUI 进程没有控制台，mpv 又是
+  "参数写错就静默退出"的程序。第十八轮整轮都在猜，就是因为现场一行 mpv 的输出都没落下。
+  读线程只读不 join（等它 = 等 mpv 退出）。
+- 控制走命名管道 `\\.\pipe\rustbilipc-<pid>-<序号>`，JSON 行协议 + `observe_property`；
   连接断开即视为 mpv 已退出。**这条还没接上**：P4a 只拉起进程、不读写管道（第 4.13 节），
-  `player/ipc.rs` 目前只有命令构造与管道命名。
+  `player/ipc.rs` 目前只有命令构造与管道命名。管道名带序号是因为 mpv 用
+  `PIPE_UNLIMITED_INSTANCES`（`ref/mpv/input/ipc-win.c:387`）建管道，同名不报错，
+  于是"刚 kill 掉的上一个实例"可能还在听同一条管道。
 - `--no-config` 隔离用户自己的 `mpv.conf`，避免别人的 `vo`/`hwdec` 设置干扰。
-- mpv 不在 PATH 是常态：底部状态条从 P0 起就显示查找结果，登录/播放阶段要给明确提示。
+- **参数表里只放所有构建都存在的选项**：`--no-ytdl` 看着很合理（我们给的是解析好的直链，不需要
+  URL 提取器，还能少一句没用的 `youtube-dl failed` 噪音），但 `{"ytdl", …}` 整块在
+  `#if HAVE_LUA` 里（`ref/mpv/options/options.c:570-574`）——不带 Lua 的构建会把它当未知选项，
+  症状又退回"静默不出现窗口"。而 `http-header-fields`/`user-agent`/`referrer`
+  （`stream/network.c:34-40`）与 `input-ipc-server`（`options/options.c:922`）是无条件的，可以留。
+- mpv 不在运行目录是常态：搜索页底部状态行显示该目录路径，详情页起播失败会写明该放哪儿。
 
 ### 4.4 凭据
 
@@ -373,7 +395,7 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | 段 | 文件 | 只管 |
 | --- | --- | --- |
 | 取地址、选流 | `src/api/stream.rs` | playurl 请求参数、DASH/durl 两条路、清晰度中文档 |
-| 拼参数、开进程 | `src/player/mod.rs` 的 `launch()` | PATH 找 mpv、请求头、管道名、`CREATE_NO_WINDOW` |
+| 拼参数、开进程 | `src/player/mod.rs` 的 `launch()` | 定位 `mpv.exe`（运行同目录）、请求头、管道名、`CREATE_NO_WINDOW`、把 mpv 的 stderr 搬进日志 |
 | 发起、显示状态、收进程 | `src/pages/detail/view.rs` 的播放块 | 按钮/清晰度/`player_note`、`Child` 的生命周期 |
 
 - **fnval 是 `16 | 2048`（DASH + AV1）**：**没有单独的 HEVC 位**——开了 DASH 之后
@@ -393,8 +415,12 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
   是这类播放器最难查的 bug，所以两处显式 `kill()`：再次起播先收掉上一个实例，
   以及 `impl Drop for DetailPage` 在实体被弹出栈（或整个窗口关闭）时收掉。
   mpv 侧配 `--keep-open=yes`，播完不自己退，生命周期完全归我们。
-- **mpv 不在 PATH 是常态**：`find_mpv_in_path()` 返回 `Option`，找不到就在 `player_note`
-  写明"请先安装 mpv 并加入 PATH"，不 panic、不静默。搜索页那行 mpv 状态（P0 起就有）也一并当提示。
+- **mpv 走运行目录、不走 PATH**：`mpv_path()` = `<exe 同目录>/mpv.exe`（真机定稿，见第 4.3 节）。
+  找不到就在 `player_note` 与日志里写明**该放哪儿的哪个文件名**，不 panic、不静默；
+  搜索页底部状态行也把这个路径显示出来，省一轮来回问。
+- **起播"没窗口"先看 `debug.log` 里的 `mpv:` 行**：第十八轮的教训是——playurl 成功、
+  `已拉起 mpv（pid …）`也写了，进程却在我们看不见的地方 fatal 退出，现场一句 mpv 输出都没有。
+  现在 stderr 逐行进日志，`--opt value` 那类写法会直接被 mpv 自己喊出来。
 - **换清晰度现在是"重开一个实例"**（P4a 的临时做法）：重新 playurl + 重新 `launch`，
   代价是窗口回到开头。等命名管道 IPC 通了改成同实例 `loadfile` + `audio-remove`/`audio-add`。
   先把按钮做出来是有意义的：它能立刻暴露"哪个档位其实取不到流"这类真机问题。
@@ -416,7 +442,7 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | P2a | 登录：扫码（取码/轮询/过期重载）+ 凭据落盘 + 启动判定 + 登录后进主界面 | **完成**（第十一轮产物真机扫码登录通过，凭据已写出） |
 | P2b | 个人：我的信息 / 收藏 / 历史 入口与页面 | **完成**（第十五轮产物真机通过；外壳 + 懒加载 + 三路并发，第 4.11 节） |
 | P3 | 详情：`video().view()`、多 P、tags/related、字幕列表 | **完成**（第十七轮产物真机通过；机制见第 4.12 节。发布时间/分区按用户决定**不做**——live 的 `VideoView` 没有这两个字段） |
-| P4a | 起播：playurl 取地址 + 选流 + 拉起外置 mpv（不遥控） | 代码与 CI 均完成（第十八轮 41 passed、零 warning，机制见第 4.13 节），待真机复验 |
+| P4a | 起播：playurl 取地址 + 选流 + 拉起外置 mpv（不遥控） | 第十八轮编译通过但**真机失败**（mpv 窗口没出现，根因是 `--opt value` 写法，第 4.3 节）；第十九轮修：`--opt=value` + 运行目录 mpv.exe + stderr 进日志，待真机复看 |
 | P4b | 遥控：管道 IPC 读写、进度/暂停观测、同实例换清晰度、`sub-add`、备用域名换用 | 未开始（`player/ipc.rs` 只有命令构造与管道命名） |
 | P5 | 打磨：详情页覆盖式布局、骨架屏、快捷键、续播进度 | 未开始 |
 
@@ -633,3 +659,37 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
   `--audio-file`）；`player_note` 打出的档位/编码是 `hev1/hvc1` 还是 `avc1/av01`
   （风险表 #14：Skylake 无 AV1 硬解）；换清晰度时"旧窗口收掉、新窗口起来"是否符合预期；
   返回上一页或关窗口后 mpv 是否真的没了（风险：还有声音就是 `Drop` 没生效）。
+
+### 第十八轮真机结果（2026-10-23）：playurl 对了，mpv 窗口没出现
+
+- 日志证据（`publish/debug.log`，同一份现场）：
+  ```text
+  05:58:08.347 playurl 选好流：qn=80 codecs=hev1.1.6.L150.90 音频=true 用时=160.0093ms
+  05:58:08.361 已拉起 mpv：pid=3452 管道=\.\pipe\rustbilipc-9040 音频=true 附加头=1 条
+  05:58:09.710 再次起播，收掉上一个 mpv pid=3452
+  05:58:17.305 详情页退出，收掉 mpv pid=4740
+  ```
+  取地址、选流、封顶（请求 116 实际给 80，账号能给的档）、HEVC 命中、进程拉起与回收**全都对**；
+  唯独用户看不到任何窗口。
+- **根因不在 mpv 的存活，而在 mpv 的命令行语法**：`build_arguments` 把 `--user-agent`、
+  `--referrer`、`--http-header-fields` 的值当作**下一个独立参数**给出，而 mpv 只接受
+  `--opt=value`（外加单连字符 legacy `-opt value`，`ref/mpv/DOCS/man/mpv.rst:440-444`）。
+  本机拿真 mpv 复现，报错与退出原因就是它自己给的：
+  ```text
+  Error parsing commandline option user-agent: option requires parameter
+  Make sure you're using e.g. '--user-agent=value' instead of '--user-agent value'.
+  Exiting... (Fatal error)
+  ```
+  这是**建窗口之前**的致命错误，所以现象是"进程活着几百毫秒，窗口一次都没出现"。
+- 第二条线索同时暴露：PATH 上 `PATHEXT` 把 `.COM` 排在 `.EXE` 前面，`which("mpv")` 命中的是
+  `C:\Program Files\mpv-lazy\mpv.com`（3.5 KB 的控制台启动器，会再派生 75 MB 的 `mpv.exe`），
+  我们 `kill` 的只是外层。按用户定稿改为**只认运行目录的 `mpv.exe`**，`which` 依赖删除。
+- 第十八轮真正缺的是**可排查性**：那一轮日志里连一行 mpv 的输出都没有，所以我们只能反推。
+  现在 `launch()` 把 mpv 的 stderr 逐行写进 `debug.log`（前缀 `mpv:`），下一轮再有"窗口没出现"，
+  原因会直接是日志里的第一句。管道名也补上了实例序号，
+  避免"刚 kill 的上一个 mpv 还在听同名管道"（mpv 用 `PIPE_UNLIMITED_INSTANCES`，同名不报错）。
+- 三条改动都用本机真 mpv（v0.41.0）跑过：改成 `--opt=value` 之后，同一套参数只剩
+  `Failed to open https://nonexistent.invalid/v.m4s.` 这一条网络错误，再没有 option 解析错误。
+  中途试过加 `--no-ytdl`（想省掉一句没用的 `youtube-dl failed` 噪音），查源码发现它在
+  `#if HAVE_LUA` 里、不带 Lua 的构建会当成未知选项，**遂放弃**：不能为了日志好看再引入一个
+  "某些构建不出现窗口"的写法（第 4.3 节）。

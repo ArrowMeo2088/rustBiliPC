@@ -45,6 +45,12 @@
   crates.io 发布包里确认该 API 存在。
 - 画质：HEVC 优先 + **默认封顶 1080P（qn ≤ 116）**，不选 4K/HDR/8K（目标机 i5-6200U 硬解不到）。
 - 播放：**外置 mpv 独立进程 + 独立窗口**，不做 `--wid` 嵌入，不自研解码渲染。
+  **是"把直链 URL 交给 mpv 在线流式播"，不是下载下来再播**——B 站是 DASH 音视频两条流，
+  我们只负责拼参数起进程，读字节/切片/缓存全归 mpv 自己（不许写整片到磁盘）。
+- mpv 可执行文件的位置：**运行同目录的 `mpv.exe`**（`publish/mpv.exe`，2026-10-23 用户定稿），
+  **不走 PATH**：PATH 先命中 `mpv.com`（PATHEXT 把 `.COM` 排在 `.EXE` 前），它会再派生一个
+  mpv.exe，我们 `kill` 不到真正的播放器；用户装的那份还是 mpv-lazy 懒人包，带自己的
+  `portable_config` 与单实例启动器。`which` 依赖因此已删除。
 - 凭据：明文 JSON 存 `<exe 同目录>/data/cookies.json`（用户知情选择）。要改加密只动
   `src/store/credentials.rs` 的 `save`/`load`。
 - **每个 `cx.spawn` 返回的 `gpui::Task` 必须持有或 `.detach()`**：Task 被 drop 即取消任务

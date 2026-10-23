@@ -35,8 +35,9 @@ serde_json = "1"
 anyhow = "1"
 log = "0.4"
 # 日志自己实现（写 debug.log + stderr），见 src/logging.rs：GUI 程序没有控制台。
-# 在 PATH 里找 mpv；找不到要能提示用户，而不是崩。
-which = "8"
+# 这里原本有 `which`（在 PATH 里找 mpv）。第十八轮真机证明那条路本身是错的：
+# PATH 先命中控制台版 mpv.com（PATHEXT 把 .COM 排在 .EXE 前），而它会再派生一个 mpv.exe，
+# 我们 kill 的只是外层启动器。现在只认运行目录的 mpv.exe，见 src/player/mod.rs 文件头。
 # 扫码登录要把 B 站给的 URL 变成模块矩阵。只要纯矩阵（`to_matrix()`），
 # 关掉默认的 image/svg/pic 渲染后端：那三个会拉进 pixels 版 `image`，与 gpui 用的
 # 同名 fork（`use image::Frame`）混在一个构建里容易出问题。二维码直接用 div 网格画。

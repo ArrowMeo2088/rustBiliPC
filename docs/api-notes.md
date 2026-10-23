@@ -172,7 +172,8 @@ bpi-rs 自己请求时会加 `User-Agent` + `Referer: https://www.bilibili.com/`
 
 - **请求档 ≠ 得到档**：`.quality(116)` 之后 B 站按账号权限回落，实际能给的高清档写在
   `data.quality`，而每条流自己还带 `DashStream.id`。界面报的是**选中那条流的 `id`**，
-  只有 `durl` 回退时才退回 `data.quality`。
+  只有 `durl` 回退时才退回 `data.quality`。真机已验证这条：请求 116、回来
+  `qn=80 · codecs=hev1.1.6.L150.90`（第十八轮日志），封顶与编码优先级都按预期工作。
 - **`timelength` 单位是毫秒**，`DashInfo.duration` 与 `VideoPage.duration` 是秒；
   DTO 里那个字段一律叫 `timelength_ms`，避免又一次单位事故。
 - **`support_formats` 才是给人看的清晰度列表**：`SupportFormat`
@@ -208,10 +209,12 @@ bpi-rs 自己请求时会加 `User-Agent` + `Referer: https://www.bilibili.com/`
 
 | 需求 | 选项/命令 | 证据 |
 | --- | --- | --- |
+| **命令行语法** | 带值的选项必须 `--opt=value`；`--opt value` 是致命错误 | `DOCS/man/mpv.rst:440-444`（只额外承认单连字符 legacy `-opt value`）；本机复现原文：`Error parsing commandline option user-agent: option requires parameter` → `Exiting... (Fatal error)`，**在建窗口之前**退出 |
+| 关掉 URL 提取器（**我们不给**） | `--no-ytdl`（`ytdl` 是 bool，默认 true） | `options/options.c:572` 的 `{"ytdl", OPT_BOOL(lua_load_ytdl)}` 整块在 `#if HAVE_LUA` 里 ⇒ 不带 Lua 的构建会把它当未知选项、又是"窗口不出现"，所以参数表只保留所有构建都有的选项 |
 | 单独一路音频 URL | `--audio-file=<file>`（= `--audio-files-append` 别名，可重复） | `options.rst:2362-2367`；`player/loadfile.c:962` 走 `mp_is_url` → 接受远程 URL |
 | 运行中加音频 | IPC `audio-add <url> [flags [title [lang]]]` | `input.rst:767` |
 | HTTP 头 | `--http-header-fields`、`--user-agent`、`--referrer`、`--cookies-file` | `options.rst:5770`；`stream/network.c:34` 全在 `mp_network_conf` 组 → **实例级全局生效**；`--http-header-fields` 是 string list，**按 `,` 切分**且**重复给同一选项是替换**（`m_option.c:1403-1440`、`m_option.h:644`），故多条头拼成一个参数一次给出 |
-| Windows IPC | `--input-ipc-server=\\.\pipe\<name>`，前缀缺失会自动补 | `options.rst:4655`、`ipc.rst:64`；`input/ipc-win.c:386` 用 `PIPE_UNLIMITED_INSTANCES` |
+| Windows IPC | `--input-ipc-server=\\.\pipe\<name>`，前缀缺失会自动补 | `options.rst:4655`、`ipc.rst:64`；`input/ipc-win.c:387` 用 `PIPE_UNLIMITED_INSTANCES` ⇒ **同名不报错**，所以管道名必须每次起播都换序号 |
 | 订阅状态 | `observe_property <id> <name>` → `property-change` | `ipc.rst:279`（连接断开即失效） |
 | 窗口行为 | `--force-window`、`--keep-open`、`--idle=once`、`--taskbar-progress` | `options.rst` 对应条目 |
 | 时间轴对齐 | `--rebase-start-time=yes`（默认即 yes） | `options.rst:251` |

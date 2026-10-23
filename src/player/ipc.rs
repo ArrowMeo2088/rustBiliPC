@@ -16,11 +16,14 @@
 
 use serde_json::{json, Value};
 
-/// 为本进程生成一个不与其他实例冲突的管道名。
+/// 为本进程的某一次起播生成一个不与其他实例冲突的管道名。
 ///
-/// 带上 pid：用户同时开两个客户端（或上一个 mpv 还没退出）时不会串到同一条管道。
-pub fn pipe_name_for(pid: u32) -> String {
-    format!(r"\\.\pipe\rustbilipc-{pid}")
+/// 要带**序号**而不只是 pid：再次起播时我们先 kill 上一个 mpv，但那只是十几毫秒，
+/// 上一个实例可能还持有同名管道句柄；mpv 用 `PIPE_UNLIMITED_INSTANCES` 建管道
+/// （`ref/mpv/input/ipc-win.c:387`），同名不会报错，结果是两个 mpv 都在听——
+/// 我们的命令会随机发给其中一个。
+pub fn pipe_name_for(pid: u32, seq: u32) -> String {
+    format!(r"\\.\pipe\rustbilipc-{pid}-{seq}")
 }
 
 /// 构造一条 mpv IPC 命令：`{"command": [...], "request_id": n}`。

@@ -186,16 +186,17 @@ impl SearchPage {
         } else {
             "未登录"
         };
-        let mpv = if crate::player::find_mpv_in_path().is_some() {
-            "已找到"
+        let mpv = if crate::player::find_mpv().is_some() {
+            "运行目录里有 mpv.exe"
         } else {
-            "PATH 中未找到"
+            "运行目录缺 mpv.exe"
         };
 
         format!(
-            "rustBiliPC v{} · 凭据: {credential} ({}) · mpv: {mpv}",
+            "rustBiliPC v{} · 凭据: {credential} ({}) · mpv: {mpv} ({})",
             crate::VERSION,
-            SavedCredential::path().display()
+            SavedCredential::path().display(),
+            crate::player::mpv_path().display()
         )
         .into()
     }

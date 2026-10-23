@@ -11,7 +11,7 @@ Direct3D11 + DirectComposition + DirectWrite 原生绘制；视频播放交给�
 | 界面 | `gpui-kit 0.8.0`（umbrella，内含 gpui-component 0.8.0 组件层），实际 gpui 快照 `gpui-pre =0.3.9` |
 | 接口 | `bpi-rs 0.3.1`，关闭默认 `full`，只开 login/search/video/user/fav/historytoview/misc |
 | 登录 | 扫码登录为主，凭据明文存 `<exe 同目录>/data/cookies.json`，下次启动自动复用 |
-| 播放 | 调用外部 mpv（在 PATH 中查找），独立窗口；P4a 只做"取地址 + 拉起进程"，命名管道遥控是 P4b |
+| 播放 | 把 DASH 直链 URL 交给外部 mpv **在线流式播**（不下整片），独立窗口；P4a 只做"取地址 + 拉起进程"，命名管道遥控是 P4b |
 | 画质 | HEVC 优先 + 默认封顶 1080P（`id <= 116`），无 1080P 时自动取最高可用档 |
 | 编译 | 本机**不装** Rust 工具链，全部由 GitHub Actions 手动触发编译，仅 Windows x64 **release** |
 | 阶段 | 登录 → 搜索 → 个人 → 详情 → 播放（登录、搜索、个人中心已真机通过；P3 详情页已过编译，当前 P4a：详情页起播 mpv） |
@@ -57,7 +57,8 @@ rustBiliPC/
 ## 运行前提
 
 - Windows 10/11 x64，带 D3D11 10.1 以上显卡驱动（无 WARP 回退）。
-- 需要播放时：安装 mpv 并保证 `mpv` 在 PATH 中；搜索页底部状态行显示是否找到，
-  详情页起播失败也会写明"PATH 里找不到 mpv"（找不到只是不能播，程序本身照常运行）。
+- 需要播放时：把**官方原版 `mpv.exe` 放到程序同目录**（即 `publish/mpv.exe`）。程序只认这个位置，
+  不查 PATH（PATH 上会先命中 `mpv.com` 那个"再派生一个 mpv.exe"的启动器，我们的 kill 管不到真正播放的进程）。
+  缺它只是不能播，其余功能照常；搜索页底部状态行会显示它找的是哪个路径。
 - 首次登录后会在 exe 同目录创建 `data/cookies.json`（明文，含 `SESSDATA`）——
   不要把带凭据的目录提交或分享出去。

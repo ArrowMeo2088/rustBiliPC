@@ -14,9 +14,18 @@
 | 文件 | 说明 |
 | --- | --- |
 | `rustbilipc.exe` | 主程序 |
+| `mpv.exe` | **要自己放的官方原版 mpv**（约 75 MB，不入库、不由 CI 产出）——起播只认这个位置 |
 | `data/cookies.json` | 首次扫码登录后由程序写入（运行同目录），不是编译产物 |
 
 运行时不需要额外 DLL：gpui 的 Windows 后端用系统 DLL（D3D11 / DirectComposition / DirectWrite），
-mpv 是**外部独立进程**，不被链接进来，需要用户自行安装并保证在 PATH 中（程序启动自检会显示查找结果）。
+mpv 是**外部独立进程**，不被链接进来。
+
+**为什么 mpv 要放这一层而不是走 PATH**（第十八轮真机的教训）：程序与 `debug.log`、`data/`
+都在这一层，把 mpv 也放这里，进程树是我们自己的一条。PATH 那条路会先命中
+`mpv.com`（`PATHEXT` 把 `.COM` 排在 `.EXE` 前面），而控制台版 mpv 是个会**再派生一个
+mpv.exe** 的启动器——我们 `kill` 掉的只是外层，真正的播放器留在那儿没人管。
+懒人包（mpv-lazy / mpv_PlayKit）还额外带自己的 `portable_config` 与单实例启动器，更不可控。
+
+缺 `mpv.exe` 时程序照常运行，只是详情页起播会写明"运行目录里没有 mpv.exe（应放在 …）"。
 
 产物结构有变化时更新本 README 并提交。

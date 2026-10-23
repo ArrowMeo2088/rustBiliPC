@@ -35,9 +35,49 @@ mod player_tests {
     use crate::player::{build_arguments, BILIBILI_REFERER};
 
     #[test]
-    fn pipe_name_uses_windows_pipe_namespace() {
-        let name = crate::player::ipc::pipe_name_for(4321);
-        assert_eq!(name, r"\\.\pipe\rustbilipc-4321");
+    fn pipe_name_is_unique_per_instance_not_only_per_process() {
+        // 只带 pid 不够：换清晰度时我们先 kill 再 spawn，上一个实例可能还握着同名管道，
+        // 而 mpv 用 PIPE_UNLIMITED_INSTANCES 建管道，同名不报错 → 命令会发给任意一个。
+        let name = crate::player::ipc::pipe_name_for(4321, 7);
+        assert_eq!(name, r"\\.\pipe\rustbilipc-4321-7");
+        assert_ne!(
+            crate::player::ipc::pipe_name_for(4321, 7),
+            crate::player::ipc::pipe_name_for(4321, 8)
+        );
+    }
+
+    #[test]
+    fn options_never_take_their_value_as_a_separate_argument() {
+        // mpv 只认 `--opt=value`（外加单连字符的 legacy 形式）。`--opt value` 会让它报
+        // "option requires parameter" 然后 `Exiting... (Fatal error)`，**在建窗口之前**就退出——
+        // 第十八轮真机上"mpv 窗口没出现"正是这个。除布尔开关外一律要带 `=`。
+        let args = build_arguments(
+            "https://v/v.m4s",
+            Some("https://a/a.m4s"),
+            r"\\.\pipe\x",
+            &["Cookie: SESSDATA=x".to_string()],
+        );
+        for arg in &args[..args.len() - 1] {
+            if arg.starts_with("--") && !arg.contains('=') {
+                assert!(
+                    matches!(arg.as_str(), "--no-config" | "--force-window"),
+                    "带值的选项必须写成 --opt=value：{arg}"
+                );
+            }
+        }
+        // 只给所有构建都存在的选项：`--no-ytdl` 在 `#if HAVE_LUA` 里，不带 Lua 的 mpv
+        // 会把它当未知选项，症状又是"窗口不出现"。
+        assert!(
+            !args.iter().any(|arg| arg.contains("ytdl")),
+            "{args:?}"
+        );
+        // 三个真正带值的网络选项确认是拼接形式。
+        assert!(args
+            .iter()
+            .any(|arg| arg.starts_with("--user-agent=Mozilla/5.0")));
+        assert!(args
+            .iter()
+            .any(|arg| arg == &format!("--referrer={BILIBILI_REFERER}")));
     }
 
     #[test]
@@ -84,11 +124,23 @@ mod player_tests {
             r"\\.\pipe\x",
             &[],
         );
-        let index = args
+        // 多条头是拼在**同一个** `--http-header-fields=` 里的（列表选项按逗号切分，
+        // 而重复给同一选项是替换，见 player 模块注释）。
+        let joined = args
             .iter()
-            .position(|arg| arg == "--http-header-fields")
+            .find(|arg| arg.starts_with("--http-header-fields="))
             .expect("应当显式传入 http 头");
-        assert!(args[index + 1].contains(&format!("Referer: {BILIBILI_REFERER}")));
+        assert!(joined.contains(&format!("Referer: {BILIBILI_REFERER}")), "{joined}");
+    }
+
+    #[test]
+    fn mpv_is_resolved_from_the_run_directory_not_path() {
+        // 定稿：只认 `<exe 同目录>/mpv.exe`。PATH 那条路会先命中控制台版 mpv.com，
+        // 它再派生的 mpv.exe 不受我们的 kill 管。
+        let dir = crate::app::exe_dir();
+        let path = crate::player::mpv_path();
+        assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("mpv.exe"));
+        assert_eq!(path.parent(), Some(dir.as_path()));
     }
 
     #[test]

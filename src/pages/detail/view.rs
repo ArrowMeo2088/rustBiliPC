@@ -285,7 +285,7 @@ impl DetailPage {
                 };
                 log::info!("详情页：mpv 管道名 {pipe_name}");
                 self.player_note = format!(
-                    "已拉起 mpv（pid {pid}）：{} · {} · {} · 备用地址 {} 个（P4b 才自动换）",
+                    "已拉起 mpv（pid {pid}）：{} · {} · {} · 备用地址 {} 个（P4b 才自动换）· mpv 自己的输出逐行进 debug.log",
                     plan.quality_label,
                     plan.codecs,
                     track,

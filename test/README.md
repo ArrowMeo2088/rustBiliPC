@@ -14,9 +14,12 @@
 只测**纯逻辑**，因为 CI 上没有 GUI 会话也没有 B 站账号：
 
 - `stream_select_tests`：画质档封顶边界（16/32/64/80/112/116 允许，120/125/126/127 排除）。
-- `player_tests`：mpv 参数形状——视频 URL 必须是最后一个位置参数、`--audio-file=` 单独一路、
-  **durl 单文件时不能出现 `--audio-file`**（空值会让 mpv 直接报错退出）、`Referer` 头存在、
-  附加头能追加、IPC JSON 命令形状、管道命名格式。
+- `player_tests`：mpv 参数形状——**带值的选项必须写成 `--opt=value`**（`--opt value` 会让 mpv
+  在建窗口前 `Exiting... (Fatal error)`，第十八轮真机上"窗口没出现"的根因）、视频 URL 必须是
+  最后一个位置参数、`--audio-file=` 单独一路、**durl 单文件时不能出现 `--audio-file`**
+  （空值会让 mpv 直接报错退出）、`Referer` 在拼起来的 `--http-header-fields=` 里、附加头能追加、
+  IPC JSON 命令形状、**管道名带实例序号**（同名不报错但会串到上一个实例）、
+  mpv 定位是 `<exe 同目录>/mpv.exe` 而不是 PATH。
 - `credentials_tests`：JSON 往返、缺省字段容错（老文件不能读不回）、完整性判定、
   与 `bpi_rs::Account` 的字段映射。
 - `search_format_tests`：标题高亮标签清洗、播放量的中文读法（万/亿与尾零截断、边界值）、
