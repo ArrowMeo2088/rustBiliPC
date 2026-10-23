@@ -212,12 +212,14 @@ impl MinePage {
                 profile.sign.clone(),
             ),
             None => (
-                "未取到账号资料".into(),
+                "未取到账号资料".to_string(),
                 String::new(),
                 String::new(),
                 String::new(),
                 String::new(),
-                self.profile_note.clone(),
+                // 取不到资料时，把失败原因当"签名"那一格显示出来。
+                // `profile_note` 是 SharedString，这一格里必须转成 String 才和上面对称。
+                self.profile_note.to_string(),
             ),
         };
 

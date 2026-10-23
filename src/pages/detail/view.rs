@@ -626,6 +626,8 @@ impl DetailPage {
             })
             .child(layout::section_title("字幕"))
             .child(self.subtitles_body())
+            // 这一串链子的终点是 `Div`，函数签名要的是 `AnyElement`（两条分支都得是同一种元素）。
+            .into_any_element()
     }
 
     /// 右栏（360）：选集 + 相关推荐。度量来自参考项目信息面板的宽度。
