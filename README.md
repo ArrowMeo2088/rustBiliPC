@@ -11,10 +11,10 @@ Direct3D11 + DirectComposition + DirectWrite 原生绘制；视频播放交给�
 | 界面 | `gpui-kit 0.8.0`（umbrella，内含 gpui-component 0.8.0 组件层），实际 gpui 快照 `gpui-pre =0.3.9` |
 | 接口 | `bpi-rs 0.3.1`，关闭默认 `full`，只开 login/search/video/user/fav/historytoview/misc |
 | 登录 | 扫码登录为主，凭据明文存 `<exe 同目录>/data/cookies.json`，下次启动自动复用 |
-| 播放 | 把 DASH 直链 URL 交给外部 mpv **在线流式播**（不下整片），独立窗口；P4a 只做"取地址 + 拉起进程"，命名管道遥控是 P4b |
+| 播放 | 把 DASH 直链 URL 交给外部 mpv **在线流式播**（不下整片），独立窗口；P4a 起播、P4b-1 命名管道遥控（进度/暂停/跳转），P4b-2 才是同实例换清晰度与字幕 |
 | 画质 | HEVC 优先 + 默认封顶 1080P（`id <= 116`），无 1080P 时自动取最高可用档 |
 | 编译 | 本机**不装** Rust 工具链，全部由 GitHub Actions 手动触发编译，仅 Windows x64 **release** |
-| 阶段 | 登录 → 搜索 → 个人 → 详情 → 播放（登录、搜索、个人中心已真机通过；P3 详情页已过编译，当前 P4a：详情页起播 mpv） |
+| 阶段 | 登录 → 搜索 → 个人 → 详情 → 播放（登录、搜索、个人中心、详情页已真机通过；当前 P4b-1：详情页起播 + 命名管道遥控，待真机复看） |
 
 ## 大概的文件结构
 
