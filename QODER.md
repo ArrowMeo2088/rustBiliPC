@@ -25,6 +25,10 @@
 - 验证改动 = 推送后看 Actions 日志。一次冷编译 25–45 分钟，所以**动手前先把 API 签名核对准**：
   以 `ref/gpui-kit/examples/*/src/main.rs` 与 `ref/gpui-kit/crates/*/src` 里真实出现过的写法为准，
   不要用没在参考仓库里见过的调用。
+- **在 `ref/gpui` 里 grep 不到某个样式方法，不等于它不存在**：`rounded`/`border_2`/`gap`/`min_h`/
+  `h_full`/`p_4` 这类 tailwind 式方法是 `gpui-pre-macros` 的 `styles.rs` 按"前缀表 × 后缀表"生成的
+  （`styled.rs:27-34` 只是调用宏）。要确认就下 `gpui-pre-macros-<版本>.crate` 读那几张表，
+  或者在 `ref/gpui-kit/crates/*/src` 里找现成调用——**别凭"源码里搜不到"就改写法或放弃度量**。
 
 ## 3. GitHub 访问代理
 
@@ -51,9 +55,21 @@
   **不走 PATH**：PATH 先命中 `mpv.com`（PATHEXT 把 `.COM` 排在 `.EXE` 前），它会再派生一个
   mpv.exe，我们 `kill` 不到真正的播放器；用户装的那份还是 mpv-lazy 懒人包，带自己的
   `portable_config` 与单实例启动器。`which` 依赖因此已删除。
-- **不接 mpv 的文本输出**（用户定稿，2026-10-23）：`launch()` 把 stdout/stderr 都设 `null()`，
-  播放状态、命令成败一律走命名管道（`player/ipc.rs`）。别"顺手"改成 `piped()`：接了没人抽水，
-  缓冲区写满会把 mpv 的写阻塞住。要查 mpv 为什么不动，就在本机把同一套参数复跑一遍看它自己说什么。
+- **不接 mpv 的文本输出**（用户定稿，2026-10-23）：`launch()` 把 stdout/stderr 都设 `null()`。
+  别"顺手"改成 `piped()`：接了没人抽水，缓冲区写满会把 mpv 的写阻塞住。要查 mpv 为什么不动，
+  就在本机把同一套参数复跑一遍看它自己说什么。
+- **播放期归 mpv，客户端只做播放之外**（用户定稿，2026-10-23；范围纠正的直接后果）：
+  进度条、播放时间、暂停、音量、全屏、字幕显示都由 mpv 自带的 OSC 负责，
+  **不要**在 `pages/` 里加播放控制按钮或进度行。rustBiliPC 的清单是：主页/热门、搜索、个人中心、
+  视频详情、评论区、分集/分P 的呈现、清晰度选择、字幕列表与投递、拉起并观测 mpv。
+  第二十二~二十三轮我按"遥控"做过一版（`player/ipc.rs` + `player/state.rs` + 详情页控制条），
+  方向错了、已整体删除；管道机制本身仍然传给 mpv（`--input-ipc-server`），
+  核实过的机制与坑记在 `docs/architecture.md` 第 4.14 节供 P6 复用。**别把那版代码"捡回来"**。
+- **视觉必须照 `ref/Bili.Copilot`，且度量要抄数字不要凭感觉**（用户原话："GUI 样式要参考
+  ref/Bili.Copilot，你这个太丑了"）：颜色与尺寸常量只从 `src/ui/palette.rs` 取，
+  复用件只从 `src/ui/layout.rs` 取，页面里不许出现 `rgba(0x…)` / `px(56.)` 这类字面量；
+  每个数字的 XAML 出处逐条记在 `docs/architecture.md` 第 4.15 节。
+  Acrylic/Mica、`ItemsView`、icon font 这些 gpui 没有等价物的东西**不要硬模仿**。
 - 凭据：明文 JSON 存 `<exe 同目录>/data/cookies.json`（用户知情选择）。要改加密只动
   `src/store/credentials.rs` 的 `save`/`load`。
 - **每个 `cx.spawn` 返回的 `gpui::Task` 必须持有或 `.detach()`**：Task 被 drop 即取消任务

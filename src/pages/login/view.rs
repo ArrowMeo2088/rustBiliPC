@@ -29,6 +29,7 @@ use gpui_kit::*;
 
 use crate::api::login::{self, QrPollState, QrSession, credential_from_cookies};
 use crate::store::credentials::SavedCredential;
+use crate::ui::palette;
 use crate::ui::qr;
 
 /// 轮询间隔。B 站的 poll 接口对频率不敏感，1.5 秒既跟手又不刷接口。
@@ -289,7 +290,7 @@ impl Render for LoginPage {
             // 占位方块保持尺寸稳定，避免二维码到位时整页跳动。
             div()
                 .size(px(qr::MODULE_PIXELS * 25.))
-                .bg(rgb(0x2A2A2A))
+                .bg(palette::card_background_elevated())
                 .into_any_element()
         } else {
             qr::render(&self.matrix)
@@ -301,10 +302,29 @@ impl Render for LoginPage {
             .size_full()
             .items_center()
             .justify_center()
-            .gap_3()
-            .child(div().text_sm().child("登录后才能解锁 1080P 与个人内容"))
+            .gap(px(palette::CARD_TEXT_ROW_GAP))
+            // 这一页是全项目的第一个画面：底色与字色必须和后面几页同一套，
+            // 否则登录成功后窗口"闪一下换个世界"。
+            .bg(palette::page_background())
+            .text_color(palette::text_primary())
+            .child(
+                div()
+                    .text_size(px(palette::FONT_TITLE))
+                    .child("扫码登录 B 站"),
+            )
+            .child(
+                div()
+                    .text_size(px(palette::FONT_BODY))
+                    .text_color(palette::text_secondary())
+                    .child("登录后才能解锁 1080P 与个人内容"),
+            )
             .child(code)
-            .child(div().text_sm().child(self.status.clone()))
+            .child(
+                div()
+                    .text_size(px(palette::FONT_BODY))
+                    .text_color(palette::text_secondary())
+                    .child(self.status.clone()),
+            )
             .child(
                 Button::new("refresh-qr")
                     .label("重新获取二维码")
@@ -313,7 +333,8 @@ impl Render for LoginPage {
             // 出问题时用户能直接找到日志。
             .child(
                 div()
-                    .text_xs()
+                    .text_size(px(palette::FONT_CAPTION))
+                    .text_color(palette::text_tertiary())
                     .child(format!("日志：{}", crate::logging::log_path().display())),
             )
     }

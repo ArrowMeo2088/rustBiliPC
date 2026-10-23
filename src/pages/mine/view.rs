@@ -13,12 +13,14 @@
 use std::sync::Arc;
 
 use gpui_kit::component::button::{Button, ButtonVariants};
+use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::api::favorites::{self, FavFolder};
 use crate::api::history::{self, HistoryItem};
 use crate::api::profile::{self, ProfileSummary};
 use crate::pages::OpenVideo;
+use crate::ui::{layout, palette};
 use crate::ui::video_card::{self, VideoCardData};
 
 /// 列表区显示哪一块。
@@ -42,28 +44,23 @@ impl MineTab {
 /// 历史条目数量。
 const HISTORY_LIMIT: u32 = 20;
 
-/// 头像边长（逻辑像素）。
-const AVATAR_PIXELS: f32 = 56.;
-
-/// 向图床要的头像素尺寸（逻辑 56 × 2 倍缩放上限）。
-const AVATAR_DEVICE_PIXELS: u32 = 112;
-
 /// 个人中心页根视图。
 pub struct MinePage {
+    /// 复用一份客户端；请求要 clone 成 `Arc` 投给 tokio。
     client: Arc<bpi_rs::BpiClient>,
-    /// 凭据里的 `DedeUserID`。资料与收藏接口都要求显式传自己的 mid（bpi-rs 没有 "mine" 变体）。
+    /// 凭据里的 mid（字符串形式，接口要数字时再转，转不动就只发资料那一路）。
     mid_raw: String,
     profile: Option<ProfileSummary>,
     folders: Vec<FavFolder>,
     history: Vec<HistoryItem>,
     tab: MineTab,
-    /// 三块各自的提示：加载中 / 空 / 失败原因。空字符串表示无提示。
+    /// 三块各自的提示位：空串表示正常，非空就把这一块的列表让位给这句话。
     profile_note: SharedString,
     folders_note: SharedString,
     history_note: SharedString,
-    /// 每次 `reload` 自增；旧任务发现自己不是最新一代就丢弃结果。
+    /// 请求序号：只有最新那次的结果允许写回界面（第 4.9 节）。
     seq: u32,
-    /// 有没有真的加载过。外壳第一次切到"我的"时才发请求（见 `pages/shell/view.rs`）。
+    /// 是否已经发起过首轮加载（懒加载用）。
     loaded: bool,
 }
 
@@ -193,67 +190,110 @@ impl MinePage {
         .detach();
     }
 
-    /// 头部：头像 + 昵称 + 等级/会员 + 签名 + 关注粉丝。
-    fn header(&self) -> impl IntoElement {
-        let avatar_box = div()
-            .size(px(AVATAR_PIXELS))
-            .flex_shrink_0()
-            .overflow_hidden()
-            .bg(rgb(0x2A2A2A));
-        // 和封面同一套处理：补协议 + 按这个 56px 的框要 2× 的图（头像原图实测 812KB）。
-        let avatar = match self.profile.as_ref() {
-            Some(profile) if !profile.face.is_empty() => avatar_box.child(
-                img(SharedString::from(crate::ui::cover::for_display(
-                    &profile.face,
-                    AVATAR_DEVICE_PIXELS,
-                    AVATAR_DEVICE_PIXELS,
-                )))
-                .size_full()
-                .object_fit(ObjectFit::Cover)
-                .with_fallback(|| div().size_full().bg(rgb(0x1A1A1A)).into_any_element()),
-            )
-            .into_any_element(),
-            _ => avatar_box.into_any_element(),
+    /// 资料卡：48 的圆头像 + 昵称/等级/会员 + 关注粉丝 + 签名。
+    ///
+    /// 度量照 `ref/Bili.Copilot` 的 `AccountCard.xaml:13-51`（`padding 12`、列距 12、
+    /// 头像 48、名字 BodyStrong、简介 Caption）。这里做成一张卡片，
+    /// 是因为侧栏那套在参考项目里是"浮层里的卡"，直接贴边排字会显得很糙。
+    fn profile_card(&self) -> AnyElement {
+        let face = self
+            .profile
+            .as_ref()
+            .map(|profile| profile.face.clone())
+            .unwrap_or_default();
+
+        let (name, level, vip, following, follower, sign) = match self.profile.as_ref() {
+            Some(profile) => (
+                profile.name.clone(),
+                format!("Lv{}", profile.level),
+                profile.vip_label.clone(),
+                profile.following.to_string(),
+                profile.follower.to_string(),
+                profile.sign.clone(),
+            ),
+            None => (
+                "未取到账号资料".into(),
+                String::new(),
+                String::new(),
+                String::new(),
+                String::new(),
+                self.profile_note.clone(),
+            ),
         };
 
-        let mut column = div().flex().flex_col().flex_1().gap_1();
-        match self.profile.as_ref() {
-            Some(profile) => {
-                column = column
-                    .child(
+        let mut lines = vec![
+            div()
+                .flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .text_size(px(palette::FONT_BODY))
+                        .text_color(palette::text_primary())
+                        .child(name),
+                )
+                .when(!level.is_empty(), |this| {
+                    this.child(
                         div()
-                            .flex()
-                            .gap_2()
-                            .items_center()
-                            .child(div().text_base().child(profile.name.clone()))
-                            .child(div().text_sm().child(format!("Lv{}", profile.level)))
-                            .child(div().text_sm().child(profile.vip_label.clone())),
+                            .text_size(px(palette::FONT_CAPTION))
+                            .text_color(palette::text_tertiary())
+                            .child(level),
                     )
-                    .child(div().text_sm().child(format!(
-                        "关注 {} · 粉丝 {}",
-                        profile.following, profile.follower
-                    )))
-                    .child(div().text_sm().child(profile.sign.clone()));
-            }
-            None => {
-                column = column
-                    .child(div().text_base().child("未取到账号资料"))
-                    .child(div().text_sm().child(self.profile_note.clone()));
-            }
+                })
+                .when(!vip.is_empty(), |this| {
+                    this.child(
+                        div()
+                            .text_size(px(palette::FONT_CAPTION))
+                            .text_color(palette::accent())
+                            .child(vip),
+                    )
+                })
+                .into_any_element(),
+            layout::stat_line(vec![
+                format!("关注 {following}").into(),
+                format!("粉丝 {follower}").into(),
+            ]),
+        ];
+        if !sign.is_empty() {
+            lines.push(
+                div()
+                    .w_full()
+                    .text_size(px(palette::FONT_CAPTION))
+                    .text_color(palette::text_secondary())
+                    .child(sign)
+                    .into_any_element(),
+            );
         }
         // 资料刷新失败时，即使旧数据还在也要把原因显示出来（错误不许只进日志）。
         if self.profile.is_some() && !self.profile_note.is_empty() {
-            column = column.child(div().text_sm().child(self.profile_note.clone()));
+            lines.push(
+                div()
+                    .w_full()
+                    .text_size(px(palette::FONT_CAPTION))
+                    .text_color(palette::critical())
+                    .child(self.profile_note.clone())
+                    .into_any_element(),
+            );
         }
 
         div()
             .flex()
-            .gap_3()
-            .p_4()
-            .items_center()
-            // avatar 自己带尺寸与裁剪，这里不再套一层同尺寸的框。
-            .child(avatar)
-            .child(column)
+            .w_full()
+            .gap(px(palette::STAT_ITEM_GAP))
+            .items_start()
+            .child(layout::avatar(
+                &face,
+                palette::AVATAR_ACCOUNT,
+            ))
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .gap(px(palette::CARD_LINE_GAP))
+                    .children(lines),
+            )
+            .into_any_element()
     }
 
     /// 列表区切换按钮。
@@ -272,13 +312,16 @@ impl MinePage {
     /// 收藏夹列表。
     fn folders_body(&self) -> AnyElement {
         if !self.folders_note.is_empty() {
-            return div().p_4().text_sm().child(self.folders_note.clone()).into_any_element();
+            return layout::note(self.folders_note.clone());
         }
 
         div()
             .flex()
             .flex_col()
             .w_full()
+            .gap(px(palette::LIST_GAP))
+            .py(px(palette::BODY_PADDING_Y))
+            .px(px(palette::CARD_TEXT_PADDING_X))
             .children(self.folders.iter().map(|folder| {
                 let kind = if folder.created { "我创建" } else { "我收藏" };
                 let upper = if folder.upper.is_empty() {
@@ -289,15 +332,29 @@ impl MinePage {
                 div()
                     .flex()
                     .w_full()
+                    .min_h(px(palette::LIST_ROW_MIN_HEIGHT))
                     .gap_2()
-                    .px_4()
-                    .p_2()
+                    .px(px(palette::LIST_ROW_PADDING_X))
+                    .py(px(palette::LIST_ROW_PADDING_Y))
                     .items_center()
-                    .child(div().flex_1().child(folder.title.clone()))
-                    .child(div().text_sm().child(format!(
-                        "{kind} · {} 个内容{upper}",
-                        folder.media_count
-                    )))
+                    .rounded(px(palette::RADIUS))
+                    .bg(palette::card_background())
+                    .child(
+                        div()
+                            .flex_1()
+                            .text_size(px(palette::FONT_BODY))
+                            .text_color(palette::text_primary())
+                            .child(folder.title.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(palette::FONT_CAPTION))
+                            .text_color(palette::text_tertiary())
+                            .child(format!(
+                                "{kind} · {} 个内容{upper}",
+                                folder.media_count
+                            )),
+                    )
             }))
             .into_any_element()
     }
@@ -305,7 +362,7 @@ impl MinePage {
     /// 历史列表：复用搜索页那套卡片（字段语义一致，省一遍排版），点卡片同样发 `OpenVideo`。
     fn history_body(&self, cx: &mut Context<Self>) -> AnyElement {
         if !self.history_note.is_empty() {
-            return div().p_4().text_sm().child(self.history_note.clone()).into_any_element();
+            return layout::note(self.history_note.clone());
         }
 
         let cards = self
@@ -314,32 +371,31 @@ impl MinePage {
             .map(|item| VideoCardData {
                 bvid: item.bvid.clone().into(),
                 title: item.title.clone().into(),
-                author: if item.tag.is_empty() {
-                    item.author.clone().into()
-                } else {
-                    format!("{} · {}", item.author, item.tag).into()
-                },
+                author: item.author.clone().into(),
                 duration: item.duration_text.clone().into(),
-                // 卡片右下角那一栏在历史里放"看到 xx:xx"，比播放量更贴切。
-                play_text: item.progress_text.clone().into(),
+                // 第三行左格是子分区名、右格是"看到 xx:xx"：历史里用户认的是
+                // "我看到哪儿了"，播放量在这里没意义（`HistoryItem` 也不给）。
+                play_text: item.tag.clone().into(),
                 cover_url: item.cover.clone().into(),
+                extra: item.progress_text.clone().into(),
             })
             .collect::<Vec<_>>();
 
-        div()
-            .flex()
-            .flex_col()
-            .w_full()
-            .children(cards.into_iter().map(|card| {
-                let bvid = card.bvid.as_str().to_string();
-                video_card::clickable(
-                    card,
-                    cx.listener(move |_this, _event, _window, cx| {
-                        cx.emit(OpenVideo { bvid: bvid.clone() });
-                    }),
-                )
-            }))
-            .into_any_element()
+        video_card::grid(
+            cards
+                .into_iter()
+                .map(|card| {
+                    let bvid = card.bvid.as_str().to_string();
+                    video_card::clickable(
+                        card,
+                        cx.listener(move |_this, _event, _window, cx| {
+                            cx.emit(OpenVideo { bvid: bvid.clone() });
+                        }),
+                    )
+                    .into_any_element()
+                })
+                .collect(),
+        )
     }
 }
 
@@ -357,27 +413,50 @@ impl Render for MinePage {
             .flex()
             .flex_col()
             .size_full()
-            .child(self.header())
+            .child(layout::header("我的", None, None))
+            // 资料卡（左）+ 切换与重载（右）。参考项目的账号区就是一张卡，
+            // 我们把它放在页头下面，比原来"头像贴着窗口边"要稳。
             .child(
                 div()
                     .flex()
-                    .gap_1()
-                    .p_4()
-                    .items_center()
-                    .child(self.tab_button(MineTab::Favorites, cx))
-                    .child(self.tab_button(MineTab::History, cx))
-                    .child(div().flex_1())
+                    .w_full()
+                    .gap_2()
+                    .items_start()
+                    .px(px(palette::CARD_TEXT_PADDING_X))
+                    .py(px(palette::CARD_TEXT_ROW_GAP))
+                    .child(self.profile_card())
                     .child(
-                        Button::new("mine-reload")
-                            .label("重新加载")
-                            .on_click(cx.listener(|this, _, _window, cx| this.reload(cx))),
+                        div()
+                            .flex()
+                            .flex_col()
+                            .items_end()
+                            .gap(px(palette::CARD_TEXT_ROW_GAP))
+                            .flex_shrink_0()
+                            .child(
+                                div()
+                                    .flex()
+                                    .gap(px(palette::CARD_TEXT_ROW_GAP))
+                                    .child(self.tab_button(MineTab::Favorites, cx))
+                                    .child(self.tab_button(MineTab::History, cx))
+                                    .child(
+                                        Button::new("mine-reload")
+                                            .label("重新加载")
+                                            .on_click(
+                                                cx.listener(|this, _, _window, cx| {
+                                                    this.reload(cx)
+                                                }),
+                                            ),
+                                    ),
+                            ),
                     ),
             )
+            .child(layout::divider())
             .child(
                 div()
                     .id("mine-body")
                     .flex_1()
                     .w_full()
+                    .min_w(px(0.))
                     .overflow_y_scroll()
                     .child(body),
             )

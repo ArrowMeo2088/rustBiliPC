@@ -35,18 +35,6 @@ mod player_tests {
     use crate::player::{build_arguments, BILIBILI_REFERER};
 
     #[test]
-    fn pipe_name_is_unique_per_instance_not_only_per_process() {
-        // 只带 pid 不够：换清晰度时我们先 kill 再 spawn，上一个实例可能还握着同名管道，
-        // 而 mpv 用 PIPE_UNLIMITED_INSTANCES 建管道，同名不报错 → 命令会发给任意一个。
-        let name = crate::player::ipc::pipe_name_for(4321, 7);
-        assert_eq!(name, r"\\.\pipe\rustbilipc-4321-7");
-        assert_ne!(
-            crate::player::ipc::pipe_name_for(4321, 7),
-            crate::player::ipc::pipe_name_for(4321, 8)
-        );
-    }
-
-    #[test]
     fn options_never_take_their_value_as_a_separate_argument() {
         // mpv 只认 `--opt=value`（外加单连字符的 legacy 形式）。`--opt value` 会让它报
         // "option requires parameter" 然后 `Exiting... (Fatal error)`，**在建窗口之前**就退出——
@@ -54,7 +42,6 @@ mod player_tests {
         let args = build_arguments(
             "https://v/v.m4s",
             Some("https://a/a.m4s"),
-            r"\\.\pipe\x",
             &["Cookie: SESSDATA=x".to_string()],
         );
         for arg in &args[..args.len() - 1] {
@@ -85,7 +72,6 @@ mod player_tests {
         let args = build_arguments(
             "https://v/video.m4s",
             Some("https://a/audio.m4s"),
-            r"\\.\pipe\x",
             &[],
         );
         assert_eq!(args.last().map(String::as_str), Some("https://v/video.m4s"));
@@ -97,7 +83,6 @@ mod player_tests {
         let args = build_arguments(
             "https://v/video.m4s",
             Some("https://a/audio.m4s"),
-            r"\\.\pipe\x",
             &[],
         );
         assert!(args
@@ -108,7 +93,7 @@ mod player_tests {
     #[test]
     fn single_file_playback_adds_no_audio_argument() {
         // durl 回退时文件里已经含音频；这时再给一个空的 --audio-file= 会让 mpv 直接报错。
-        let args = build_arguments("https://v/video.mp4", None, r"\\.\pipe\x", &[]);
+        let args = build_arguments("https://v/video.mp4", None, &[]);
         assert!(
             !args.iter().any(|arg| arg.starts_with("--audio-file")),
             "{args:?}"
@@ -121,7 +106,6 @@ mod player_tests {
         let args = build_arguments(
             "https://v/v.m4s",
             Some("https://a/a.m4s"),
-            r"\\.\pipe\x",
             &[],
         );
         // 多条头是拼在**同一个** `--http-header-fields=` 里的（列表选项按逗号切分，
@@ -148,32 +132,10 @@ mod player_tests {
         let args = build_arguments(
             "https://v/v.m4s",
             Some("https://a/a.m4s"),
-            r"\\.\pipe\x",
             &[format!("Cookie: SESSDATA=x")],
         );
         let joined = args.join(" ");
         assert!(joined.contains("Cookie: SESSDATA=x"), "{joined}");
-    }
-
-    #[test]
-    fn ipc_command_shape_is_mpv_json_protocol() {
-        use crate::player::ipc::command;
-        let value = command(&[serde_json::json!("quit")], 7);
-        assert_eq!(
-            value,
-            serde_json::json!({ "command": ["quit"], "request_id": 7 })
-        );
-    }
-
-    #[test]
-    fn observe_property_carries_numeric_id() {
-        let value = crate::player::ipc::observe_property("time-pos", 1, 2);
-        assert_eq!(
-            value["command"][0],
-            serde_json::json!("observe_property")
-        );
-        assert_eq!(value["command"][1], serde_json::json!(1));
-        assert_eq!(value["command"][2], serde_json::json!("time-pos"));
     }
 }
 
@@ -582,205 +544,5 @@ mod scaffold_tests {
     fn version_matches_manifest() {
         assert!(!VERSION.is_empty());
         assert!(VERSION.starts_with(|c: char| c.is_ascii_digit()));
-    }
-}
-
-#[cfg(test)]
-mod ipc_tests {
-    use crate::player::ipc::{
-        command, observe_batch, parse_line, seek_relative, set_property, to_line, IpcEvent,
-        OBSERVED_PROPERTIES,
-    };
-    use serde_json::{json, Value};
-
-    #[test]
-    fn property_change_becomes_a_named_event() {
-        let event = parse_line(
-            r#"{"event":"property-change","id":1,"data":52.5,"name":"time-pos"}"#,
-        )
-        .expect("property-change 应当翻成事件");
-        assert_eq!(
-            event,
-            IpcEvent::Property {
-                name: "time-pos".to_string(),
-                data: json!(52.5),
-            }
-        );
-    }
-
-    #[test]
-    fn a_null_property_is_kept_as_null_and_still_arrives() {
-        // mpv 在流没载入时会推 `time-pos: null`，"没有进度"必须能和"进度是 0"分开。
-        let event = parse_line(r#"{"event":"property-change","id":1,"data":null,"name":"time-pos"}"#)
-            .expect("null 也是合法的值");
-        let IpcEvent::Property { data, .. } = event else {
-            panic!("应当是属性事件");
-        };
-        assert_eq!(data, Value::Null);
-        assert_eq!(data.as_f64(), None);
-    }
-
-    #[test]
-    fn replies_carry_request_id_and_error() {
-        assert_eq!(
-            parse_line(r#"{"error":"success","data":null,"request_id":4}"#),
-            Some(IpcEvent::Reply {
-                request_id: 4,
-                error: "success".to_string(),
-            })
-        );
-        // 不写 request_id 时 mpv 固定回 0（DOCS/man/ipc.rst:139）。
-        assert_eq!(
-            parse_line(r#"{"error":"unknown command"}"#),
-            Some(IpcEvent::Reply {
-                request_id: 0,
-                error: "unknown command".to_string(),
-            })
-        );
-    }
-
-    #[test]
-    fn unknown_events_and_garbage_are_dropped() {
-        assert_eq!(parse_line(r#"{"event":"start-file"}"#), None);
-        assert_eq!(parse_line(r#"{"event":"log-message","data":{}}"#), None);
-        assert_eq!(parse_line("这不是 JSON"), None);
-        assert_eq!(parse_line(""), None);
-    }
-
-    #[test]
-    fn every_message_is_one_line_ending_without_newline() {
-        // mpv 要求"一行一条、行内不得出现 \n"，所以序列化结果必须没有换行。
-        let lines: Vec<String> = observe_batch(OBSERVED_PROPERTIES)
-            .iter()
-            .chain(std::iter::once(&set_property("pause", json!(true), 9)))
-            .chain(std::iter::once(&seek_relative(-10.0, 10)))
-            .map(to_line)
-            .collect();
-        assert!(lines.iter().all(|line| !line.contains('\n')), "{lines:?}");
-        assert_eq!(lines.len(), OBSERVED_PROPERTIES.len() + 2);
-    }
-
-    #[test]
-    fn observe_batch_numbers_ids_from_one() {
-        let first = to_line(&observe_batch(OBSERVED_PROPERTIES)[0]);
-        let parsed: Value = serde_json::from_str(&first).expect("订阅行应当是合法 JSON");
-        assert_eq!(
-            parsed,
-            json!({ "command": ["observe_property", 1, OBSERVED_PROPERTIES[0]], "request_id": 1 })
-        );
-        // id 不重复，否则 mpv 会把两条订阅当成同一条。
-        let ids: Vec<u64> = observe_batch(OBSERVED_PROPERTIES)
-            .iter()
-            .filter_map(|value| value["command"][1].as_u64())
-            .collect();
-        let unique: std::collections::HashSet<u64> = ids.iter().copied().collect();
-        assert_eq!(ids.len(), unique.len(), "{ids:?}");
-    }
-
-    #[test]
-    fn seek_command_states_the_relative_flag_explicitly() {
-        let parsed: Value = serde_json::from_str(&to_line(&seek_relative(-10.0, 10))).unwrap();
-        assert_eq!(
-            parsed,
-            json!({ "command": ["seek", -10.0, "relative"], "request_id": 10 })
-        );
-    }
-}
-
-#[cfg(test)]
-mod play_state_tests {
-    use crate::player::ipc::IpcEvent;
-    use crate::player::state::{PlayState, MISSING_TIME};
-    use serde_json::json;
-
-    #[test]
-    fn pause_only_flips_when_mpv_reports_it() {
-        let mut state = PlayState::default();
-        assert_eq!(state.apply(IpcEvent::Connected), None);
-        assert!(!state.paused, "连上不代表暂停");
-        // 界面不发"本地翻转"那一下：只有 mpv 的 property-change 才改状态。
-        let _ = state.apply(IpcEvent::Property {
-            name: "pause".to_string(),
-            data: json!(true),
-        });
-        assert!(state.paused);
-        assert_eq!(state.mode_text(), "已暂停");
-    }
-
-    #[test]
-    fn buffering_outranks_paused_in_the_mode_text() {
-        let mut state = PlayState::default();
-        state.connected = true;
-        state.paused = true;
-        state.buffering = true;
-        assert_eq!(state.mode_text(), "缓冲中", "用户最想知道的是它卡住了还是自己按的");
-    }
-
-    #[test]
-    fn unknown_property_names_are_ignored() {
-        let mut state = PlayState::default();
-        state.connected = true;
-        let _ = state.apply(IpcEvent::Property {
-            name: "volume".to_string(),
-            data: json!(80),
-        });
-        assert_eq!(state.position, None);
-    }
-
-    #[test]
-    fn closed_loses_the_connection_and_says_so() {
-        let mut state = PlayState::default();
-        let _ = state.apply(IpcEvent::Connected);
-        assert_eq!(
-            state.apply(IpcEvent::Closed).as_deref(),
-            Some("mpv 已退出（管道断开）")
-        );
-        assert!(!state.connected);
-        // 没连上时以起播那句为准，不显示假的进度。
-        assert_eq!(state.line("起播失败：找不到 mpv"), "起播失败：找不到 mpv");
-        assert_eq!(state.line(""), "还没起播。");
-    }
-
-    #[test]
-    fn progress_line_shows_clock_mode_and_error() {
-        let mut state = PlayState::default();
-        state.connected = true;
-        assert_eq!(state.line(""), "--:-- / --:-- · 播放中");
-        state.position = Some(75.4);
-        state.duration = Some(600.0);
-        assert_eq!(state.line(""), "01:15 / 10:00 · 播放中");
-        state.last_error = Some("命令失败（请求 3）：invalid argument".to_string());
-        assert_eq!(
-            state.line(""),
-            "01:15 / 10:00 · 播放中 · 命令失败（请求 3）：invalid argument"
-        );
-    }
-
-    #[test]
-    fn missing_or_negative_seconds_do_not_break_the_clock() {
-        let mut state = PlayState::default();
-        state.connected = true;
-        state.position = Some(-3.0);
-        // 只有位置、没有时长：不编一个假的总时长，但状态后缀照给（连上了就该显示状态）。
-        assert_eq!(state.line(""), "00:00 · 播放中");
-        state.position = None;
-        state.duration = Some(9.0);
-        assert_eq!(state.line(""), "--:-- / 00:09 · 播放中");
-        assert_eq!(state.progress_text(), format!("{MISSING_TIME} / 00:09"));
-    }
-
-    #[test]
-    fn a_successful_reply_clears_the_previous_error() {
-        let mut state = PlayState::default();
-        let _ = state.apply(IpcEvent::Reply {
-            request_id: 1,
-            error: "some error".to_string(),
-        });
-        assert!(state.last_error.is_some());
-        let _ = state.apply(IpcEvent::Reply {
-            request_id: 2,
-            error: "success".to_string(),
-        });
-        assert_eq!(state.last_error, None);
     }
 }

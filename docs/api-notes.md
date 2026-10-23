@@ -207,6 +207,12 @@ bpi-rs 自己请求时会加 `User-Agent` + `Referer: https://www.bilibili.com/`
 
 ## 7. mpv（`ref/mpv`，DOCS/man）
 
+> **标注**：下面凡是"IPC / 订阅 / 命令"相关的行，当前代码**不使用**（范围定稿：播放期归 mpv 自己的
+> OSC，客户端不做遥控 UI，见 architecture.md 第 4.3 节）。这些结论是第二十二~二十三轮为那版管道
+> 客户端核实并踩过的，P6 的"同实例换清晰度 / `sub-add`"要用时照此实现，不必重新查证。
+> 客户端不必重新查证。现在**连 `--input-ipc-server` 都不传**（参数表里没有它），
+> 以免留下"是不是还有人在听这条管道"的错觉；P6 恢复时按下面两行把参数与序号规则一起加回来。
+
 | 需求 | 选项/命令 | 证据 |
 | --- | --- | --- |
 | **命令行语法** | 带值的选项必须 `--opt=value`；`--opt value` 是致命错误 | `DOCS/man/mpv.rst:440-444`（只额外承认单连字符 legacy `-opt value`）；本机复现原文：`Error parsing commandline option user-agent: option requires parameter` → `Exiting... (Fatal error)`，**在建窗口之前**退出 |
@@ -215,7 +221,8 @@ bpi-rs 自己请求时会加 `User-Agent` + `Referer: https://www.bilibili.com/`
 | 运行中加音频 | IPC `audio-add <url> [flags [title [lang]]]` | `input.rst:767` |
 | HTTP 头 | `--http-header-fields`、`--user-agent`、`--referrer`、`--cookies-file` | `options.rst:5770`；`stream/network.c:34` 全在 `mp_network_conf` 组 → **实例级全局生效**；`--http-header-fields` 是 string list，**按 `,` 切分**且**重复给同一选项是替换**（`m_option.c:1403-1440`、`m_option.h:644`），故多条头拼成一个参数一次给出 |
 | Windows IPC | `--input-ipc-server=\\.\pipe\<name>`，前缀缺失会自动补 | `options.rst:4655`、`ipc.rst:64`；`input/ipc-win.c:352-359` 服务端建法是 `PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED` + `PIPE_TYPE_MESSAGE | PIPE_READMODE_BYTE` + `PIPE_UNLIMITED_INSTANCES` + `PIPE_REJECT_REMOTE_CLIENTS` ⇒ 多客户端合法、**同名不报错**，所以管道名必须每次起播都换序号 |
-| 客户端要同时读写这条管道 | 必须用 overlapped I/O（或封装好的库） | `ipc.rst:69-73` 原文：要像 Linux 那样同时读写，"得写一个用 overlapped file I/O（或 .NET `NamedPipeClientStream` 那种封装）的程序"。我们选 `tokio::net::windows::named_pipe`：`try_read`/`try_write`/`ready` 都取 `&self`，同一个任务里读写能交错，overlapped 由 tokio 内部处理（因此 Cargo.toml 给 tokio 开了 `net`） |
+| 客户端要同时读写这条管道 | 必须用 overlapped I/O（或封装好的库） | `ipc.rst:69-73` 原文：要像 Linux 那样同时读写，"得写一个用 overlapped file I/O（或 .NET `NamedPipeClientStream` 那种封装）的程序"。我们选 `tokio::net::windows::named_pipe`：`try_read`/`try_write`/`ready` 都取 `&self`，同一个任务里读写能交错，overlapped 由 tokio 内部处理。**当时**给 tokio 开过 `net` feature，
+随范围纠正已收回（要用时再开，`mio`/`socket2`/`windows-sys` 本来就在依赖图里，`Cargo.lock` 不动） |
 | 订阅状态 | `observe_property <id> <name>` → `property-change` | `ipc.rst:269-289`：id 只要在同一条连接内唯一；**连接一断注册即失效**（文档专门警告"用两次 socat 分别收发"会看起来不工作）⇒ 订阅与命令必须走同一条一直开着的连接 |
 | 属性名的出处 | `time-pos` / `duration` / `pause` / `eof-reached` / `idle-active` / `paused-for-cache` | `ref/mpv/player/command.c`：`duration` :4697、`time-pos` :4708、`eof-reached` :4727、`paused-for-cache` :4737、`idle-active` :4743。值可能是 `null`，界面要能分开"没进度"与"0 秒" |
 | 跳转与换档 | `seek <秒> [relative]`、`loadfile <url> [flags]`、`audio-add <url>` | `input.rst:300-308`（默认就是 relative）、`:542`、`:767`。**坑**：`:546-548` 明说替换当前文件的 `loadfile` 会在旧文件还没停、新文件还没开始加载时就返回 ⇒ **不能拿它的回包判断流开没开成** |
@@ -230,18 +237,32 @@ bpi-rs 自己请求时会加 `User-Agent` + `Referer: https://www.bilibili.com/`
 
 ## 8. 视觉规格来源（`ref/Bili.Copilot`，C#/WinUI3）
 
-只移植度量，不移植 Fluent 材质（gpui 无 Mica/Acrylic 等价物）：
+只移植度量，不移植 Fluent 材质（gpui 无 Mica/Acrylic 等价物）。
+**逐条数字与文件行号在 `docs/architecture.md` 第 4.15 节**（那里是权威清单，本处只留结论与几件额外事实）：
 
-- 卡片网格：`VideoLayout` 232×238、间距 20（`App.xaml:69-115`）。
-- 卡片内部：封面 `CornerRadius=4`、`DecodeWidth=600`；时长角标黑底 60% + `Margin=8 Padding=4`；
-  信息区 `Padding="16,12,16,16" RowSpacing=8`；UP 主名 12px 三级色（`VideoCardControl.xaml`）。
-- 外壳：48px 标题栏 + NavigationView 侧栏；搜索框 `MinWidth=320 MaxWidth=500`；
+- 卡片网格：`VideoLayout` 232×238、列距/行距 20（`App.xaml:70-76`）。
+- 卡片内部：文字三行是 `Auto`/`*`/`Auto`，顺序 **UP 主 → 标题 → 统计**；角标黑底 60% + `Margin=8 Padding=4`；
+  信息区 `Padding="16,12,16,16" RowSpacing=8`；12px 三级灰（`VideoCardControl.xaml`）。
+- 外壳：48px 标题栏（`RootLayout.xaml:33`）+ 240 侧栏（`LayoutPageViewModelBase.cs:41`）；
+  搜索框 `MinWidth=320 MaxWidth=500`（`RootLayout.xaml:74-80`）；
   详情页以 `OverlayFrame` 覆盖在主 Frame 之上（同一窗口）。
+- 选中态：`ItemContainer` 的 `PART_SelectionVisual` 是**常驻的 2px 透明边框**
+  （`Overrides.xaml:190-197`），选中只换 brush（`:233-247`）——所以我们的列表行也一律 `border_2()`，
+  否则点选会抖 2px。
 - 骨架屏：`ShimmerLayout`（600px 封面 + 3 条微光条）；图片缓存目录 `ImageCache` + 独立 HTTP 客户端。
 - **它的 `DecodeWidth=600` 就是"别下原图"的同一件事**：我们改成在 URL 上要小图
   （`@320w_180h.jpg`），比下完原图再解码更省，见第 3 节。
 - 它的画质逻辑与我们的定稿一致：`p.Codecs.Contains(prefer_codec)`，默认偏好 `"avc"`（我们改成 HEVC 优先），
   降级用 `availableFormats.Max(Quality)`。
+- **gpui 侧的一条查证方法（本轮新增）**：`rounded` / `border_2` / `gap` / `min_h` / `h_full` / `p_4`
+  在 `ref/gpui/gpui/src/styled.rs` 里 **grep 不到**，它们是 `gpui-pre-macros` 的 `styles.rs` 用
+  "前缀表 × 后缀表"生成的（`styled.rs:27-34` 那一串 `gpui_macros::*_style_methods!()`）。
+  要确认某个 tailwind 式方法存在，下 `gpui-pre-macros-<版本>.crate` 读
+  `box_prefixes()/border_prefixes()/corner_prefixes()/padding_box_style_prefixes()`；
+  别因为 `styled.rs` 没有就判定 API 不存在。同一批核过的还有：
+  `hover` 在 `InteractiveElement`（`elements/div.rs:842`，`Div` 与 `Stateful<Div>` 都实现：`:1877`、`:4087`）、
+  `ElementId: From<String>`（`window.rs:7676`）、`cx.listener` 的返回形状（`app/context.rs:246-250`）、
+  `From<Rgba> for Hsla`（`color.rs:677`）与 `for Background`（`:960`）。
 
 ## 9. 个人中心（P2b 已核实）
 

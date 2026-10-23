@@ -1,7 +1,8 @@
 //! 搜索页（阶段一）。
 //!
 //! 这一页要跑通的是整条链路：输入 → 回车/按钮 → tokio 上的 bpi-rs 请求 →
-//! 回到 gpui 更新状态 → 卡片与分页呈现。UI 保持朴素，观感打磨在 P5。
+//! 回到 gpui 更新状态 → 卡片与分页呈现。排版走 `ui/palette` + `ui/layout` 那套度量（P5），
+//! 页面自己不留任何颜色与尺寸字面量。
 //!
 //! 三个刻意的设计选择：
 //! - 触发方式同时给"回车"和"搜索"按钮：gpui 的 `InputEvent::PressEnter` 在中文 IME
@@ -21,7 +22,7 @@ use gpui_kit::*;
 
 use crate::api::search::{self, PageInfo, SearchSort};
 use crate::pages::OpenVideo;
-use crate::store::credentials::SavedCredential;
+use crate::ui::{layout, palette};
 use crate::ui::video_card::{self, VideoCardData};
 
 /// 搜索页根视图。
@@ -44,10 +45,8 @@ pub struct SearchPage {
     loading: bool,
     /// 请求序号：只有序号仍为最新的那次结果才允许写回界面。
     request_seq: u32,
-    /// 状态/错误提示，直接显示在列表上方。
+    /// 状态/错误提示，显示在筛选行中间（异步失败一定要有地方说，见第 4.7 节）。
     feedback: SharedString,
-    /// 底部环境自检行。
-    status_line: SharedString,
     /// 订阅要随实体存活。
     _subscriptions: Vec<Subscription>,
 }
@@ -89,7 +88,6 @@ impl SearchPage {
             loading: false,
             request_seq: 0,
             feedback: "输入关键词后回车或点搜索".into(),
-            status_line: Self::build_status_line(),
             _subscriptions,
         }
     }
@@ -179,28 +177,6 @@ impl SearchPage {
         self.submit(keyword, 1, sort, cx);
     }
 
-    /// 组装底部自检信息：凭据文件在不在、mpv 找不找得到。
-    fn build_status_line() -> SharedString {
-        let credential = if SavedCredential::load().is_some() {
-            "已保存"
-        } else {
-            "未登录"
-        };
-        let mpv = if crate::player::find_mpv().is_some() {
-            "运行目录里有 mpv.exe"
-        } else {
-            "运行目录缺 mpv.exe"
-        };
-
-        format!(
-            "rustBiliPC v{} · 凭据: {credential} ({}) · mpv: {mpv} ({})",
-            crate::VERSION,
-            SavedCredential::path().display(),
-            crate::player::mpv_path().display()
-        )
-        .into()
-    }
-
     /// 分页按钮组。加载中一律不响应，避免同一页并发请求（判断写在回调里）。
     fn pager(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let current = self.page;
@@ -209,6 +185,8 @@ impl SearchPage {
             .flex()
             .gap_2()
             .items_center()
+            .flex_shrink_0()
+            .text_size(px(palette::FONT_CAPTION))
             .child(
                 Button::new("prev-page")
                     .label("上一页")
@@ -221,8 +199,8 @@ impl SearchPage {
             )
             .child(
                 div()
-                    .text_sm()
-                    .child(format!("第 {current} 页 / 共 {} 页", self.info.num_pages.max(0))),
+                    .text_size(px(palette::FONT_CAPTION))
+                    .child(format!("第 {current} / 共 {} 页", self.info.num_pages.max(0))),
             )
             .child(
                 Button::new("next-page")
@@ -238,7 +216,7 @@ impl SearchPage {
 
     /// 排序按钮组。
     fn sort_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let mut bar = div().flex().gap_1();
+        let mut bar = div().flex().gap(px(palette::CARD_TEXT_ROW_GAP)).flex_shrink_0();
         for sort in [
             SearchSort::Comprehensive,
             SearchSort::PlayCount,
@@ -263,45 +241,76 @@ impl EventEmitter<OpenVideo> for SearchPage {}
 
 impl Render for SearchPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 页头右侧那条就是搜索框 + 按钮。宽度取自 palette，落在参考项目 320~500 的区间里
+        // （`RootLayout.xaml:74-80` 的 MinWidth/MaxWidth）。
+        let search_box = div()
+            .flex()
+            .items_center()
+            .gap_2()
+            .flex_shrink_0()
+            .w(px(palette::SEARCH_BOX_WIDTH))
+            .child(div().flex_1().child(Input::new(&self.query)))
+            .child(
+                Button::new("do-search")
+                    .primary()
+                    .label("搜索")
+                    .on_click(cx.listener(|this, _, _window, cx| {
+                        let keyword = this.query.read(cx).value().trim().to_string();
+                        this.submit(keyword, 1, this.sort, cx);
+                    })),
+            );
+
+        // 副标题就是"当前已提交的关键词"，让用户知道分页/排序作用在哪句话上。
+        let keyword = if self.submitted.is_empty() {
+            None
+        } else {
+            Some(self.submitted.clone())
+        };
+
         div()
             .flex()
             .flex_col()
             .size_full()
-            // 顶栏：输入框 + 搜索按钮 + 排序。
+            .child(layout::header("搜索", keyword, Some(search_box.into_any_element())))
+            // 筛选行：排序在左、反馈居中、分页在右。
             .child(
                 div()
                     .flex()
                     .w_full()
-                    .gap_2()
-                    .p_4()
+                    .h(px(palette::LIST_ROW_MIN_HEIGHT))
+                    .flex_shrink_0()
                     .items_center()
-                    .child(div().flex_1().child(Input::new(&self.query)))
+                    .gap_2()
+                    .px(px(palette::CARD_TEXT_PADDING_X))
+                    .child(self.sort_bar(cx))
                     .child(
-                        Button::new("do-search")
-                            .primary()
-                            .label("搜索")
-                            .on_click(cx.listener(|this, _, _window, cx| {
-                                let keyword = this.query.read(cx).value().trim().to_string();
-                                this.submit(keyword, 1, this.sort, cx);
-                            })),
+                        div()
+                            .flex_1()
+                            .text_size(px(palette::FONT_CAPTION))
+                            .text_color(palette::text_tertiary())
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .overflow_hidden()
+                            .child(self.feedback.clone()),
                     )
-                    .child(self.sort_bar(cx)),
+                    .child(self.pager(cx)),
             )
-            // 状态行。
-            .child(div().px_4().text_sm().child(self.feedback.clone()))
-            // 结果区：滚动容器必须先 `.id()`——`overflow_*` 是 `Stateful<Div>` 的方法。
+            .child(layout::divider())
+            // 结果区。两个必需项：滚动容器要先 `.id()`（`overflow_*` 是 `Stateful<Div>` 的方法），
+            // 以及 `min_w(px(0.))`——不给的话这个 flex 子项会被内容撑开，横向能滚出一段空白。
             .child(
                 div()
                     .id("search-results")
                     .flex_1()
                     .w_full()
+                    .min_w(px(0.))
                     .overflow_y_scroll()
-                    .child(
-                        div()
-                            .flex()
-                            .flex_col()
-                            .w_full()
-                            .children(self.cards.iter().cloned().map(|card| {
+                    .px(px(palette::CARD_TEXT_PADDING_X))
+                    .child(video_card::grid(
+                        self.cards
+                            .iter()
+                            .cloned()
+                            .map(|card| {
                                 // 点卡片 → 发 OpenVideo，由外壳负责打开详情页（页面自己不做导航）。
                                 let bvid = card.bvid.as_str().to_string();
                                 video_card::clickable(
@@ -310,20 +319,10 @@ impl Render for SearchPage {
                                         cx.emit(OpenVideo { bvid: bvid.clone() });
                                     }),
                                 )
-                            })),
-                    ),
-            )
-            // 分页与自检。
-            .child(
-                div()
-                    .flex()
-                    .w_full()
-                    .gap_2()
-                    .p_2()
-                    .items_center()
-                    .child(self.pager(cx))
-                    .child(div().flex_1())
-                    .child(div().text_sm().child(self.status_line.clone())),
+                                .into_any_element()
+                            })
+                            .collect(),
+                    )),
             )
     }
 }

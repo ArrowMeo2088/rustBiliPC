@@ -11,10 +11,11 @@ Direct3D11 + DirectComposition + DirectWrite 原生绘制；视频播放交给�
 | 界面 | `gpui-kit 0.8.0`（umbrella，内含 gpui-component 0.8.0 组件层），实际 gpui 快照 `gpui-pre =0.3.9` |
 | 接口 | `bpi-rs 0.3.1`，关闭默认 `full`，只开 login/search/video/user/fav/historytoview/misc |
 | 登录 | 扫码登录为主，凭据明文存 `<exe 同目录>/data/cookies.json`，下次启动自动复用 |
-| 播放 | 把 DASH 直链 URL 交给外部 mpv **在线流式播**（不下整片），独立窗口；P4a 起播、P4b-1 命名管道遥控（进度/暂停/跳转），P4b-2 才是同实例换清晰度与字幕 |
+| 播放 | 把 DASH 直链 URL 交给外部 mpv **在线流式播**（不下整片），独立窗口。**播放期的一切（进度条/时间/暂停/音量/全屏/字幕显示）都归 mpv 自带的 OSC，本项目不做**；我们只做播放之外（见下一行） |
+| 范围 | rustBiliPC 负责：主页/热门、搜索、个人中心、视频详情、评论区、分集分P 的呈现、清晰度选择、字幕列表与投递、拉起并观测 mpv。不负责：播放器界面本身 |
 | 画质 | HEVC 优先 + 默认封顶 1080P（`id <= 116`），无 1080P 时自动取最高可用档 |
 | 编译 | 本机**不装** Rust 工具链，全部由 GitHub Actions 手动触发编译，仅 Windows x64 **release** |
-| 阶段 | 登录 → 搜索 → 个人 → 详情 → 播放（登录、搜索、个人中心、详情页已真机通过；当前 P4b-1：详情页起播 + 命名管道遥控，待真机复看） |
+| 阶段 | 登录 → 搜索 → 个人 → 详情 → 起播 均已真机通过；曾按"遥控"做过一版播放控制（进度/暂停），已按上面那条范围**删净**。当前 P5：照 `ref/Bili.Copilot` 的度量重做视觉；下一步 P6：主页（热门）+ 评论区 + 换清晰度/字幕 |
 
 ## 大概的文件结构
 
@@ -25,9 +26,9 @@ rustBiliPC/
 │   ├── main.rs lib.rs app.rs theme.rs
 │   ├── api/             bpi-rs 封装 + DASH 码流选择 + 播控取地址
 │   ├── store/           凭据落盘
-│   ├── player/          外置 mpv 参数、拉起进程与 IPC 命令构造
+│   ├── player/          外置 mpv 参数与拉起（一个文件，不做遥控）
 │   ├── pages/           登录 / 搜索 / 个人中心 / 详情页（外壳持有详情页栈）
-│   └── ui/              复用组件（视频卡片、封面 URL 规整、二维码）
+│   └── ui/              色板与尺寸常量、复用布局件、视频卡片、封面 URL 规整、二维码
 ├── publish/             编译产物（不入库）
 ├── test/                单元测试布局说明（代码在 src/tests/）
 ├── ref/                 参考源码：gpui(0.3.9)/gpui-kit/Ely/bpi-rs/mpv/Bili.Copilot（不入库）

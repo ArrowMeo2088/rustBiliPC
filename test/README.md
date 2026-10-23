@@ -18,7 +18,7 @@
   在建窗口前 `Exiting... (Fatal error)`，第十八轮真机上"窗口没出现"的根因）、视频 URL 必须是
   最后一个位置参数、`--audio-file=` 单独一路、**durl 单文件时不能出现 `--audio-file`**
   （空值会让 mpv 直接报错退出）、`Referer` 在拼起来的 `--http-header-fields=` 里、附加头能追加、
-  IPC JSON 命令形状、**管道名带实例序号**（同名不报错但会串到上一个实例）、
+  **参数表里不许出现 Lua 门控的 `--no-ytdl`**（不带 Lua 的构建把它当未知选项，又是不出现窗口），
   mpv 定位是 `<exe 同目录>/mpv.exe` 而不是 PATH。
 - `credentials_tests`：JSON 往返、缺省字段容错（老文件不能读不回）、完整性判定、
   与 `bpi_rs::Account` 的字段映射。
@@ -40,22 +40,23 @@
   `accept_quality`/`accept_description` 下标配对 → `"{qn}P"`）、`quality_options` 在没有
   `support_formats` 时能退回 `accept_*` 列表、`cookie_header()` 只列出**实际有值**的 cookie
   （缺一个字段就少一条，不拼 `SESSDATA=` 这种空项——空值与"没带"在排查时容易被当成同一回事）。
-- `ipc_tests`：mpv 管道的**协议形状**与**一行一条**的规矩——`property-change` 翻成带名字的属性事件、
-  `data: null` 要原样保留（"没进度"必须能和"进度是 0"分开）、回包的 `request_id` 缺省是 0
-  （`DOCS/man/ipc.rst:139`）、不认识的 `event` 与垃圾行一律丢弃；`observe_batch` 的订阅 id 从 1 起
-  且不重复（`observe_property` 的 id 在同一条连接内唯一）；所有序列化出来的消息**都不含 `\n`**。
-- `play_state_tests`：状态口径——暂停只认 mpv 报回来的值（本地不翻转）、缓冲优先于暂停显示、
-  没进度写 `--:--` 而不是编一个 `00:00`、只有位置时不硬造总长、负数夹到 0、
-  `Closed` 之后连接位归零并回退到起播那句提示、`success` 回包要清掉之前的失败原因。
+- ~~`ipc_tests` / `play_state_tests`~~：第二十二~二十三轮为 mpv 遥控写的两组测试（协议一行一条、
+  `data: null` 保留、`request_id` 缺省 0、订阅 id 不重复；状态口径、缓冲优先、`--:--` 不编 `00:00`）
+  **已随范围纠正一并删除**——播放期归 mpv，客户端不做遥控 UI。测试代码没了但结论都在
+  `docs/architecture.md` 第 4.14 节，P6 真要连管道时照着写回来。
 - `scaffold_tests`：版本号非空且以数字开头。
 
 ## 不测什么
 
 - UI 渲染与交互：验证方式是 CI 产物在真机上跑起来看（架构文档的机制决定 release 才能运行）。
+  `ui/palette.rs` 与 `ui/layout.rs` 也属这一类——前者是常量，后者是 gpui 元素构造，
+  没有不需要窗口就能断言的逻辑；它们的正确性靠"数字抄自 `ref/Bili.Copilot` 的 XAML"保证，
+  出处逐条列在 `docs/architecture.md` 第 4.15 节。
 - 真实网络请求：需要登录态，人工验证。
-- **mpv 管道的那段真读写**（`ipc::pump`/`connect`）：它要一个真的 mpv 进程和一条真管道，
-  本机又没有 Rust 工具链跑不了。所以测的是**它两边的形状**——消息必须是一行一条 minified JSON、
-  事件必须能解析成 `IpcEvent`、状态必须按口径显示；连接与读写本身由真机验收（第 4.14 节）。
+- **mpv 管道的读写**：当前**没有这条链路**（播放期归 mpv，客户端不遥控）。以前写过的那版测的是
+  它两边的形状——消息必须是一行一条 minified JSON、事件要能解析、状态要按口径显示；
+  连接与读写本身从来没有本机验证过（没有工具链、也没有真 mpv 进程可测）。
+  结论保留在 `docs/architecture.md` 第 4.14 节，P6 恢复时照抄。
 - **视图里的异步状态机**（例如"登录成功之后有没有停轮询、有没有写凭据"）：要用 gpui 的无窗口
   测试执行器（`TestAppContext`），它只在 `test-support` feature 下导出，而我们的入口是
   `gpui-kit` —— 得先加 `[dev-dependencies] gpui-kit = { version = "0.8.0", features =

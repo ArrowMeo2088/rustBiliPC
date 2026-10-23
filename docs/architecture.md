@@ -87,21 +87,22 @@ src/
 ├── store/
 │   └── credentials.rs 明文 JSON 凭据落盘（<exe>/data/cookies.json）+ cookie_header() 给 mpv
 ├── player/
-│   ├── mod.rs         mpv 参数构造（一律 `--opt=value`）+ launch() 拉起进程 + Referer/UA 常量 + 运行目录定位
-│   ├── ipc.rs         mpv 命名管道：命令构造 + tokio 客户端的读写任务（一行一条 minified JSON）
-│   └── state.rs       把 `property-change` 折成播放状态（纯数据，可单测）
+│   └── mod.rs         mpv 参数构造（一律 `--opt=value`）+ launch() 拉起进程 + Referer/UA 常量 + 运行目录定位
+                      **不做播放期 UI，也不接它的命名管道/文本输出**（范围定稿见第 4.3 节）
 ├── pages/
 │   ├── mod.rs         页面层出口 + 共用导航事件 `OpenVideo`（三个页面发同一个信号）
 │   ├── root.rs        窗口根视图：无凭据→登录页，有凭据→主界面外壳；登录成功后原地切换
-│   ├── shell/         外壳：顶部"搜索 / 我的"、**详情页栈**（打开 push、返回 pop），订阅 OpenVideo
+│   ├── shell/         外壳：左侧 240 导航栏 + **详情页栈**（打开 push、返回 pop），订阅 OpenVideo
 │   ├── login/         扫码登录页（二维码 + 1.5s 轮询 + 过期自动重载）
 │   ├── mine/          个人中心页（资料 + 收藏夹 + 历史，三路并发各自显示错误；懒加载）
-│   ├── detail/        详情页（主体 + 选集 + **播放** + 字幕 + 相关推荐；持 mpv 子进程并在 Drop 时收掉）
+│   ├── detail/        详情页（主列信息 + 右栏 360 选集与相关推荐；持 mpv 子进程并在 Drop 时收掉）
 │   └── search/        阶段一页面（view.rs 为根视图）
 ├── ui/
+│   ├── palette.rs     **颜色与度量的唯一出处**：把 Bili.Copilot 的 WinUI 主题键与 xaml 数字翻译成 gpui 的值
+│   ├── layout.rs      页头/分隔线/区块标题/侧栏项/圆头像/统计行/卡片容器
 │   ├── qr.rs          二维码：qrcode-generator 出布尔矩阵，div 网格绘制
 │   ├── cover.rs       封面显示前必过：补协议 + hdslb 图床 `@{w}w_{h}h.jpg` 缩略图后缀
-│   └── video_card.rs  卡片视图（封面走 gpui URI 图片加载 + 时长角标 + clickable）
+│   └── video_card.rs  竖卡 232×238 与侧栏横卡 104（flex_wrap 当 UniformGrid 用、时长角标、hover、可点击）
 └── tests/             单元测试集中地（纯逻辑）
 ```
 
@@ -171,11 +172,12 @@ cx.spawn(async move |this, cx| {
   顺带记一条源码事实：**mpv 的消息默认写 stdout**，只有 `force_stderr` 才走 stderr
   （`ref/mpv/common/msg.c:190-202` 的 `term_msg_fileno`；本机实测一次失败的打开，
   stdout 613 字节、stderr 0 字节）。所以"只接 stderr"其实等于什么都没接。
-- 控制走命名管道 `\\.\pipe\rustbilipc-<pid>-<序号>`，JSON 行协议 + `observe_property`；
-  连接断开即视为 mpv 已退出。**P4b-1 已接上**（第 4.14 节）：进度/时长/暂停/缓冲/结束从这条管道读，
-  暂停、±10 秒、`quit` 从这条管道写。**还没做**的是同实例换清晰度与 `sub-add`（P4b-2）。
-  管道名带序号是因为 mpv 用 `PIPE_UNLIMITED_INSTANCES`（`ref/mpv/input/ipc-win.c:387`）建管道，
-  同名不报错，于是"刚 kill 掉的上一个实例"可能还在听同一条管道——我们的命令会发给错的窗口。
+- **播放期的 UI 与控制一律归 mpv**（范围定稿，2026-10-23）：进度条、音量、全屏、暂停、字幕显示
+  都由 mpv 自带的 OSC 负责，rustBiliPC **不做**播放控制条，也不把播放时间显示到详情页。
+  我们只负责"取地址 + 拼参数 + 拉起进程"。曾按"遥控"做过一版命名管道客户端
+  （见第 4.14 节），已按这条范围删净——**连 `--input-ipc-server` 这个参数也一并去掉了**，
+  不给人"是不是还有人在听这条管道"的错觉。P6 要做"同实例换清晰度"和 `sub-add` 时再加回来，
+  机制细节全在第 4.14 节备查，不必重新查证。
 - `--no-config` 隔离用户自己的 `mpv.conf`，避免别人的 `vo`/`hwdec` 设置干扰。
 - **参数表里只放所有构建都存在的选项**：`--no-ytdl` 看着很合理（我们给的是解析好的直链，不需要
   URL 提取器，还能少一句没用的 `youtube-dl failed` 噪音），但 `{"ytdl", …}` 整块在
@@ -400,8 +402,8 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | 段 | 文件 | 只管 |
 | --- | --- | --- |
 | 取地址、选流 | `src/api/stream.rs` | playurl 请求参数、DASH/durl 两条路、清晰度中文档 |
-| 拼参数、开进程 | `src/player/mod.rs` 的 `launch()` | 定位 `mpv.exe`（运行同目录）、请求头、管道名、`CREATE_NO_WINDOW`、stdout/stderr 一律 `null()`（第 4.3 节） |
-| 发起、显示状态、收进程 | `src/pages/detail/view.rs` 的播放块 | 按钮/清晰度/`player_note`、`Child` 的生命周期 |
+| 拼参数、开进程 | `src/player/mod.rs` 的 `launch()` | 定位 `mpv.exe`（运行同目录）、请求头、`CREATE_NO_WINDOW`、stdout/stderr 一律 `null()`（第 4.3 节） |
+| 发起、显示状态、收进程 | `src/pages/detail/view.rs` 的播放块 | 按钮/清晰度/`player_note`、`Child` 的生命周期（**只有"交给 mpv"这一句，没有进度/暂停控件**） |
 
 - **fnval 是 `16 | 2048`（DASH + AV1）**：**没有单独的 HEVC 位**——开了 DASH 之后
   `dash.video[]` 把 HEVC/AVC/AV1 一起给，靠 `codecs` 前缀区分（选流规则见第 4.2 节）。
@@ -425,12 +427,13 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
   搜索页底部状态行也把这个路径显示出来，省一轮来回问。
 - **起播"没窗口"靠本机复跑那条命令行定位，不靠 mpv 的文本日志**：第十八轮的现场是 playurl 成功、
   `已拉起 mpv（pid …）`也写了，却查不到进程为什么秒退。当时加过一版"stderr 逐行进日志"，
-  后来按用户定稿撤掉了（第 4.3 节：**不接文本输出，状态一律走 IPC**），而且 mpv 的消息默认写
+  后来按用户定稿撤掉了（第 4.3 节：**文本输出与命名管道都不接**），而且 mpv 的消息默认写
   **stdout**（`common/msg.c:190-202`），只接 stderr 等于什么都没接。
   留住的手法是：拿真 mpv 在本机把同一套参数跑一遍，让它自己把 `Exiting... (Fatal error)` 喊出来。
-- **换清晰度现在是"重开一个实例"**（P4a 的临时做法）：重新 playurl + 重新 `launch`，
-  代价是窗口回到开头。等命名管道 IPC 通了改成同实例 `loadfile` + `audio-remove`/`audio-add`。
-  先把按钮做出来是有意义的：它能立刻暴露"哪个档位其实取不到流"这类真机问题。
+- **换清晰度现在是"重开一个实例"**（当前做法）：重新 playurl + 重新 `launch`，
+  代价是窗口回到开头。改成同实例 `loadfile` + `audio-remove`/`audio-add` 属于 P6，
+  它要求把第 4.14 节那套管道的客户端重新写回来——这条**不是**播放期 UI（用户仍在客户端里点档位），
+  所以不违反"播放归 mpv"的范围。先把按钮做出来是有意义的：它能立刻暴露"哪个档位其实取不到流"这类真机问题。
 - **多条头只能拼成一个逗号分隔的参数**：`--http-header-fields` 是 string list 选项，
   mpv 按 `,` 切分（`ref/mpv/options/m_option.c:1403-1440` + `m_option.h:644`），
   而**命令行上重复给同一个列表选项是"替换"不是"追加"**（默认 `OP_NONE` 直接
@@ -440,42 +443,109 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 - **结果只认最近一次点击的 cid**：`planning_cid` 守卫——用户点了 P3 又点 P5，
   P3 的地址回来时直接丢，否则会起一个播错分 P 的窗口。
 
-### 4.14 遥控（P4b-1）：连上 mpv 的命名管道，状态只信它报回来的
+### 4.14 【技术档案，代码已删】mpv 命名管道遥控：机制核实过，等 P6 再用
 
-范围：**订阅属性 + 显示进度 + 暂停/±10 秒/quit + 断连检测**。同实例换清晰度与 `sub-add` 是 P4b-2。
+**这一节写的东西当前不存在于代码里。**第二十二轮我按"遥控"做了 `player/ipc.rs` + `player/state.rs`
+（连管道、订阅属性、进度行、暂停/±10 秒），第二十三轮 57 passed 全绿、真机也能用，
+但用户定稿范围是"**视频播放相关的交给 MPV，rustBiliPC 做播放之外**"（第 4.3 节），
+所以这套 UI 与客户端已整体删除，tokio 的 `net` feature 也一并收回。
+留下这一节，是因为里面每一条都是**下过源码/文档核实**的：P6 要做"同实例换清晰度"和
+`sub-add` 时必须连这条管道，重造机制等于把这轮学费再交一遍。
 
 - **一条连接同时负责读与写**：`observe_property` 的注册是按连接算的，连接一断注册即失效
   （`ref/mpv/DOCS/man/ipc.rst:280-289` 的 warning，还专门说"用两次 socat 分别收发"会看起来不工作）。
-  所以订阅、命令、事件全走这同一条管道，并且这条连接必须一直开着。
+  订阅、命令、事件全走同一条管道，且这条连接必须一直开着。
 - **为什么用 tokio 而不是 std**：mpv 文档明说 Windows 上的客户端要"同时读写这条管道"必须用
   overlapped I/O（`DOCS/man/ipc.rst:69-73`）。std 的同步句柄做不到——同一个句柄上阻塞读会把写
-  一起挡住。`tokio::net::windows::named_pipe` 的 `try_read`/`try_write`/`ready` **都取 `&self`**，
-  所以一个任务里就能读写交错，overlapped 的细节在 tokio 内部处理。为此 tokio 加了 `net` feature
-  （`mio`/`socket2`/`windows-sys` 本来就在依赖图里，Cargo.lock 没动）。
-- **pump 任务的形状**（`player::ipc::pump`）：一个循环，`select!` 同时等
-  "管道可读" 与 "界面塞了新命令"；读到的字节攒进 `incoming` 按 `\n` 切行、逐行 `parse_line`，
-  待发的字节攒进 `pending` 用 `try_write` 抽干（一次写不完就下轮接着写）。
-  没待发时**故意只等 `READABLE`**：连着等 `WRITABLE` 会被"一直可写"叫醒空转。
+  一起挡住。`tokio::net::windows::named_pipe` 的 `try_read`/`try_write`/`ready` **都取 `&self`**（docs.rs 核过），
+  所以一个任务里就能读写交错，overlapped 的细节在 tokio 内部处理。要恢复就先给 tokio 加回 `net`
+  （`mio`/`socket2`/`windows-sys` 本来就在依赖图里，Cargo.lock 不用动）。
+- **pump 任务的形状**：一个循环，`select!` 同时等"管道可读"与"界面塞了新命令"；读到的字节攒进
+  `incoming` 按 `\n` 切行、逐行解析，待发的字节攒进 `pending` 用 `try_write` 抽干
+  （一次写不完就下轮接着写，见下面两条坑）。没待发时**故意只等 `READABLE`**：
+  连着等 `WRITABLE` 会被"一直可写"叫醒空转。
+- **两个把自己转死的坑**（都是当场抓出来的，不是编译器给的）：
+  `try_write` 返回 `Ok(0)` 时必须退出那一轮，否则在共享 runtime 线程上**死转**；
+  已写出的那一段用 `pending = pending.split_off(written)` 赋值丢弃，
+  **没有 `Vec::replace_range` 这个东西**（`replace_range` 是 `String` 的；Vec 那个来自 `bstr::ByteVec`），
+  第二十/二十一轮的 E0308、E0599 就分别是这两处。
 - **建连要重试**：mpv 建管道晚于我们 `spawn()` 返回，`ClientOptions::open`（底层 `CreateFileW`）
-  在服务端还没实例时**立即返回错误**而不是阻塞，所以重试 40 次 ×120 ms；超时就是 mpv 没起来，
-  界面直接显示"连上 mpv 管道失败：试了 40 次仍连不上 …"。
-- **状态只信 mpv**（`player/state.rs`）：按暂停时**不**本地翻转 `paused`，
-  等 `property-change` 回来再改——本地猜一次，命令失败时就留下一个和实际不符的按钮。
-  `time-pos`/`duration` 可能是 `null`（流还没载入），所以一律 `Option`，没进度就写 `--:--`，
-  **不编一个 `00:00` 出来**（"还没开始"与"从 0 秒开始"是两件事）；只有位置没有时长时也不硬造总长。
-  进度文案的口径放在 `player/state.rs`（`PlayState::progress_text`/`mode_text`/`line`），
-  和"api 层直接产出中文读法"（`format_count`、`duration_text`）是同一个取向：
-  **格式化规则集中一处，页面只做装配**，否则每个页面都会各自写一遍 `--:--` 的判空。
-- **命令失败必须看得见**：回包 `{"error":…}` 里非 `success` 的会进 `last_error`，直接拼在进度行后面。
-  mpv 的文本输出我们不接（第 4.3 节），所以这条是唯一能告诉用户"你那一下没生效"的通道。
-- **`Closed` 就当 mpv 已经走了**：放下 `Child` 与链路。留着句柄最坏的情况是——用户自己关了 mpv 窗口，
-  pid 被系统复用，我们 `Drop` 里那句 `kill` 会打到别人的进程上。
+  在服务端还没实例时**立即返回错误**而不是阻塞，所以重试 40 次 ×120 ms。
+- **状态只信 mpv 报回来的**：按暂停时**不**本地翻转 `paused`，等 `property-change` 回来再改——
+  本地猜一次，命令失败时就留下一个和实际不符的按钮。`time-pos`/`duration` 可能是 `null`
+  （流还没载入），所以一律 `Option`，没进度就写 `--:--`，**不编一个 `00:00` 出来**
+  （"还没开始"与"从 0 秒开始"是两件事）。
+- **管道名带实例序号**：再次起播时先 `kill` 上一个 mpv，但那只等十几毫秒，上一个实例可能还持有
+  同名管道句柄。mpv 建管道用的是 `PIPE_UNLIMITED_INSTANCES`（`ref/mpv/input/ipc-win.c:387`），
+  同名不报错，后果是**两个 mpv 都在听**、命令发给任意一个——"按了暂停的是上一个窗口"。
 - **`loadfile` 的回复早于真正切完文件**（`DOCS/man/input.rst:542-548`：替换当前文件的 `loadfile`
   会在当前文件还没停、新文件还没开始加载时就返回），所以**不能拿它的回包判断"流开没开成"**；
-  P4b-2 的备用地址换用要靠 `idle-active`/`eof-reached` 这类属性，或者 `file-loaded` 事件。
-- 属性名与命令形状都对着源码核过：`time-pos`/`eof-reached`/`paused-for-cache`/`idle-active` 在
-  `ref/mpv/player/command.c:4708-4743`，`seek <target> [relative]` 在 `input.rst:300-308`
-  （默认就是 relative，我们仍写明），`loadfile`/`audio-add` 在 `input.rst:542/767`。
+  P6 的同实例换清晰度要靠 `idle-active`/`eof-reached` 属性或 `file-loaded` 事件确认。
+- 属性名与命令形状都对着源码核过：`duration`/`time-pos`/`eof-reached`/`paused-for-cache`/`idle-active`
+  在 `ref/mpv/player/command.c:4697-4743`，`seek <target> [relative]` 在 `input.rst:300-308`
+  （默认就是 relative，仍要写明），`loadfile`/`audio-add` 在 `input.rst:542/767`。
+
+### 4.15 视觉（P5）：照 `ref/Bili.Copilot` 的度量重做，不是凭感觉调
+
+起因是用户一句"我说了 GUI 样式要参考 ref/Bili.Copilot，你这个太丑了"。
+"参考"不能是形容词，所以这一轮的做法是：**先把参考项目的度量从 XAML 里抄成数字**，
+再让代码用这些数字。下面每一条后面就是它来自哪个文件哪几行。
+
+- **两层结构**：`ui/palette.rs` 只放**颜色与尺寸常量**（唯一出处），`ui/layout.rs` 只放
+  **由这些常量组成的复用件**（页头、分隔线、侧栏项、头像、统计行、提示、卡片壳）。
+  页面不许再自己写 `rgba(0xFFFFFF99)` 或 `px(56.)`；这也是"改一处就全体一致"的前提。
+- **`rgba(hex)` 是 RRGGBBAA**（`ref/gpui/gpui/src/color.rs:20-23`），不是 CSS 的 RGBA。
+  这轮差点把透明度写成前两位：`card_background = rgba(0xFFFFFF10)` 才是"白 6% 不透明"。
+- **色板**：主色 `#FB7299`（B 站粉），页面底 `#202020`，卡片底白 6%、抬起白 10%、hover 白 14%，
+  分隔线白 8%，文字主/次/三 `E6`/`99`/`68`，徽章黑 60%，危险色 `#F25C6C`。
+- **视频卡 232×238**：`App.xaml:70-76` 的 `VideoLayout` 是 `MinItemWidth=232` /
+  `MinItemHeight=238` / 列距行距各 20；`VideoCardControl.xaml:16-19` 那一行是"封面 `*` + 文字区 116"，
+  即封面 232×122（≈1.90:1，**不是 16:9**）；`:21` 圆角只有上面两个角（`4,4,0,0`）；
+  `:53-54` 文字区内边距 16,12,16,16、行距 8；`:38-45` 时长徽章是外边距 8、内边距 4 的黑 60%（`Opacity=0.6`）；
+  `:60-64` 与 `:84-101` 的 UP 主、播放量都是 12px Tertiary。
+  网格靠 `flex_wrap` + `gap(20)`，卡片一律 `flex_shrink_0`，否则窄窗口下会被压扁。
+- **文字行的顺序也是抄的**：三行是 `Auto`/`*`/`Auto`，**UP 主在最上、标题居中占满、统计在底**
+  （`VideoCardControl.xaml:53-64`）。标题放最上面是我上一版的直觉排法，一眼就不像参考项目。
+- **侧栏横卡**：`VideoCardControl.xaml:1057-1087` 的 `PlayerRecommendVideoCardStyle`——整卡高 **104**、
+  缩略图列宽 **148**、封面在列内再 `Margin=6`（于是图 136×92）、圆角 4、
+  文字列 `Padding=12,4,12,8`、行距 **6**，同样是"UP 主/标题/统计"三行。
+- **骨架尺寸**：标题栏 48（`RootLayout.xaml:33`）、页头 56 + 1px 分隔线
+  （`PopularPage.xaml:18` 与 `:30-33`）、侧栏 240（`ViewModels/LayoutPageViewModelBase.cs:41`）、
+  详情页右栏 360（`VideoPlayerPanel.xaml:11`）、搜索框 320–500（`RootLayout.xaml:74-80`，取了 460）、
+  列表行 `MinHeight=40` + `Padding=12,8` + 列距 8 + **每行都带卡片底色**（`VideoPartsSection.xaml:18-21`）、
+  行间距 8（同文件 `:51`）、UP 头像 44（`UpSectionControl.xaml:28-31`，`CornerRadius=22`）、
+  账号头像 48（`AccountCard.xaml:20-26`，`CornerRadius=24`、`DecodeWidth=100`）。
+- **选中态：边框平时就在，只是透明**。WinUI 的 `ItemContainer` 用 `PART_SelectionVisual`
+  （`Overrides.xaml:190-197`：`BorderThickness=2` + `BorderBrush=Transparent` + `Opacity=0`），
+  选中时才把 brush 换成选中色（`:233-247`）。所以这里也是 `border_2()` 常驻 +
+  `border_color(选中 ? accent : 透明)`——**只在选中那项加边框会让整列每行抖 2px**，比丑更难受。
+- **hover 只换底色**：参考项目的卡片 hover 没有位移、没有阴影、没有缩放，所以这里也只是
+  `card_background` → `card_background_hover`。要 hover 生效得把 `bg` 和 `cursor_pointer`
+  放在**同一个 div** 上（`hover` 定义在 `InteractiveElement`，`elements/div.rs:842`，
+  而 `InteractiveElement` 同时给 `Div` 与 `Stateful<Div>`：`:1877` 与 `:4087`）。
+- **登录页一起改了**：它是用户看到的第一个画面，`rgb(0x2A2A2A)` 那种散色也收进了 palette，
+  否则"登录成功后窗口闪一下换个世界"。
+- **API 坑（这轮踩实的四条）**：`FluentBuilder` 的 `when/when_some` **不在 kit 的 re-export 里**
+  （`gpui_kit` 只 `pub use ::gpui::*`，没有 prelude glob），要单独 `use gpui_kit::prelude::FluentBuilder;`；
+  `on_click`/`overflow_y_scroll`/`hover` 都要求先 `.id(...)`，而 `ElementId` 有 `From<String>`
+  （`window.rs:7676`）；`text_size`/`line_height` 收 `impl Into<AbsoluteLength/DefiniteLength>`，
+  所以 `px(FONT_BODY)` 而不是裸数字；`cx.listener(...)` 返回的就是
+  `impl Fn(&E, &mut Window, &mut App) + 'static`（`app/context.rs:246`），
+  所以组件层可以把自己参数写成这个形状、由页面传 `cx.listener` 进来。
+- **还有一条是关于"怎么查 API"的**：`rounded`/`border_2`/`gap`/`min_h`/`h_full`/`p_4` 这些
+  **在 `styled.rs` 里 grep 不到**——它们是 `gpui-pre-macros` 的 `styles.rs` 按
+  "前缀表 × 后缀表"生成的（`border`+`_2`、`w`+`_full`…）。上一轮我差点因为"源码里没有"
+  就判定这些方法不存在；正确做法是把 `gpui-pre-macros-0.3.9.crate` 下下来读
+  `border_prefixes()/box_prefixes()/corner_prefixes()` 那几张表。
+  `From<Rgba> for Hsla`（`color.rs:677`）与 `From<Rgba> for Background`（`:960`）也核过了，
+  所以 palette 统一返回 `Rgba` 是安全的。
+- **不模仿的部分**：Acrylic/Mica 毛玻璃、`ItemsView`、icon font。gpui 没有等价物，
+  硬做会得到"像但更糟"的结果（风险表第 6 条）。`ItemContainer` 的**选中视觉**这次是照做了的
+  （上面那条），剩下的差异是它带圆角动画，我们没有。
+- **本轮的验收方式改不了**：本地没有工具链，我只能保证**数字来自 XAML、方法名来自宏的生成表**，
+  不能保证"看着对"。所以产物出来后请他重点看四件事：卡片网格的节奏与留白、
+  卡片文字三行的顺序（UP 主在上）、页头/侧栏的比例、详情页右栏的高度分配。
+  视觉问题要靠眼睛，不靠编译器。
 
 ## 5. 阶段进度
 
@@ -487,9 +557,9 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | P2b | 个人：我的信息 / 收藏 / 历史 入口与页面 | **完成**（第十五轮产物真机通过；外壳 + 懒加载 + 三路并发，第 4.11 节） |
 | P3 | 详情：`video().view()`、多 P、tags/related、字幕列表 | **完成**（第十七轮产物真机通过；机制见第 4.12 节。发布时间/分区按用户决定**不做**——live 的 `VideoView` 没有这两个字段） |
 | P4a | 起播：playurl 取地址 + 选流 + 拉起外置 mpv（不遥控） | **完成**（第十八轮真机失败：mpv 窗口没出现，根因是 `--opt value` 写法 + mpv 该从运行目录取；第十九轮修好，43 passed、零 warning，真机确认能起播出声） |
-| P4b-1 | 遥控（一）：连上命名管道、订阅属性、界面显示进度/状态、暂停、±10 秒、`quit`、断连检测 | 代码与 CI 均完成（第二十三轮 57 passed、零 warning；前三轮各败在我自己一个错上，见第 8 节末），待真机复看 |
-| P4b-2 | 遥控（二）：同实例换清晰度（`loadfile` + `audio-add`，保住窗口与进度）、`sub-add` 挂字幕、备用地址换用 | 未开始（命令构造已就绪，缺的是页面这一层的编排与失败判定） |
-| P5 | 打磨：详情页覆盖式布局、骨架屏、快捷键、续播进度 | 未开始 |
+| P4b | 曾按"遥控"理解做过一版（连管道、订阅属性、进度行、暂停/±10 秒）——第二十三轮 57 passed 全绿，但**方向错了**：播放期 UI 归 mpv。已按范围删净，机制留在第 4.14 节 |
+| P5 | 视觉：照 `ref/Bili.Copilot` 的度量重做（色板/字号层级/卡片 232×238/网格/页头 56 + 侧栏 240/右栏 360/hover 换底色） | 代码完成，待编译与真机看效果（第 4.15 节） |
+| P6 | 播放之外的功能补全：主页（热门）、评论区、字幕 `sub-add`、换清晰度保住窗口与进度 | 未开始（这是范围定稿后剩下的正事） |
 
 ## 6. 已知风险与待验证
 
@@ -501,15 +571,16 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | 4 | gpui-pre 快照每周变动、API 破坏性 | lock 入库作种子 + `=0.3.9` 精确 pin；升级要连带检查 kit 的 pin |
 | 5 | gpui Windows 侧 `WindowDecorations::Client` 是空实现、不支持原生锚定弹窗、无托盘 API | 依赖 kit 组件自绘弹层；托盘如需，自调 `Shell_NotifyIconW` |
 | 6 | 无 Mica/Acrylic 等价物（Bili.Copilot 的观感依赖它） | 用实色底近似，不追求一致 |
-| 7 | mpv 对 DASH/fmp4 双流 seek 无任何文档 | P4 实测；失败备选：合并下载后本地播放 |
+| 7 | mpv 对 DASH/fmp4 双流 seek 无任何文档 | 这条**没解除**，只是观测方变了：seek 现在是用户在 mpv 窗口里拖的，我们看不见。真机若反馈"拖进度后黑屏/音画错位/没声音"，先怀疑这条。**"下载合并再本地播"这个备选与'在线流式、不落盘'的定稿冲突**，真要走到那一步必须先问用户 |
 | 8 | 1080P 需登录、HDR/4K/8K 需大会员 | 按 `accept_quality` 降级 + `requires_vip` 提示 |
 | 9 | rustls 同时启用 aws-lc-rs 与 ring → 未装默认 provider 时 TLS 握手 panic（症状：加载态永不结束） | 启动时 `app::install_tls_provider()`；所有 `JoinHandle` 错误都上界面（第 4.7 节） |
 | 10 | **`cx.spawn` 的 `Task` 被丢弃 = 任务立即取消**（症状：请求发出去了、界面永远停在加载态，日志里连闭包第一行都没有） | 已修：所有 spawn 一律 `.detach()` 或存进实体字段，并用 `[lints.rust] unused_must_use = "deny"` 让这类写法编译失败，见第 4.9 节 |
 | 11 | 扫码成功的响应 cookie 里没有 `buvid3`，而 `Account::validate_complete` 要它 → 登录在最后一步失败 | `poll_qr` 在 `code==0` 且缺 buvid3 时调 `misc().buvid()`（`/x/frontend/finger/spi`）补一个，见第 4.10 节 |
 | 12 | 收藏/历史那几个响应结构**没有 `#[serde(default)]`**（`HistoryListData.cursor/tab/list`、`FavListDetailData.info/has_more/ttl` 等），B 站少给任何一个字段就变成 `BpiError::parse` | 症状可控：那一块显示自己的错误位而不是整页空白（第 4.11 节），日志里有原始错误文本可判断缺哪个字段 |
-| 13 | 播放直链有**时效**（URL 里的 `deadline`），放久了或跨网络就 403；`backupUrl` 也只在同一次响应里有效 | P4a 每次都现取现用（不缓存 `StreamChoice` 去起播）；真机若出现"窗口开了但黑屏"，先对照 `debug.log` 里 playurl 与 launch 的时间差。P4b 再加失败换备用域名 |
+| 13 | 播放直链有**时效**（URL 里的 `deadline`），放久了或跨网络就 403；`backupUrl` 也只在同一次响应里有效 | P4a 每次都现取现用（不缓存 `StreamChoice` 去起播）；真机若出现"窗口开了但黑屏"，先对照 `debug.log` 里 playurl 与 launch 的时间差。P6 再加失败换备用域名 |
 | 14 | 目标机 i5-6200U 是 Skylake：**没有 AV1 硬解**，HEVC 只到 8bit；`--hwdec=auto` 选不到就退软解，1080P AV1 大概率丢帧 | 选流已把 HEVC 排在 AV1 之前（第 4.2 节），`player_note` 会打出实际 `codecs`；真机先看那串是 `hev1/hvc1` 还是 `avc1/av01`，再谈要不要在封顶档内偏好某一编码。第十九轮真机报的是 `hev1.1.6.L150.90` ✅ |
-| 15 | P4b-1 第一次真机用管道遥控：界面显示"遥控未连接" | 看 `debug.log` 里 `IPC：` 那几行——连不上会打出"试了 40 次仍连不上 …（最后一次：…）"，属性与回包都有日志。最常见的原因是 mpv 秒退（参数或直链问题），此时进度行会同时留着起播那句提示 |
+| 15 | 视觉重做只经过编译与代码核对，**没人眼看过**：度量抄的是 xaml，gpui 的排版引擎是 taffy，字体度量/行高/滚动条与 WinUI 不可能一模一样 | 必须真机看过再谈"完成"；第一版允许局部丑，但色板与字号层级不许在页面里各写一套（一律走 `ui/palette.rs`） |
+| 16 | gpui 没有 Acrylic/Mica、没有 ItemContainer 选中视觉、没有图标字库 | 用纯色 + 1px 描边 + 圆角 + 字号差 + 三档灰表达层级；图标暂时用文字（参考项目自己也用"弹"字），需要成套图标时再自绘 SVG 走 asset |
 
 ## 7. 维护规则
 
@@ -780,9 +851,29 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 - 产物：33,493,504 字节，md5 `894054d8…`（上一版是 33,353,216 / `4905bb51…`）。
   `Cargo.lock` 与库内**零差异**——给 tokio 开 `net` feature 不动 lock：feature 不写进 lock，
   而 `mio`/`socket2`/`windows-sys` 本来就在图里（也解释了为什么这一轮又是 4 分钟出产物）。
-- **待真机验证**（P4b-1）：① 起播后进度行应变成 `00:07 / 10:12 · 播放中` 这种形式，
-  数字要跟着走；② 点"暂停"按钮文案要变"继续"、状态变"已暂停"（这一下必须来自 mpv 的
-  `property-change`，本地不翻转）；③ ±10 秒后进度跳；④ 点"关闭播放器"或直接关掉 mpv 那个窗口，
-  界面应显示"mpv 已退出（管道断开）"，且**不能**再有声音/进程残留；⑤ 日志里应有
-  `IPC：连上 \\.\pipe\rustbilipc-<pid>-1` 与 `IPC：管道已关闭（mpv 退出了？）`。
-  如果进度一直是 `--:-- / --:-- · 播放中`，先看日志有没有"连上"那行。
+- ~~**待真机验证**（P4b-1）：进度行走 `property-change`、暂停按钮文案、±10 秒、断开检测、日志里那两行
+  IPC 记录~~ —— **这五条随第 4.14 节的代码一起作废**（范围定稿后删净，见下面那一节）。
+  进度/暂停本来确实是这样验证的，留个记录免得以后以为"没验过"。
+
+### 第二十四轮前：范围纠正 = 删掉播放期 UI，再按参考项目重做视觉
+
+这轮**不是一次 CI 记录，是一次方向纠正**，所以单独写。
+
+- 触发语（用户原话）：「视频播放相关的交给 MPV 就好了，rustBiliPC 是做视频播放之外的，
+  包括主页、搜索、个人、视频详情、评论、分集/分P等、清晰度等，至于播放时间什么的不需要也不要做进去」
+  「我说了 GUI 样式要参考 ref/Bili.Copilot，你这个太丑了」。
+- **我做错了什么**：第二十三轮那版把"遥控"当成了目标，做出了一条进度行 + 暂停/±10 秒按钮，
+  而 mpv 自己的 OSC 本来就有这些，还比我做得好。我把力气花在"重造播放器的轮子"上，
+  没花在客户端该做的东西上（主页、评论区、清晰度呈现）。代价是三轮编译 + 一整块要删的代码。
+  这是"先确认边界再动手"的又一次教训，已写进 QODER.md 的红色线。
+- **删掉什么**：`src/player/ipc.rs`、`src/player/state.rs` 整两个文件（`git rm`），
+  `launch()` 的返回值从 `(Child, pipe_name)` 退回 `Child`，详情页去掉播放控制条与状态轮询，
+  `Cargo.toml` 收回 tokio 的 `net` feature，测试里 `ipc_tests`/`play_state_tests` 与管道名/命令构造
+  那几条一并删除（断言从 57 条降到本来的集合）。机制与坑**没有删**，全留在第 4.14 节。
+- **改了什么（P5 视觉）**：新增 `src/ui/palette.rs`（颜色/尺寸唯一出处）与 `src/ui/layout.rs`
+  （页头/分隔线/侧栏项/头像/统计行/提示/卡片壳），重写 `src/ui/video_card.rs`（232×238 卡、
+  232×122 封面、徽章黑 60%、`flex_wrap` 网格 gap 20、hover 只换底色），
+  外壳换成 240 侧栏 + 48 应用名块 + `#202020` 页面底，搜索/我的/详情统一成 56 页头 + 1px 分隔线，
+  详情右栏 360、选集行最小高 40 + 选中 2px 主色左边框。所有数字来源见第 4.15 节。
+- **这轮的验收方式**：视觉我只能保证数字抄自 XAML，**不能保证好看**——本地没工具链、也没眼睛。
+  产物出来后请他看的三处：卡片网格节奏与留白、页头/侧栏比例、详情右栏的高度分配。

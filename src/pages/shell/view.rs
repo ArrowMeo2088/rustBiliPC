@@ -1,8 +1,16 @@
-//! 主界面外壳：顶部入口（搜索 / 我的）、详情页栈、以及把它们串起来的事件。
+//! 主界面外壳：左侧栏、详情页栈、以及把它们串起来的事件。
 //!
-//! 为什么要有这一层：定稿是"同一个窗口内切换视图，不开第二个窗口"（第 4.6 节），
-//! 而从 P3 起窗口里不止两个页面（搜索、个人、详情）。`root.rs` 只管"登录 vs 主界面"，
-//! 外壳管"哪一页在最上面"，两层的职责不互相污染。
+//! ## 这一层的职责
+//!
+//! 定稿是"同一个窗口内切换视图，不开第二个窗口"（第 4.6 节）。从 P3 起窗口里不止两个页面
+//! （搜索、个人、详情），所以 `root.rs` 只管"登录 vs 主界面"，外壳管"哪一页在最上面"。
+//!
+//! ## 骨架照 `ref/Bili.Copilot` 的框架页
+//!
+//! `RootLayout.xaml:32-35` 是"48 的自绘标题栏 + 内容"，内容再分成"240 的侧栏 + 分隔条 + 主区"
+//! （`LayoutPageViewModelBase.cs:41` 的 240）。gpui 这边标题栏归系统画，所以我们只抄第二层：
+//! **左侧 240 的导航栏 + 右边整块主区**。每页自己的 56 页头与 1px 分隔线在
+//! [`crate::ui::layout::header`] 里，不在这里重复。
 //!
 //! ## 详情页是一个栈，不是一个槽
 //!
@@ -10,6 +18,8 @@
 //! 打开 = push，返回 = pop。栈空时显示 `tab` 选中的那一页。
 //! 三个页面发的都是同一个 [`OpenVideo`](crate::pages::OpenVideo) 事件，外壳只订阅一种信号；
 //! 导航决定（压栈/出栈）全部收在这里，页面不知道自己在栈里。
+//! "返回"做成侧栏顶部的一项而不是再加一条横栏：再加一条就会和详情页自己的 56 页头叠成两层，
+//! 看着像两个标题栏。
 //!
 //! ## 订阅的生命周期
 //!
@@ -24,13 +34,13 @@
 
 use std::sync::Arc;
 
-use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::*;
 
 use crate::pages::OpenVideo;
 use crate::pages::detail::DetailPage;
 use crate::pages::mine::MinePage;
 use crate::pages::search::SearchPage;
+use crate::ui::{layout, palette};
 
 /// 栈空时显示哪一页。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -64,7 +74,7 @@ impl MainShell {
         // 个人中心随外壳一起构造，但第一次切到它才发请求（懒加载见 MinePage::ensure_loaded）。
         let mine = cx.new(|_cx| MinePage::new(Arc::clone(&client), mid_raw));
 
-        // 两个入口页面的卡片点击都走同一个入口。`subscribe_in` 的回调要 window，
+        // 两个入口页面的卡片点击都走同一个事件。`subscribe_in` 的回调要 window，
         // 因为压栈时 `cx.new` 建视图实体要用它。
         let mut subscriptions = Vec::new();
         subscriptions.push(cx.subscribe_in(
@@ -110,16 +120,70 @@ impl MainShell {
         cx.notify();
     }
 
-    /// 顶部入口按钮。
-    fn tab_button(
-        &self,
-        tab: ShellTab,
-        label: &'static str,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let button = Button::new(format!("shell-tab-{label}"))
-            .label(label)
-            .on_click(cx.listener(move |this, _, _window, cx| {
+    /// 侧栏：应用名 + 返回（栈非空时）+ 两个入口。
+    fn side_bar(&self, cx: &mut Context<Self>) -> AnyElement {
+        let mut items: Vec<AnyElement> = Vec::new();
+
+        if !self.detail_stack.is_empty() {
+            items.push(layout::side_item(
+                "detail-back".to_string(),
+                "← 返回上一层",
+                false,
+                cx.listener(|this, _event, _window, cx| {
+                    this.detail_stack.pop();
+                    cx.notify();
+                }),
+            ));
+        }
+
+        items.push(self.side_tab(ShellTab::Search, "搜索", cx));
+        items.push(self.side_tab(ShellTab::Mine, "我的", cx));
+
+        div()
+            .w(px(palette::SIDE_COLUMN_WIDTH))
+            .flex_shrink_0()
+            .h_full()
+            .flex()
+            .flex_col()
+            .border_r_1()
+            .border_color(palette::divider())
+            .child(
+                // 应用名占 48：那是参考项目自绘标题栏的高度，我们放在侧栏顶部对齐它。
+                div()
+                    .flex()
+                    .w_full()
+                    .h(px(palette::TITLE_BAR_HEIGHT))
+                    .flex_shrink_0()
+                    .items_center()
+                    .px(px(palette::CARD_TEXT_PADDING_X))
+                    .child(
+                        div()
+                            .text_size(px(palette::FONT_TITLE))
+                            .text_color(palette::text_primary())
+                            .child("rustBiliPC"),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .w_full()
+                    .flex()
+                    .flex_col()
+                    .gap(px(palette::CARD_TEXT_ROW_GAP))
+                    .p(px(palette::CARD_TEXT_ROW_GAP))
+                    .children(items),
+            )
+            .child(self.status_note(cx))
+            .into_any_element()
+    }
+
+    /// 侧栏上的一个入口。选中态由 `layout::side_item` 表达（更亮的底色 + 2px 强调色边框）。
+    fn side_tab(&self, tab: ShellTab, label: &'static str, cx: &mut Context<Self>) -> AnyElement {
+        layout::side_item(
+            format!("shell-tab-{label}"),
+            label,
+            self.tab == tab,
+            cx.listener(move |this, _event, _window, cx| {
                 if this.tab != tab {
                     this.tab = tab;
                     // 第一次进"我的"时触发它自己的首轮加载；已加载过就只是换个显示。
@@ -128,42 +192,36 @@ impl MainShell {
                     }
                     cx.notify();
                 }
-            }));
-        if self.tab == tab { button.primary() } else { button }
+            }),
+        )
     }
 
-    /// 顶栏：详情页在最上面时只有"返回"，否则是入口切换。
-    fn top_bar(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut bar = div().flex().gap_2().px_4().p_2().items_center();
-
-        if !self.detail_stack.is_empty() {
-            bar = bar
-                .child(
-                    Button::new("detail-back")
-                        .label("← 返回")
-                        .on_click(cx.listener(|this, _, _window, cx| {
-                            this.detail_stack.pop();
-                            cx.notify();
-                        })),
-                )
-                .child(div().text_sm().child(format!(
-                    "后面还压着 {} 层详情",
-                    self.detail_stack.len().saturating_sub(1)
-                )));
-            return bar.into_any_element();
-        }
-
-        bar = bar
-            .child(div().text_base().child("rustBiliPC"))
-            .child(self.tab_button(ShellTab::Search, "搜索", cx))
-            .child(self.tab_button(ShellTab::Mine, "我的", cx));
-        bar.into_any_element()
+    /// 侧栏底部那行自检信息（凭据在不在、mpv 在不在）。
+    ///
+    /// 留着它是因为这两件事一旦不对，症状会出现在别的页面上（图不显示、播不了），
+    /// 有一行写在明处的自检比让人猜快得多。
+    fn status_note(&self, _cx: &mut Context<Self>) -> AnyElement {
+        let mpv = if crate::player::find_mpv().is_some() {
+            "mpv：有"
+        } else {
+            "mpv：缺"
+        };
+        div()
+            .w_full()
+            .flex_shrink_0()
+            .px(px(palette::CARD_TEXT_PADDING_X))
+            .py(px(palette::CARD_TEXT_ROW_GAP))
+            .text_size(px(palette::FONT_CAPTION))
+            .text_color(palette::text_tertiary())
+            .child(format!("{mpv} · {}", crate::player::mpv_path().display()))
+            .into_any_element()
     }
 }
 
 impl Render for MainShell {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 最上面是详情页就显示详情页，否则显示 tab 选中的那一页。
+        // 最上面是详情页就显示详情页，否则显示侧栏选中的那一页。侧栏一直留着，
+        // 这样"进详情 → 一路点相关推荐 → 返回"时上下文不丢（参考项目也是这个结构）。
         let page: AnyElement = match self.detail_stack.last() {
             Some(top) => top.clone().into_any_element(),
             None => match self.tab {
@@ -173,10 +231,11 @@ impl Render for MainShell {
         };
 
         div()
-            .flex()
-            .flex_col()
             .size_full()
-            .child(self.top_bar(cx))
-            .child(div().flex_1().w_full().child(page))
+            .flex()
+            .bg(palette::page_background())
+            .text_color(palette::text_primary())
+            .child(self.side_bar(cx))
+            .child(div().flex_1().h_full().min_w(px(0.)).child(page))
     }
 }
