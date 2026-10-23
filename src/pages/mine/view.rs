@@ -143,7 +143,10 @@ impl MinePage {
     }
 
     /// 起一路加载任务。`label` 只用于日志，`write` 决定结果写进哪个槽位。
-    fn spawn_load<T>(
+    ///
+    /// `T: 'static` 不是可选项：任务要跨 `await` 持有 `JoinHandle<BpiResult<T>>`，
+    /// gpui 的 spawn 要求整个 future 是 `'static`（CI 实测 E0310 就指这一行）。
+    fn spawn_load<T: 'static>(
         &mut self,
         seq: u32,
         join: tokio::task::JoinHandle<bpi_rs::BpiResult<T>>,
