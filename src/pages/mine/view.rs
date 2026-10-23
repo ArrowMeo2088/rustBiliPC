@@ -44,6 +44,9 @@ const HISTORY_LIMIT: u32 = 20;
 /// 头像边长（逻辑像素）。
 const AVATAR_PIXELS: f32 = 56.;
 
+/// 向图床要的头像素尺寸（逻辑 56 × 2 倍缩放上限）。
+const AVATAR_DEVICE_PIXELS: u32 = 112;
+
 /// 个人中心页根视图。
 pub struct MinePage {
     client: Arc<bpi_rs::BpiClient>,
@@ -191,13 +194,25 @@ impl MinePage {
 
     /// 头部：头像 + 昵称 + 等级/会员 + 签名 + 关注粉丝。
     fn header(&self) -> impl IntoElement {
+        let avatar_box = div()
+            .size(px(AVATAR_PIXELS))
+            .flex_shrink_0()
+            .overflow_hidden()
+            .bg(rgb(0x2A2A2A));
+        // 和封面同一套处理：补协议 + 按这个 56px 的框要 2× 的图（头像原图实测 812KB）。
         let avatar = match self.profile.as_ref() {
-            // 有头像就走 gpui 的 URI 图片加载（前提是 main.rs 装了真 HttpClient）。
-            Some(profile) if !profile.face.is_empty() => img(SharedString::from(profile.face.as_str()))
+            Some(profile) if !profile.face.is_empty() => avatar_box.child(
+                img(SharedString::from(crate::ui::cover::for_display(
+                    &profile.face,
+                    AVATAR_DEVICE_PIXELS,
+                    AVATAR_DEVICE_PIXELS,
+                )))
                 .size_full()
                 .object_fit(ObjectFit::Cover)
-                .into_any_element(),
-            _ => div().size_full().bg(rgb(0x2A2A2A)).into_any_element(),
+                .with_fallback(|| div().size_full().bg(rgb(0x1A1A1A)).into_any_element()),
+            )
+            .into_any_element(),
+            _ => avatar_box.into_any_element(),
         };
 
         let mut column = div().flex().flex_col().flex_1().gap_1();
@@ -235,13 +250,8 @@ impl MinePage {
             .gap_3()
             .p_4()
             .items_center()
-            .child(
-                div()
-                    .size(px(AVATAR_PIXELS))
-                    .flex_shrink_0()
-                    .overflow_hidden()
-                    .child(avatar),
-            )
+            // avatar 自己带尺寸与裁剪，这里不再套一层同尺寸的框。
+            .child(avatar)
             .child(column)
     }
 

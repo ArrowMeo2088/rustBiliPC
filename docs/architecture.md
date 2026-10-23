@@ -168,7 +168,29 @@ gpui 0.3.9 的 `ImageAssetLoader`（`src/elements/img.rs:619-656`）对 `Resourc
   `cx.set_http_client(Arc::new(reqwest_client::ReqwestClient::user_agent("rustbilipc")?))`，
   依赖用 `gpui-pre-reqwest-client =0.3.9`（与 kit 同一快照，避免多份 gpui）。
 - 封面 CDN（`*.hdslb.com`）是公开域，不需要 Referer；这点与**播放用的 m4s 直链不同**，后者必须带头。
+  （实测四种组合——`http`/`https` × 自报家门 UA/浏览器 UA、带不带 Referer——全部 200。）
 - `cover_url` 为空时画占位块而不是提交空 URI，避免必然失败的请求刷日志。
+- **但第十五轮真机上封面是空的，原因不在网络也不在 HttpClient**：B 站搜索接口给的 `pic` 是
+  **省略协议的** `//i2.hdslb.com/bfs/archive/xxx.jpg`，而 `is_uri` 靠 `url::Url::parse` 判断，
+  `//host/path` 没有 base 必然解析失败 ⇒ 走 `Resource::Embedded` 分支去 asset 里找，
+  一次网络都没发。`debug.log` 里的现场（23 条同一句）：
+
+  ```text
+  ERROR gpui::asset_cache: Failed to load asset: Asset("Embedded resource not found: //i2.hdslb.com/…jpg")
+  ```
+
+  同一份日志里个人中心头像正常连上了 `https://i2.hdslb.com`，因为 `space_info` 的 `face`
+  本来就是绝对地址——这条对照把"CDN 拦我们 / HttpClient 没装"两种猜测一次排除。
+- **显示前必须过 `ui/cover.rs`**：`for_display(url, 宽, 高)` = 补协议 + 拼图床的
+  `@{w}w_{h}h.jpg` 缩略图后缀。尺寸是真量出来的：稿件封面原图 **541,549 字节** →
+  `@320w_180h.jpg` **14,832 字节**；头像原图 **812,735 字节** → `@112w_112h.jpg` **2,740 字节**。
+  一页 30 条就是 16MB 与 0.44MB 的差别，gpui 的图片加载没有并发上限，在 i5-6200U 上
+  同时拉 30 张原图必然表现为"图迟迟不来"。非 `hdslb.com` 的域名与 GIF 一律不动
+  （`@…` 是图床私有语法，实测写错返回 400）。
+- 加载失败时界面要有兜底视图（`with_fallback`，`img.rs:166`）：gpui 只会调它，不会自己画占位，
+  所以卡片给一块深色底，用来把"图挂了"和"还没加载完"分开。日志不用另写——
+  asset 管线自己 `log::error!("Failed to load asset: {e:?}")`（`asset_cache.rs:134`），
+  我们的文件日志收得到。
 
 ### 4.6 扫码登录与启动判定（定稿：登录先行，不做免登录搜索）
 

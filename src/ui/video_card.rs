@@ -13,6 +13,8 @@
 // 无需额外导入即可编译），所以这里不再单独引入 trait。
 use gpui_kit::*;
 
+use crate::ui::cover;
+
 /// 卡片数据。字段都是已格式化的展示文本，渲染路径里不做网络请求或数字格式化。
 #[derive(Clone, Debug, Default)]
 pub struct VideoCardData {
@@ -34,6 +36,11 @@ pub struct VideoCardData {
 const COVER_WIDTH: f32 = 160.;
 const COVER_HEIGHT: f32 = 90.;
 
+/// 向图床要的那份封面的**设备像素**尺寸：逻辑 160×90 在 2× 缩放下就是 320×180，
+/// 再大就是白下载（原图一张 541KB，一页 30 张能把"有没有图"拖成"图迟迟不来"）。
+const COVER_DEVICE_WIDTH: u32 = 320;
+const COVER_DEVICE_HEIGHT: u32 = 180;
+
 /// 渲染一张横向卡片。
 ///
 /// 用 `div().flex()`（默认行方向）而不是 `h_flex()`：已发布的 gpui-kit 0.8.0 没有那个自由函数。
@@ -45,7 +52,7 @@ pub fn render(data: VideoCardData) -> impl IntoElement {
         .gap_2()
         .p_2()
         .items_start()
-        .child(cover(&data.cover_url, &data.duration))
+        .child(cover_box(&data.cover_url, &data.duration))
         .child(
             div()
                 .flex()
@@ -67,7 +74,7 @@ pub fn render(data: VideoCardData) -> impl IntoElement {
 /// 封面区域：有 URL 就走 gpui 的 URI 图片加载，没有就画占位块。
 ///
 /// 时长角标用绝对定位压在封面右下角，这是 Bili.Copilot 的读法。
-fn cover(cover_url: &SharedString, duration: &SharedString) -> impl IntoElement {
+fn cover_box(cover_url: &SharedString, duration: &SharedString) -> impl IntoElement {
     let box_base = div()
         .w(px(COVER_WIDTH))
         .h(px(COVER_HEIGHT))
@@ -82,13 +89,19 @@ fn cover(cover_url: &SharedString, duration: &SharedString) -> impl IntoElement 
             .into_any_element();
     }
 
+    // 交给图床的是"补全协议 + 按这个框的尺寸缩放"之后的地址：接口给的往往是
+    // `//i0.hdslb.com/…`，gpui 判 URL 靠 `Url::parse`，那种写法会被当成内置资源，
+    // 图永远不出来（第十五轮 debug.log 里满屏 `Embedded resource not found` 就是这个）。
+    // 详见 `ui/cover.rs`。
+    let source = cover::for_display(cover_url.as_str(), COVER_DEVICE_WIDTH, COVER_DEVICE_HEIGHT);
     box_base
-        // img 的 source 传字符串即按 URI 处理（`ImageSource: From<SharedString>`），
-        // 加载中/失败都由 gpui 内部处理，这里只保留一个深色底以免闪白。
         .child(
-            img(cover_url.clone())
+            img(SharedString::from(source))
                 .size_full()
-                .object_fit(ObjectFit::Cover),
+                .object_fit(ObjectFit::Cover)
+                // 加载失败时 gpui 只调用这里的兜底视图，界面不会自己画占位；
+                // 给一块深色底，"图挂了"和"还没加载完"在真机上就能一眼分开。
+                .with_fallback(|| div().size_full().bg(rgb(0x1A1A1A)).into_any_element()),
         )
         .child(badge(duration))
         .into_any_element()

@@ -73,8 +73,16 @@ pub async fn video(&self, params: SearchVideoParams) -> BpiResult<SearchData<Vec
     `with_order/with_duration/with_tid` 返回 `Self`。
   - 排序：`SearchOrder::{TotalRank, Click, PubDate, Dm, Stow}`；我们用
     `SearchSort::{Comprehensive, PlayCount, PublishDate}` 包一层，映射分别到前三个。
-  - `pic` 是 `*.hdslb.com` 的公开 CDN，**不需要 Referer**，直接给 gpui 的 URI 图片加载器即可
-    （但要装真 HttpClient，见 architecture.md 第 4.5 节）。
+  - `pic` 是 `*.hdslb.com` 的公开 CDN，**不需要 Referer**（实测 `http`/`https` × 我们的 UA /
+    浏览器 UA × 带不带 Referer 四种组合全部 200）。
+  - **但它是协议相对地址 `//i2.hdslb.com/bfs/archive/xxx.jpg`**（真机日志实证，见
+    architecture.md 第 4.5 节）：gpui 用 `url::Url::parse` 判 URL，这种写法会被当成内置资源，
+    一次网络都不发。展示前必须补 `https:`，交给 `src/ui/cover.rs::canonical`。
+  - 图床支持私有缩放后缀 `@{w}w_{h}h.jpg`（**只对 `hdslb.com` 有效**，写错域名或写法返回 400）：
+    实测同一张稿件封面原图 541,549 字节 → `@320w_180h.jpg` 14,832 字节；
+    头像原图 812,735 字节 → `@112w_112h.jpg` 2,740 字节。搜索一页 30 条的差别是 16MB vs 0.44MB。
+  - 对照：`video().view()` / `user().space_info()` 给的 `pic`/`face` 是**绝对地址**（带 https），
+    所以同一份日志里头像能正常连上 `i2.hdslb.com`。别假设"所有接口给同一种地址"。
 
 ## 4. 视频详情
 
@@ -176,6 +184,8 @@ bpi-rs 自己请求时会加 `User-Agent` + `Referer: https://www.bilibili.com/`
 - 外壳：48px 标题栏 + NavigationView 侧栏；搜索框 `MinWidth=320 MaxWidth=500`；
   详情页以 `OverlayFrame` 覆盖在主 Frame 之上（同一窗口）。
 - 骨架屏：`ShimmerLayout`（600px 封面 + 3 条微光条）；图片缓存目录 `ImageCache` + 独立 HTTP 客户端。
+- **它的 `DecodeWidth=600` 就是"别下原图"的同一件事**：我们改成在 URL 上要小图
+  （`@320w_180h.jpg`），比下完原图再解码更省，见第 3 节。
 - 它的画质逻辑与我们的定稿一致：`p.Codecs.Contains(prefer_codec)`，默认偏好 `"avc"`（我们改成 HEVC 优先），
   降级用 `availableFormats.Max(Quality)`。
 

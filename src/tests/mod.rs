@@ -337,6 +337,61 @@ mod mine_tests {
 }
 
 #[cfg(test)]
+mod cover_tests {
+    use crate::ui::cover;
+
+    #[test]
+    fn protocol_relative_url_becomes_loadable() {
+        // 第十五轮真机日志里的原案：搜索接口给的是 `//i2.hdslb.com/…`，
+        // gpui 用 `Url::parse` 判 URL，这种写法会被当成内置资源而永远加载不出来。
+        let raw = "//i2.hdslb.com/bfs/archive/538e997a97552c30766137327a1b1161437200e6.jpg";
+        assert_eq!(
+            cover::canonical(raw),
+            "https://i2.hdslb.com/bfs/archive/538e997a97552c30766137327a1b1161437200e6.jpg"
+        );
+        // 显示用的最终地址：补协议 + 按卡片框要缩略图。
+        assert_eq!(
+            cover::for_display(raw, 320, 180),
+            "https://i2.hdslb.com/bfs/archive/538e997a97552c30766137327a1b1161437200e6.jpg@320w_180h.jpg"
+        );
+    }
+
+    #[test]
+    fn only_hdslb_gets_https_upgrade_and_thumbnail_suffix() {
+        // 图床的 http 地址升 https（实测两种都回 200）。
+        assert_eq!(
+            cover::canonical("http://i0.hdslb.com/bfs/archive/a.jpg"),
+            "https://i0.hdslb.com/bfs/archive/a.jpg"
+        );
+        // 别的域名一律不动：`@…` 是图床私有语法，拼错了是 400。
+        assert_eq!(
+            cover::canonical("http://example.com/a.jpg"),
+            "http://example.com/a.jpg"
+        );
+        assert_eq!(
+            cover::sized("https://example.com/a.jpg", 320, 180),
+            "https://example.com/a.jpg"
+        );
+        // 已经带 `@` 的不重复拼；GIF 保留动图。
+        assert_eq!(
+            cover::sized("https://i0.hdslb.com/bfs/archive/a.jpg@320w_180h.jpg", 640, 360),
+            "https://i0.hdslb.com/bfs/archive/a.jpg@320w_180h.jpg"
+        );
+        assert_eq!(
+            cover::sized("https://i0.hdslb.com/bfs/emoji/x.gif", 64, 64),
+            "https://i0.hdslb.com/bfs/emoji/x.gif"
+        );
+    }
+
+    #[test]
+    fn empty_url_stays_empty() {
+        // 空地址在卡片里走占位块分支，绝不能变成 "https://" 这种看起来能用其实必挂的东西。
+        assert_eq!(cover::canonical(""), "");
+        assert_eq!(cover::for_display("   ", 320, 180), "");
+    }
+}
+
+#[cfg(test)]
 mod scaffold_tests {
     use crate::VERSION;
 
