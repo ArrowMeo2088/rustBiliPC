@@ -18,6 +18,7 @@ use gpui_kit::*;
 use crate::api::favorites::{self, FavFolder};
 use crate::api::history::{self, HistoryItem};
 use crate::api::profile::{self, ProfileSummary};
+use crate::pages::OpenVideo;
 use crate::ui::video_card::{self, VideoCardData};
 
 /// 列表区显示哪一块。
@@ -301,8 +302,8 @@ impl MinePage {
             .into_any_element()
     }
 
-    /// 历史列表：复用搜索页那套卡片（字段语义一致，省一遍排版）。
-    fn history_body(&self) -> AnyElement {
+    /// 历史列表：复用搜索页那套卡片（字段语义一致，省一遍排版），点卡片同样发 `OpenVideo`。
+    fn history_body(&self, cx: &mut Context<Self>) -> AnyElement {
         if !self.history_note.is_empty() {
             return div().p_4().text_sm().child(self.history_note.clone()).into_any_element();
         }
@@ -329,16 +330,27 @@ impl MinePage {
             .flex()
             .flex_col()
             .w_full()
-            .children(cards.into_iter().map(video_card::render))
+            .children(cards.into_iter().map(|card| {
+                let bvid = card.bvid.as_str().to_string();
+                video_card::clickable(
+                    card,
+                    cx.listener(move |_this, _event, _window, cx| {
+                        cx.emit(OpenVideo { bvid: bvid.clone() });
+                    }),
+                )
+            }))
             .into_any_element()
     }
 }
+
+/// 点"最近观看"里的卡片时通知外壳打开详情页。
+impl EventEmitter<OpenVideo> for MinePage {}
 
 impl Render for MinePage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let body = match self.tab {
             MineTab::Favorites => self.folders_body(),
-            MineTab::History => self.history_body(),
+            MineTab::History => self.history_body(cx),
         };
 
         div()

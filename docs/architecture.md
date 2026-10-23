@@ -43,7 +43,9 @@ release 分支（`build.rs` 里 `#[cfg(not(debug_assertions))] compile_shaders()
 
 - `v_flex()` / `h_flex()` 自由函数**不可用** → 用 `div().flex().flex_col()`（行方向就是 `div().flex()`）。
 - `overflow_y_scroll()` 是 `Stateful<Div>` 的方法 → 必须先 `.id("...")`，否则报 E0599
-  并提示一个不相干的 `overflow_y_scrollbar`。
+  并提示一个不相干的 `overflow_y_scrollbar`。**`on_click()` 同一条规则**（P3 又踩一次）：
+  它也在 `Stateful<Div>` 上（`gpui/src/elements/div.rs:1590`），`Div` 上只有 imperative 版
+  （`:591`），所以写 `div().on_click(..)` 一样不通过。
 - `Button::primary()` / `.secondary()` 等定义在 **`ButtonVariants` trait** 上
   （`gpui-component 0.8.0` 的 `src/button/button.rs:52`）→ 必须
   `use gpui_kit::component::button::{Button, ButtonVariants};`，只导入 `Button` 会报 no method。
@@ -76,6 +78,7 @@ src/
 │   ├── mod.rs         spawn_on_api_runtime()：gpui ↔ tokio 的调用桥
 │   ├── login.rs       扫码登录：取码/轮询 + 码值翻译 + cookie→凭据 + 缺 buvid3 时补取（纯函数可测）
 │   ├── profile.rs     个人中心头部：user().space_info()（自动 WBI）+ login().stat()（关注/粉丝）
+│   ├── detail.rs      视频详情：view() 主体 + desc()/tags()/related_videos() 三块各自容错 + 字幕列表
 │   ├── favorites.rs   收藏夹：fav().created_list() + collected_list()，合并成一个 DTO
 │   ├── history.rs     观看历史：historytoview().history_list()（游标分页）+ 秒数格式化纯函数
 │   ├── search.rs      搜索封装：DTO（SearchHit/PageInfo/SearchSort）+ 标签清洗 + 播放量格式化
@@ -86,10 +89,12 @@ src/
 │   ├── mod.rs         mpv 参数构造 + Referer/UA 常量 + PATH 查找
 │   └── ipc.rs         mpv JSON IPC 的命令构造（纯数据，管道 I/O 在 P4）
 ├── pages/
+│   ├── mod.rs         页面层出口 + 共用导航事件 `OpenVideo`（三个页面发同一个信号）
 │   ├── root.rs        窗口根视图：无凭据→登录页，有凭据→主界面外壳；登录成功后原地切换
-│   ├── shell/         主界面外壳：顶部"搜索 / 我的"两个入口，两页实体都常驻（切回不重刷）
+│   ├── shell/         外壳：顶部"搜索 / 我的"、**详情页栈**（打开 push、返回 pop），订阅 OpenVideo
 │   ├── login/         扫码登录页（二维码 + 1.5s 轮询 + 过期自动重载）
-│   ├── mine/          个人中心页（资料 + 收藏夹 + 历史，三路并发各自显示错误）
+│   ├── mine/          个人中心页（资料 + 收藏夹 + 历史，三路并发各自显示错误；懒加载）
+│   ├── detail/        详情页（主体 + 选集 + 字幕 + 相关推荐；播放留给 P4）
 │   └── search/        阶段一页面（view.rs 为根视图）
 ├── ui/
 │   ├── qr.rs          二维码：qrcode-generator 出布尔矩阵，div 网格绘制
@@ -324,9 +329,40 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 - **历史只要稿件**（`HistoryListType::Archive`）：专栏/直播条目那里没有 `bvid`
   （bvid 在 `item.history.bvid: Option<String>`，不是顶层），而我们下一页要进详情页。
 - 历史的 `duration` / `progress` 是**数字秒**（搜索接口给的是 `"mm:ss"` 字符串，两边别混），
-  格式化用 `api/history.rs::format_seconds`（纯函数，已进单测）。
+  格式化用 `api/mod.rs::format_seconds`（纯函数，已进单测；历史和详情都用它，所以放在 api 层公共处）。
   `view_at` 暂时不显示：本项目没有日期库，也不打算为一条次要文案引入 chrono——
   真要做的时候优先加依赖，不要手写日历换算。
+
+### 4.12 详情页（P3）：栈式导航 + 四次请求
+
+- **导航只有一个事件**：`pages/mod.rs` 里的 `OpenVideo { bvid }`。搜索结果的卡片、个人中心的
+  "最近观看"、详情页的"相关推荐"发的都是它，外壳只订阅这一种信号——页面不知道自己会被压进栈里。
+- **外壳里详情页是一个栈**（`detail_stack: Vec<Entity<DetailPage>>`）：打开就 push、返回就 pop，
+  栈空才显示"搜索/我的"。这样"相关推荐 → 进去 → 再推荐 → 返回"是连续的。
+  每压一层都给它订一条 `subscribe_in`（存进 `_subscriptions`，`Subscription` 一 drop 就退订，
+  `gpui/src/subscription.rs:149`）；pop 掉的那层留下的订阅随实体释放自动失效。
+- **点卡片这件事在 gpui 里也要先 `.id()`**：`on_click` 是 `Stateful<Div>` 的方法，
+  和 `overflow_y_scroll()` 是同一类坑（第 2 节的清单）。链式顺序照 `gpui/src/window/prompts.rs:139-146`：
+  样式 → `child(...)` → `.id(..)` → `.on_click(cx.listener(..))`。`ElementId` 有
+  `From<String>`（`gpui/src/window.rs:7676`），所以 id 直接用 bvid/cid 拼出来的字符串。
+  组件层不认页面：`video_card::clickable(data, on_open)` 收的就是 gpui 原样的
+  `Fn(&ClickEvent, &mut Window, &mut App)`，调用方用 `cx.listener` 造它。
+- **详情为什么不是一次 `detail()` 搞定**：`VideoDetail` 的 `Tags` 用的是
+  `model::VideoTag`，它的 `tag_id: u64` 既不是 `Option` 也没有 `#[serde(default)]`
+  （`ref/bpi-rs/src/video/model.rs:100-108`），而 B 站给 BGM/话题标签时常省掉 `tag_id`
+  —— 一旦省掉，整个 `detail()` 连标题一起解析失败。所以拆成
+  `view()`（主体，失败才算整页失败）+ `desc()` + `tags()`（返回的是另一个容错的
+  `video::tags::VideoTag`）+ `related_videos()`，后三者各自失败只记一条说明。
+- **字幕必须等主体**：`player_info_v2` 的入参要 `cid`，而 `cid` 来自 `view()` 的响应，
+  所以这条依赖链是"主体回来后追一发"，不是并发。`PlayerInfoResponseData` 全无
+  `#[serde(default)]`，失败概率不低，因此字幕只是详情页的一小块。
+- **当前可用的字段就这些**：live 的 `VideoView` **没有** 简介/发布时间/分区/总时长
+  （`model.rs:6-26`）；简介另问 `desc()`，总时长用 `pages[].duration`（数字秒）累加。
+  `ref/bpi-rs/src/video/info/` 那一整块虽然有 `desc/pubdate/tname/duration`，但
+  **没有任何方法返回它**（死代码）——编译得过、永远拿不到数据，别 import。
+- **播放相关的准备**：选中哪个 P 记在 `selected`（cid 在 `PageInfo.cid`），
+  界面上写明"播放接下一阶段"。注意 P4 拿时长时，`PlayUrlResponseData.timelength` 是**毫秒**，
+  而 `VideoPage.duration` 是**秒**。
 
 ## 5. 阶段进度
 
@@ -335,8 +371,8 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | P0 | 依赖骨架、release CI、空窗口 + 中文输入框 + 假数据列表、`api/store/player` 纯逻辑层 | **完成**（run 39787252294 全绿） |
 | P1 | 搜索接线：`search().video()`、结果转换（剥 `<em>`）、封面网络图（gpui 原生 URI 加载）、分页/排序 | 代码与 CI 均完成；真机确认列表/分页可用，**但封面一直是空的**——第十六轮按日志找到真因（协议相对地址被当成内置资源，第 4.5 节）并修好，待下一轮真机复看 |
 | P2a | 登录：扫码（取码/轮询/过期重载）+ 凭据落盘 + 启动判定 + 登录后进主界面 | **完成**（第十一轮产物真机扫码登录通过，凭据已写出） |
-| P2b | 个人：我的信息 / 收藏 / 历史 入口与页面 | 代码完成（外壳 + 三路并发，机制见第 4.11 节），待编译与真机复验 |
-| P3 | 详情：`video().detail()`、多 P、tags/related、字幕列表 | 未开始 |
+| P2b | 个人：我的信息 / 收藏 / 历史 入口与页面 | **完成**（第十五轮产物真机通过；外壳 + 懒加载 + 三路并发，第 4.11 节） |
+| P3 | 详情：`video().view()`、多 P、tags/related、字幕列表 | 代码完成（机制见第 4.12 节），待编译与真机复验；播放仍在 P4 |
 | P4 | 播放：拉起 mpv、管道 IPC 读写、换清晰度（`loadfile` + `audio-remove`/`audio-add`）、`sub-add` | 未开始 |
 | P5 | 打磨：详情页覆盖式布局、骨架屏、快捷键、续播进度 | 未开始 |
 

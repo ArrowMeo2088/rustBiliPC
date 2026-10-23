@@ -84,16 +84,36 @@ pub async fn video(&self, params: SearchVideoParams) -> BpiResult<SearchData<Vec
   - 对照：`video().view()` / `user().space_info()` 给的 `pic`/`face` 是**绝对地址**（带 https），
     所以同一份日志里头像能正常连上 `i2.hdslb.com`。别假设"所有接口给同一种地址"。
 
-## 4. 视频详情
+## 4. 视频详情（P3 逐个核对过）
 
-- `video().view(VideoViewParams) -> VideoView`：`title / pic / owner{mid,name,face} / stat / cid / pages[]`。
-- `video().detail(..) -> VideoDetail { view, tags, related, card, reply }`。
-- `video().page_list(..) -> Vec<VideoPage>`（多 P，每 P 有自己的 `cid`）。
-- `video().player_info_v2(..)` 里有 `subtitle: Option<SubtitleInfo>`，
-  `SubtitleItem.subtitle_url` 可直接喂 mpv 的 `sub-add`。
-- 个人中心可用：`login().nav()/account_info()/vip_info()`、`user().card()/space_info()/followings()`、
-  `fav().folder_info()/list_detail()/created_list()/collected_list()`、
-  `historytoview().history_list()/toview_list()`。
+| 调用 | 位置 | 返回 | WBI | 需登录 |
+| --- | --- | --- | --- | --- |
+| `video().view(VideoViewParams::from_bvid(Bvid))` | `src/video/client.rs:65`，参数 `src/video/params.rs:28` | `VideoView { aid: Aid, bvid: Bvid, videos: u32, title: String, pic: String, owner: VideoOwner, stat: VideoStat, cid: Cid, pages: Vec<VideoPage> }`（`model.rs:6`，只有 `pages` 有 `#[serde(default)]`） | 否 | 否 |
+| `video().desc(VideoDescParams::from_bvid(..))` | `client.rs:92`、`params.rs:119` | `BpiResult<String>`（**简介只能这么拿**，`VideoView` 里没有 `desc`） | 否 | 否 |
+| `video().tags(VideoTagsParams::from_bvid(..))` | `client.rs:243`、`params.rs:455` | `Vec<video::tags::VideoTag>`：`{ tag_id: Option<u64>, tag_name: String, music_id: Option<String>, tag_type: String, jump_url: Option<String> }`（`tags.rs:12`） | 否 | 否 |
+| `video().related_videos(VideoRelatedParams::from_bvid(..))` | `client.rs:206`、`params.rs:337` | `Vec<recommend::RelatedVideo>`：`{ aid: u64, bvid: String, title: String, pic: String, tname: String, pubdate: u64, duration: u64, owner: Owner{mid,name,face}, stat: Stat{view,danmaku,reply,favorite,coin,share,like,...}, cid: u64, rights, dimension }`（`recommend.rs:89`） | 否 | 否 |
+| `video().player_info_v2(VideoPlayerInfoParams::from_bvid(Bvid, Cid))` | `client.rs:192`、`params.rs:288` | `PlayerInfoResponseData`，其中 `subtitle: Option<SubtitleInfo>`、`SubtitleInfo.subtitles: Vec<SubtitleItem>`、`SubtitleItem { lan, lan_doc, subtitle_url, ai_status: u8, id: u64, is_lock, ai_type, subtitle_type }`（`player.rs:24/93/103`）；另有 `need_login_subtitle: bool` | **是** | 字幕可能要登录 |
+| `video().detail(VideoDetailParams::from_bvid(..))` | `client.rs:74` | `VideoDetail { view, tags, related, card: Option<Value>, reply: Option<Value> }`（字段是 `#[serde(rename="View")]` 等大写法） | 否 | 否 |
+
+- **`detail()` 不要用**：它的 `tags` 是 `model::VideoTag`，`tag_id: u64` **既非 Option 也无 default**
+  （`model.rs:100-108`），而 B 站的 BGM/话题标签常省 `tag_id` ⇒ 整个 `detail()` 解析失败、
+  连标题一起没。`tags()` 返回的是另一个容错类型（`tags::VideoTag`），两者**同名不同型**，
+  用错路径就是类型不匹配。
+- `VideoStat` 的收藏数有**两个**字段：`favorite`（新）与 `fav`（别名），都是 `Option<u64>+default`
+  ⇒ 我们封装成 `api::detail::favorite_count(favorite, fav)`，只读一个会显示 0。
+- 单位：`VideoPage.duration`、`RelatedVideo.duration`、`pubdate/ctime` 是**秒**；
+  只有 `PlayUrlResponseData.timelength` 是**毫秒**（P4 播放要用，别混）。
+  `OnlineTotalResponseData.{total,count}` 是 **`String`** 不是数字。
+- ID 是 newtype，在 `bpi_rs::ids::{Aid,Bvid,Cid,Mid}`（**crate 根没 re-export**）：
+  `Aid::new(0)` 报错、`Bvid::new("BV…")` 要求 `BV` 前缀 + 长度 ≥12 + 全 ASCII 字母数字
+  （`ids.rs:161-183`），坏的 bvid 在我们这层就变 `InvalidParameter`，不会去打网络；
+  `.get() -> u64` / `.as_str() -> &str` / 都实现了 `FromStr` 与 `Display`。
+- **`ref/bpi-rs/src/video/info/` 整块是死代码**：`VideoData`（有 `desc/pubdate/tname/duration/
+  is_chargeable_season`）、`PageItem`、`VideoDescResponse`、`VideoDetailData` 没有任何方法返回它们。
+  想要的字段如果只在那里，说明**当前拿不到**，别 import。
+- 空 stub 文件（只有文档注释、没有代码）：`video/appeal.rs`、`attribute_data.rs`、`pbp.rs`、
+  `snapshot.rs`、`video_zone.rs`。
+- `get_wbi_sign2` 是 `pub(crate)`：不能自己给别的 URL 签名，只能用库里已经签好的方法。
 
 ## 5. playurl 与 DASH（关键）
 

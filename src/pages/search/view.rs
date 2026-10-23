@@ -20,6 +20,7 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::*;
 
 use crate::api::search::{self, PageInfo, SearchSort};
+use crate::pages::OpenVideo;
 use crate::store::credentials::SavedCredential;
 use crate::ui::video_card::{self, VideoCardData};
 
@@ -256,6 +257,9 @@ impl SearchPage {
     }
 }
 
+/// 点卡片时通知外壳打开详情页（事件定义在 `pages/mod.rs`，三个页面共用同一个信号）。
+impl EventEmitter<OpenVideo> for SearchPage {}
+
 impl Render for SearchPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         div()
@@ -296,7 +300,16 @@ impl Render for SearchPage {
                             .flex()
                             .flex_col()
                             .w_full()
-                            .children(self.cards.iter().cloned().map(video_card::render)),
+                            .children(self.cards.iter().cloned().map(|card| {
+                                // 点卡片 → 发 OpenVideo，由外壳负责打开详情页（页面自己不做导航）。
+                                let bvid = card.bvid.as_str().to_string();
+                                video_card::clickable(
+                                    card,
+                                    cx.listener(move |_this, _event, _window, cx| {
+                                        cx.emit(OpenVideo { bvid: bvid.clone() });
+                                    }),
+                                )
+                            })),
                     ),
             )
             // 分页与自检。

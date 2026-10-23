@@ -71,6 +71,28 @@ pub fn render(data: VideoCardData) -> impl IntoElement {
         )
 }
 
+/// 把卡片包成可点击的一行（点搜索结果、最近观看、相关推荐都走它）。
+///
+/// 两个必须注意的点，都是 gpui 的机制：
+/// - **要有 id**：交互状态挂在元素 id 上，没有 `.id()` 就调不到 `on_click`
+///   （和 `overflow_y_scroll()` 同一类坑，见 docs/architecture.md 第 2 节）；id 用 bvid，
+///   列表里不会出现两行同 id 把点击串到别处。
+/// - **回调用 gpui 原本的形状**（`&ClickEvent, &mut Window, &mut App`），由调用方用
+///   `cx.listener(...)` 生成。这样组件层不需要知道任何页面类型。
+pub fn clickable(
+    data: VideoCardData,
+    on_open: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> impl IntoElement {
+    let id = format!("video-card-{}", data.bvid.as_str());
+    // 顺序照 gpui 自己的写法（`window/prompts.rs:139-146`）：先样式与 children，再 `.id()`，
+    // 最后 `.on_click()`——`on_click` 只存在于 `Stateful<Div>` 上。
+    div()
+        .cursor_pointer()
+        .child(render(data))
+        .id(id)
+        .on_click(on_open)
+}
+
 /// 封面区域：有 URL 就走 gpui 的 URI 图片加载，没有就画占位块。
 ///
 /// 时长角标用绝对定位压在封面右下角，这是 Bili.Copilot 的读法。

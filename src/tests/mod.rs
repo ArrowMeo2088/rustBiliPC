@@ -310,7 +310,7 @@ mod qr_tests {
 
 #[cfg(test)]
 mod mine_tests {
-    use crate::api::history::format_seconds;
+    use crate::api::format_seconds;
     use crate::api::profile::vip_label;
 
     #[test]
@@ -388,6 +388,45 @@ mod cover_tests {
         // 空地址在卡片里走占位块分支，绝不能变成 "https://" 这种看起来能用其实必挂的东西。
         assert_eq!(cover::canonical(""), "");
         assert_eq!(cover::for_display("   ", 320, 180), "");
+    }
+}
+
+#[cfg(test)]
+mod detail_tests {
+    use crate::api::detail::{favorite_count, normalize_subtitle_url};
+    use crate::api::{format_seconds, seconds_to_u32};
+
+    #[test]
+    fn favorite_prefers_the_new_field_name() {
+        // B 站新旧载荷字段名不同（`favorite` / `fav`），只读一个会显示 0。
+        assert_eq!(favorite_count(Some(7), Some(3)), 7);
+        assert_eq!(favorite_count(None, Some(3)), 3);
+        assert_eq!(favorite_count(Some(0), None), 0);
+        assert_eq!(favorite_count(None, None), 0);
+    }
+
+    #[test]
+    fn subtitle_url_gets_a_scheme() {
+        // 字幕地址和封面一样是协议相对的，mpv 的 `sub-add` 要完整 URL。
+        assert_eq!(
+            normalize_subtitle_url("//comment.bilibili.com/1234.json"),
+            "https://comment.bilibili.com/1234.json"
+        );
+        // 已经是绝对地址的不动，前后空白去掉。
+        assert_eq!(
+            normalize_subtitle_url(" https://s1.hdslb.com/x.json "),
+            "https://s1.hdslb.com/x.json"
+        );
+    }
+
+    #[test]
+    fn wide_second_counts_are_clamped_not_wrapped() {
+        // `duration` 在接口里是 u64，格式化要的是 u32；超限当上限截断，不该 panic 也不该回绕。
+        assert_eq!(seconds_to_u32(u64::from(u32::MAX)), u32::MAX);
+        assert_eq!(seconds_to_u32(u32::MAX as u64 + 1), u32::MAX);
+        assert_eq!(seconds_to_u32(0), 0);
+        // 顺带确认"正好一小时"这一边界在 api 层的格式化函数上。
+        assert_eq!(format_seconds(3_600), "1:00:00");
     }
 }
 

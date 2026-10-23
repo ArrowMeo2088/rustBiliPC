@@ -25,6 +25,7 @@ use std::sync::Arc;
 
 use bpi_rs::{BpiClient, BpiResult, historytoview::{HistoryListParams, HistoryListType}};
 
+use super::format_seconds;
 use super::spawn_on_api_runtime;
 
 /// 一条历史记录。字段已处理好可直接展示。
@@ -44,21 +45,6 @@ pub struct HistoryItem {
     pub progress_text: String,
     /// 子分区名（B 站的 `tag_name`），可为空。
     pub tag: String,
-}
-
-/// 秒数 → `mm:ss` 或 `h:mm:ss`。
-///
-/// 单独成函数是因为历史记录、收藏内容、播放进度都要用它，且边界（0、正好一小时）容易写错。
-pub fn format_seconds(seconds: u32) -> String {
-    let hours = seconds / 3600;
-    let minutes = (seconds % 3600) / 60;
-    let secs = seconds % 60;
-
-    if hours > 0 {
-        format!("{hours}:{minutes:02}:{secs:02}")
-    } else {
-        format!("{minutes:02}:{secs:02}")
-    }
 }
 
 /// 取最近的历史记录（只要稿件视频，`limit` 条）。
