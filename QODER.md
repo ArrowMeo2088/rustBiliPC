@@ -70,6 +70,9 @@
   每次改完依赖都要把 CI 的 `cargo-lock` artifact 取回并连同改动一起提交。
 - CI 缓存步骤必须 `save-always: true` 且 key 只按 `Cargo.lock` 哈希：否则一次失败构建既不写缓存
   又让下一次全量重编（已踩，见 docs/architecture.md 第 8 节）。
+  **注意**：第十六轮起 Actions 报 `Input 'save-always' has been deprecated … does not work as intended`；
+  目前缓存仍然命中（我们的 crate 三十多秒编完），所以先不动 workflow。**一旦命中率变差，这条是
+  第一嫌疑**，届时改成 `post: true` 的独立保存步骤，而不是回头去猜。
 - 不要在前台长时间轮询 CI：用后台轮询或短探测，以日志证据为准。
 - **一轮只烧一次**：触发后要等这个 SHA 的 run 结束再报结果、再改代码；没看完上一轮日志就推新提交
   等于白烧一轮编译（2026-10-22 犯过一次）。本地能核对的 API 一律先核对（见第 2 节的核对顺序）。

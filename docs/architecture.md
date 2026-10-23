@@ -196,7 +196,7 @@ gpui 0.3.9 的 `ImageAssetLoader`（`src/elements/img.rs:619-656`）对 `Resourc
 
 - **启动判定**在 `pages/root.rs`：`SavedCredential::load()` 且四字段完整 → 直接把凭据
   `set_account` 进共享的 `BpiClient` 并进主界面；否则进登录页。登录成功后由登录页发
-  `LoginSucceeded` 事件，根视图**在同一窗口内**换成搜索页。
+  `LoginSucceeded` 事件（带 mid），根视图**在同一窗口内**换成主界面外壳。
   之所以不开第二个窗口：`AsyncWindowContext::open_window` 可用，但"关掉登录窗口"要先拿到窗口
   句柄再走 `Window::remove_window`，其中取句柄这一步在参考仓库里没有可照抄的先例，风险不值得。
 - **二维码不用图片管线**：`qrcode-generator`（只开 `std`+`qr` feature）出 `Vec<Vec<bool>>`，
@@ -333,7 +333,7 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | P0 | 依赖骨架、release CI、空窗口 + 中文输入框 + 假数据列表、`api/store/player` 纯逻辑层 | **完成**（run 39787252294 全绿） |
-| P1 | 搜索接线：`search().video()`、结果转换（剥 `<em>`）、封面网络图（gpui 原生 URI 加载）、分页/排序 | 代码与 CI 均完成（run 39795360593）；**验证并入登录之后**（定稿不做免登录搜索） |
+| P1 | 搜索接线：`search().video()`、结果转换（剥 `<em>`）、封面网络图（gpui 原生 URI 加载）、分页/排序 | 代码与 CI 均完成；真机确认列表/分页可用，**但封面一直是空的**——第十六轮按日志找到真因（协议相对地址被当成内置资源，第 4.5 节）并修好，待下一轮真机复看 |
 | P2a | 登录：扫码（取码/轮询/过期重载）+ 凭据落盘 + 启动判定 + 登录后进主界面 | **完成**（第十一轮产物真机扫码登录通过，凭据已写出） |
 | P2b | 个人：我的信息 / 收藏 / 历史 入口与页面 | 代码完成（外壳 + 三路并发，机制见第 4.11 节），待编译与真机复验 |
 | P3 | 详情：`video().detail()`、多 P、tags/related、字幕列表 | 未开始 |
@@ -499,5 +499,18 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
   比第十四轮大 0.5 MB，是新增三个 api 封装与两个页面的量。
 - `Cargo.lock` 与库内完全一致：P2b 只用到已经锁好的依赖，没引入任何新包。
 - 取产物时依旧走"解到临时目录 → 只覆盖 exe"，`publish/debug.log` 与 `publish/data/` 原样不动。
+
+### 第十六轮（run 39898075460，commit `970c4a9`）：封面图真因修复
+
+- **34 passed / 0 failed**（新增 `cover_tests` 三条），产物 32,436,224 字节（md5 `43253293…`），
+  `Cargo.lock` 与库内零差异。
+- 修复的是第十五轮真机日志里那条 `Embedded resource not found: //i2.hdslb.com/…`：
+  搜索接口给的是协议相对地址，gpui 判 URL 靠 `Url::parse`，于是从没发过请求（第 4.5 节）。
+  顺带按实测数字改成要缩略图：封面 541KB→14.8KB、头像 812KB→2.7KB。
+- Actions 新增一条与我们有关的废弃警告：`##[warning]Input 'save-always' has been deprecated
+  with message: save-always does not work as intended`。本轮缓存仍然命中（我们的 crate 三十多秒编完），
+  所以先不改 workflow；**如果以后缓存命中率变差，这条是第一个嫌疑**，替代方案是拆成
+  `post: true` 的独立保存步骤或用 `cache-save` action。
+
 - **待真机验证**（P2b）：外壳两个入口、"我的"第一次点下去才发那三个请求、资料头与收藏夹/历史
   能出内容、三块各自的错误位是否显示得下 B 站少字段造成的 `BpiError::parse`。
