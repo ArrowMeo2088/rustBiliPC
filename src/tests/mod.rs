@@ -761,8 +761,8 @@ mod play_state_tests {
         let mut state = PlayState::default();
         state.connected = true;
         state.position = Some(-3.0);
-        // 只有位置、没有时长：不编一个假的总时长出来。
-        assert_eq!(state.line(""), "00:00");
+        // 只有位置、没有时长：不编一个假的总时长，但状态后缀照给（连上了就该显示状态）。
+        assert_eq!(state.line(""), "00:00 · 播放中");
         state.position = None;
         state.duration = Some(9.0);
         assert_eq!(state.line(""), "--:-- / 00:09 · 播放中");
