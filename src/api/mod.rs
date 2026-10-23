@@ -27,7 +27,10 @@
 //!   上，属于番剧/课程响应），所以码流选择见 [`stream_select`]。
 //! - bpi-rs 不外发它自己用的请求头 → mpv 需要的 Referer/UA 常量在 [`crate::player`]。
 
+pub mod favorites;
+pub mod history;
 pub mod login;
+pub mod profile;
 pub mod search;
 pub mod stream_select;
 

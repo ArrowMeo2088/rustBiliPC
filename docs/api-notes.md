@@ -178,3 +178,54 @@ bpi-rs 自己请求时会加 `User-Agent` + `Referer: https://www.bilibili.com/`
 - 骨架屏：`ShimmerLayout`（600px 封面 + 3 条微光条）；图片缓存目录 `ImageCache` + 独立 HTTP 客户端。
 - 它的画质逻辑与我们的定稿一致：`p.Codecs.Contains(prefer_codec)`，默认偏好 `"avc"`（我们改成 HEVC 优先），
   降级用 `availableFormats.Max(Quality)`。
+
+## 9. 个人中心（P2b 已核实）
+
+### 9.1 账号资料
+
+| 调用 | 位置 | 返回 |
+| --- | --- | --- |
+| `login().nav()` | `src/login/client.rs:99` | `LoginNav { is_login: bool, mid: Option<Mid>, uname: Option<String>, face: Option<String>, wbi_img }`（`src/login/model.rs:8`） |
+| `login().stat()` | `src/login/client.rs:107` | `LoginStats { following: u64, follower: u64, dynamic_count: u64 }` |
+| `user().space_info(UserSpaceParams::new(Mid))` | `src/user/client.rs:251`、参数 `src/user/params.rs:121` | `UserSpaceProfile { mid: Mid, name: String, sex: Option<String>, face: String, sign: String, level: u8, silence: u8, coins: f64, fans_badge: bool, is_followed: bool, top_photo: Option<String>, official: Option<UserOfficialSummary>, vip: Option<UserVipSummary>, live_room: Option<UserSpaceLiveRoom> }`（`src/user/model.rs:133`） |
+
+- **`space_info` 是我们唯一需要等级与签名的入口**，而且它内部自动做 WBI 签名
+  （`sign_wbi_params`，`src/user/client.rs:252`）；`nav()` 只给 `uname/face`。
+- **`misc::NavData` 是个坑**：它是 `{ img, sub }` 两个 WBI key（`src/misc/sign/bili_ticket.rs:31`），
+  **不是**用户资料。`login::login_info::nav::NavData` 字段丰富但**没有任何方法返回它**（死代码），
+  别照抄。
+- `UserVipSummary { kind: i32 (serde "type"), status: i32 }`（`src/user/model.rs:188`）：
+  `vip_label(status, kind)` 只按"两个都非 0 才算会员"处理，档位文案不猜。
+
+### 9.2 收藏夹
+
+| 调用 | 位置 | 返回 |
+| --- | --- | --- |
+| `fav().created_list(FavCreatedListParams::new(Mid))` | `src/fav/client.rs:69`、`params.rs:30` | `CreatedFolderListData { count: u32, list: Vec<CreatedFolderItem> }`；item（`info.rs:52`）`{ id, fid, mid: u64, attr: u32, title: String, fav_state: u8, media_count: u32 }` |
+| `fav().collected_list(FavCollectedListParams::new(Mid))` | `src/fav/client.rs:81`、`params.rs:79` | `CollectedFolderListData { count, list: Vec<CollectedFolderItem> }`；item（`info.rs:81`）多给 `cover: String, upper: CollectedFolderUpper { mid, name, face }, intro, ctime, mtime` |
+| `fav().list_detail(FavListDetailParams::new(MediaId))` | `src/fav/client.rs:105`、`list.rs:121` | `FavListDetailData { info, medias: Vec<FavListMedia>, has_more, ttl }`（P3 再用到） |
+
+- **没有"取自己"的变体**：两类列表都要显式传 `up_mid`，mid 来自凭据的 `DedeUserID`
+  （`Mid` 有 `FromStr` 与 `new(u64)`，`src/ids.rs:19/38`，`new(0)` 直接 `Err`）。
+- `FavCreatedListParams::new` / `FavCollectedListParams::new` **不失败**；但
+  `FavCollectedListParams::with_page/with_page_size/with_platform` 返回 `BpiResult<Self>`。
+- 两个 item 结构都**没有 `#[serde(default)]`**：B 站少给任何字段都会变成 `BpiError::parse`，
+  所以错误必须上界面（第 4.7 节）。
+
+### 9.3 观看历史
+
+| 调用 | 位置 | 返回 |
+| --- | --- | --- |
+| `historytoview().history_list(HistoryListParams)` | `src/historytoview/client.rs:36` | `HistoryListData { cursor: HistoryCursor, tab: Vec<HistoryTab>, list: Vec<HistoryListItem> }`（`history.rs:113`） |
+| `historytoview().toview_list()` | `src/historytoview/client.rs:54` | `ToViewListData { count, list }`（稍后再看，P2b 未用） |
+| `historytoview().delete_history(HistoryDeleteParams::new(kid)?)` | `history.rs:130` | 内部自动取 csrf，未 `set_account` 会 `auth_required` |
+
+- `HistoryListParams::new()` → `.with_type(HistoryListType::Archive)`（`params.rs:83`，返回 `Self`）、
+  `.with_page_size(u32) -> BpiResult<Self>`；**分页是游标**：下一页要把 `cursor.max / view_at / business`
+  回传给 `with_max / with_view_at / with_business`（`params.rs:96-118`），不是页码。
+- `HistoryListData.cursor/tab/list` 无 `#[serde(default)]`，同样解析失败即报错上界面。
+- **`bvid` 在 `item.history.bvid: Option<String>`**（`history.rs:52`），顶层是 `kid: u64`；
+  专栏/直播那里是 `None`，所以只取 `Archive` 类型才能保证能进详情页。
+- 时长与进度是**数字秒**：`duration: Option<u32>`、`progress: i32`（`history.rs:97/101`，
+  "没进度"时可能是 `-1`）；跟搜索接口的 `"mm:ss"` 字符串**不是一回事**，格式化在
+  `src/api/history.rs::format_seconds`。

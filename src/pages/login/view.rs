@@ -34,9 +34,14 @@ use crate::ui::qr;
 /// 轮询间隔。B 站的 poll 接口对频率不敏感，1.5 秒既跟手又不刷接口。
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 
-/// 登录成功事件。根视图订阅它，把界面从登录切到主视图。
+/// 登录成功事件。根视图订阅它，把界面从登录切到主界面。
+///
+/// 带上 mid 是为了让根视图不必再回头读凭据文件（写盘可能失败，界面却已经拿到登录态了）。
 #[derive(Clone, Debug)]
-pub struct LoginSucceeded;
+pub struct LoginSucceeded {
+    /// 刚登录账号的 mid（`DedeUserID`），个人中心页拿它去要自己的资料与收藏夹。
+    pub mid: String,
+}
 
 /// 扫码登录页的根视图。
 pub struct LoginPage {
@@ -157,16 +162,16 @@ impl LoginPage {
 
                 let join = login::poll_qr(Arc::clone(&client), key.clone());
                 let state = match join.await {
-                    Ok(inner) => {
-                        // 这行是"前台队列还在被排空"的常驻证据（原来靠一个只跑 5 次的心跳
-                        // 任务证明，任务本身是诊断脚手架，登录后就没用了，已删）。
-                        log::debug!("登录页：轮询结果已回到前台（代 {generation}）");
-                        inner
-                    }
                     // 网络抖动或接口错误：不打断用户，下一轮继续问。
                     Ok(Err(error)) => {
                         log::warn!("扫码轮询失败: {error}");
                         continue;
+                    }
+                    Ok(Ok(state)) => {
+                        // 这行是"前台队列还在被排空"的常驻证据（原来靠一个只跑 5 次的心跳
+                        // 任务证明，任务本身是诊断脚手架，登录后就没用了，已删）。
+                        log::debug!("登录页：轮询结果已回到前台（代 {generation}）");
+                        state
                     }
                     Err(join_error) => {
                         let message = crate::app::describe_join_error(join_error);
@@ -270,7 +275,9 @@ impl LoginPage {
         }
 
         cx.notify();
-        cx.emit(LoginSucceeded);
+        cx.emit(LoginSucceeded {
+            mid: credential.dede_user_id.clone(),
+        });
     }
 }
 

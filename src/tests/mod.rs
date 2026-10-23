@@ -309,6 +309,34 @@ mod qr_tests {
 }
 
 #[cfg(test)]
+mod mine_tests {
+    use crate::api::history::format_seconds;
+    use crate::api::profile::vip_label;
+
+    #[test]
+    fn seconds_format_switches_at_one_hour() {
+        // 卡片右下角那一栏同时出现"mm:ss"和"h:mm:ss"两种写法，边界要钉住。
+        assert_eq!(format_seconds(0), "00:00");
+        assert_eq!(format_seconds(45), "00:45");
+        assert_eq!(format_seconds(599), "09:59");
+        assert_eq!(format_seconds(3600), "1:00:00");
+        assert_eq!(format_seconds(3725), "1:02:05");
+        assert_eq!(format_seconds(86_399), "23:59:59");
+    }
+
+    #[test]
+    fn vip_label_only_cares_about_active_status()
+    {
+        // 未知/未开通一律不显示会员；status==0 或 kind==0 都算没有（口径见 api/profile.rs）。
+        assert_eq!(vip_label(0, 0), "");
+        assert_eq!(vip_label(1, 0), "");
+        assert_eq!(vip_label(0, 2), "");
+        assert_eq!(vip_label(1, 1), "大会员");
+        assert_eq!(vip_label(1, 2), "大会员");
+    }
+}
+
+#[cfg(test)]
 mod scaffold_tests {
     use crate::VERSION;
 

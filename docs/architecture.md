@@ -75,6 +75,9 @@ src/
 ├── api/
 │   ├── mod.rs         spawn_on_api_runtime()：gpui ↔ tokio 的调用桥
 │   ├── login.rs       扫码登录：取码/轮询 + 码值翻译 + cookie→凭据 + 缺 buvid3 时补取（纯函数可测）
+│   ├── profile.rs     个人中心头部：user().space_info()（自动 WBI）+ login().stat()（关注/粉丝）
+│   ├── favorites.rs   收藏夹：fav().created_list() + collected_list()，合并成一个 DTO
+│   ├── history.rs     观看历史：historytoview().history_list()（游标分页）+ 秒数格式化纯函数
 │   ├── search.rs      搜索封装：DTO（SearchHit/PageInfo/SearchSort）+ 标签清洗 + 播放量格式化
 │   └── stream_select.rs  DASH 选择纯函数（HEVC 优先、画质档封顶 116）
 ├── store/
@@ -83,8 +86,10 @@ src/
 │   ├── mod.rs         mpv 参数构造 + Referer/UA 常量 + PATH 查找
 │   └── ipc.rs         mpv JSON IPC 的命令构造（纯数据，管道 I/O 在 P4）
 ├── pages/
-│   ├── root.rs        窗口根视图：无凭据→登录页，有凭据→主界面；登录成功后原地切换
+│   ├── root.rs        窗口根视图：无凭据→登录页，有凭据→主界面外壳；登录成功后原地切换
+│   ├── shell/         主界面外壳：顶部"搜索 / 我的"两个入口，两页实体都常驻（切回不重刷）
 │   ├── login/         扫码登录页（二维码 + 1.5s 轮询 + 过期自动重载）
+│   ├── mine/          个人中心页（资料 + 收藏夹 + 历史，三路并发各自显示错误）
 │   └── search/        阶段一页面（view.rs 为根视图）
 ├── ui/
 │   ├── qr.rs          二维码：qrcode-generator 出布尔矩阵，div 网格绘制
@@ -278,6 +283,26 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 
 为此 `Cargo.toml` 的 bpi-rs features 多了 `misc`。
 
+### 4.11 个人中心（P2b）：外壳 + 三路并发
+
+- **窗口层次变成三层**：`RootView`（登录 vs 主界面）→ `MainShell`（搜索 vs 我的，顶部两个入口）
+  → 具体页面。外壳把两个页面实体**都常驻持有**，切回来不重新请求；这样"搜完看一眼收藏再回来看结果"
+  不会把列表刷没。mid 由 `LoginSucceeded { mid }` 事件或已保存的凭据提供，一路传到 `MinePage`。
+- **三块内容 = 三路并发**（资料 / 收藏夹 / 历史），共用一个 `seq`：一次 `reload` 只自增一次，
+  三路任务写回前都检查 `view.seq == seq`，被取代的整路丢弃。每路各自 `cx.spawn(...).detach()`
+  （第 4.9 节的规矩），各自把自己的错误写进自己的提示位——**一块挂了不能把整页变空白**，
+  这是第 4.7 节"失败必须可见"在并发场景下的形态。
+- **接口选择上的两个坑**（详细证据在 `docs/api-notes.md` 第 8 节）：
+  `misc::NavData` 只是两个 WBI key，不是用户资料；真正的资料在 `user().space_info()`（自动 WBI），
+  关注/粉丝在 `login().stat()`（在 `login` feature 里，不必为此开 `web_widget`）。
+  收藏接口没有"取自己"的变体，`created_list` / `collected_list` 都要显式传 `up_mid`。
+- **历史只要稿件**（`HistoryListType::Archive`）：专栏/直播条目那里没有 `bvid`
+  （bvid 在 `item.history.bvid: Option<String>`，不是顶层），而我们下一页要进详情页。
+- 历史的 `duration` / `progress` 是**数字秒**（搜索接口给的是 `"mm:ss"` 字符串，两边别混），
+  格式化用 `api/history.rs::format_seconds`（纯函数，已进单测）。
+  `view_at` 暂时不显示：本项目没有日期库，也不打算为一条次要文案引入 chrono——
+  真要做的时候优先加依赖，不要手写日历换算。
+
 ## 5. 阶段进度
 
 | 阶段 | 内容 | 状态 |
@@ -285,7 +310,7 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | P0 | 依赖骨架、release CI、空窗口 + 中文输入框 + 假数据列表、`api/store/player` 纯逻辑层 | **完成**（run 39787252294 全绿） |
 | P1 | 搜索接线：`search().video()`、结果转换（剥 `<em>`）、封面网络图（gpui 原生 URI 加载）、分页/排序 | 代码与 CI 均完成（run 39795360593）；**验证并入登录之后**（定稿不做免登录搜索） |
 | P2a | 登录：扫码（取码/轮询/过期重载）+ 凭据落盘 + 启动判定 + 登录后进主界面 | **完成**（第十一轮产物真机扫码登录通过，凭据已写出） |
-| P2b | 个人：我的信息 / 收藏 / 历史 入口与页面 | 未开始 |
+| P2b | 个人：我的信息 / 收藏 / 历史 入口与页面 | 代码完成（外壳 + 三路并发，机制见第 4.11 节），待编译与真机复验 |
 | P3 | 详情：`video().detail()`、多 P、tags/related、字幕列表 | 未开始 |
 | P4 | 播放：拉起 mpv、管道 IPC 读写、换清晰度（`loadfile` + `audio-remove`/`audio-add`）、`sub-add` | 未开始 |
 | P5 | 打磨：详情页覆盖式布局、骨架屏、快捷键、续播进度 | 未开始 |
