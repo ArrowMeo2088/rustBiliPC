@@ -18,7 +18,9 @@
   并自带 `DEFAULT_USER_AGENT / REFERER / ORIGIN`。结论：请求不会无限挂着——界面若停在加载态，
   应先怀疑 tokio 任务 panic（见 architecture.md 第 4.7 节）。
 - `set_account(&self, Account) -> Result<(), BpiError>`（`src/client.rs:294`）会走
-  `Account::validate_complete`：DedeUserID / SESSDATA / bili_jct / **buvid3** 四者缺一不可。
+  `Account::validate_complete`：DedeUserID / SESSDATA / bili_jct / **buvid3** 四者缺一不可
+  （`src/session/account.rs:99-115`），缺任何一个直接返回 `InvalidParameter{field:"account"}`，
+  而且 `jar`/`account` 都不提供"读单个 cookie"的公开方法（`get_account` 只在 set 之后才有值）。
 
 ## 2. 登录（扫码）
 
@@ -26,6 +28,15 @@
 | --- | --- | --- |
 | `login().qr_generate()` | `src/login/client.rs:193` | `GenerateQrCodeData { url, qrcode_key }` |
 | `login().qr_poll(LoginQrPollParams)` | `src/login/client.rs:202` | `CheckQrCodeStatusData { url, refresh_token, timestamp, code, message, cookies: Vec<(String,String)> }` |
+| `misc().buvid()` | `src/misc/client.rs:55`，`GET https://api.bilibili.com/x/frontend/finger/spi`（`client.rs:11`） | `BuvidData { buvid3, buvid4 }`（`b_3`/`b_4` 重命名而来） |
+| `misc().buvid3()` | `src/misc/client.rs:48`，`GET /x/web-frontend/getbuvid`（`client.rs:10`） | `Buvid3Data { buvid }` |
+
+- **`qr_poll` 成功时 `data.cookies` 只有响应自己的 Set-Cookie**：bpi-rs 用
+  `response.cookies()` 收集、并且**只在 `code == 0` 时才填**（`src/login/client.rs:211-223`）。
+  B 站给的是登录三件套，**没有 buvid3** → 必须像上面那样补取一个，否则 `set_account` 永远失败。
+  选 `misc().buvid()`：它的响应模型是明确 JSON 字段 `b_3`/`b_4`，且 finger/spi 是 web 前端自己
+  开屏就在用的匿名接口。`misc().buvid3()`（`/x/web-frontend/getbuvid`）的响应体形态我们没核实过，
+  暂不用。为此 bpi-rs 的 features 里加了 `misc`。
 
 - `code == 0` 才算成功；码值翻译集中在 `src/api/login.rs::QrPollState::from_code`
   （`86101` 等待扫码、`86038` 过期→自动重新取码、`86090`/含"扫描"文案 视为已扫码待确认，
@@ -135,6 +146,7 @@ bpi-rs 自己请求时会加 `User-Agent` + `Referer: https://www.bilibili.com/`
 | `models::stream::best_video()` 优先分辨率、会选 4K | `src/models/stream.rs:150-172` | 不使用；且加封顶 |
 | `cookie_refresh.rs` 空文件 | `src/login/cookie_refresh.rs` | 自己实现失效检测与重新登录提示 |
 | 无自动重试 / 风控处理 | `err/error.rs`、`err/code.rs` | 按 `is_risk_control()`(-352/-412/412)、`requires_login()`(-101)、`requires_vip()`(-106/-650) 分类处理 |
+| 扫码成功不补 buvid3（`validate_complete` 却要求它） | `src/login/client.rs:211-223` 只搬响应 cookie | `poll_qr` 在 `code==0` 且缺 buvid3 时调 `misc().buvid()` 补，见第 2 节与 architecture.md 第 4.10 节 |
 | 不外发请求头 | `src/client.rs:394-413` | `player::BILIBILI_REFERER` / `MPV_USER_AGENT` 常量 |
 
 ## 7. mpv（`ref/mpv`，DOCS/man）

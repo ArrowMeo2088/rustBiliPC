@@ -14,6 +14,8 @@ gpui-kit = "0.8.0"
 
 # Bilibili Web API 封装。关掉默认的 full（27 个模块），只开当前四个阶段需要的。
 # 后续阶段按 docs/api-notes.md 的记录再增列（如 danmaku 会多拉 quick-xml + flate2）。
+# "misc" 只为 `misc().buvid()`（/x/frontend/finger/spi）：扫码登录的响应 cookie 里通常
+# 没有 buvid3，而 `Account::validate_complete` 要四个字段齐全，缺它就没法 set_account。
 bpi-rs = { version = "0.3.1", default-features = false, features = [
     "login",
     "search",
@@ -21,6 +23,7 @@ bpi-rs = { version = "0.3.1", default-features = false, features = [
     "user",
     "fav",
     "historytoview",
+    "misc",
 ] }
 
 # bpi-rs 基于 reqwest，poll 其 future 必须在有 tokio reactor 的环境里进行；
@@ -44,6 +47,11 @@ rustls = "0.23"
 # gpui 的默认 HttpClient 是 NullHttpClient（请求直接失败），网络封面图必须换成真客户端。
 # 与 kit 的 pin 保持同一个 =0.3.9 快照，避免多一份 gpui。
 reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.9" }
+
+[lints.rust]
+# 裸 `cx.spawn(...)` 丢掉返回的 `Task` = 任务立即被取消（真机表现：请求发出去了、界面永远不动，
+# 见 docs/architecture.md 第 4.9 节）。gpui 的 `Task` 是 `#[must_use]`，这里把该警告升级为错误。
+unused_must_use = "deny"
 
 [profile.release]
 # 按定稿：现阶段不做 LTO、不 strip，优先编译速度与可排查性。

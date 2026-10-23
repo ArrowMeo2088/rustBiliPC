@@ -21,7 +21,8 @@
 - `search_format_tests`：标题高亮标签清洗、播放量的中文读法（万/亿与尾零截断、边界值）、
   排序项的中文标签。
 - `login_tests`：B 站登录码值到状态的翻译（0/86101/86038/未知码带文案）、cookie→凭据的
-  完整性要求（少 `buvid3` 必须判 `None`）、凭据 JSON 往返相等。
+  完整性要求（少 `buvid3` 必须判 `None`）、**只有"成功且缺 buvid3"才需要补取**
+  （`needs_buvid3_backfill`，等待/过期时不该多发请求）、凭据 JSON 往返相等。
 - `qr_tests`：矩阵存在性、正方形与最小边长（>=21 且为奇数）、空文本也能出符号。
 - `scaffold_tests`：版本号非空且以数字开头。
 
@@ -29,6 +30,12 @@
 
 - UI 渲染与交互：验证方式是 CI 产物在真机上跑起来看（架构文档的机制决定 release 才能运行）。
 - 真实网络请求：需要登录态，人工验证。
+- **视图里的异步状态机**（例如"登录成功之后有没有停轮询、有没有写凭据"）：要用 gpui 的无窗口
+  测试执行器（`TestAppContext`），它只在 `test-support` feature 下导出，而我们的入口是
+  `gpui-kit` —— 得先加 `[dev-dependencies] gpui-kit = { version = "0.8.0", features =
+  ["test-support"] }` 再验一遍能不能编。这一类回归现在由 `Cargo.toml` 的
+  `unused_must_use = "deny"` 兜底（"忘了持有/`.detach()` Task" 直接编译失败），
+  补测试排在登录真机确认之后。
 
 ## 命令
 

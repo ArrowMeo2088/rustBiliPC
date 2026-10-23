@@ -41,6 +41,8 @@ pub struct SearchPage {
     sort: SearchSort,
     /// 请求在途标记，防止连点回车并发多次搜索。
     loading: bool,
+    /// 请求序号：只有序号仍为最新的那次结果才允许写回界面。
+    request_seq: u32,
     /// 状态/错误提示，直接显示在列表上方。
     feedback: SharedString,
     /// 底部环境自检行。
@@ -84,6 +86,7 @@ impl SearchPage {
             page: 1,
             sort: SearchSort::Comprehensive,
             loading: false,
+            request_seq: 0,
             feedback: "输入关键词后回车或点搜索".into(),
             status_line: Self::build_status_line(),
             _subscriptions,
@@ -106,18 +109,23 @@ impl SearchPage {
         self.page = page;
         self.sort = sort;
         self.loading = true;
+        self.request_seq += 1;
+        let seq = self.request_seq;
         self.feedback = format!("搜索中… {keyword}（{}）", sort.label()).into();
         cx.notify();
 
         let client = Arc::clone(&self.client);
         let join = search::search_videos(client, keyword, page, sort);
-        log::debug!("搜索页：等待搜索结果");
+        log::debug!("搜索页：等待搜索结果（请求 #{seq}）");
 
         // 请求在 tokio 上跑，回到 gpui 时用 kit 自身的写法：upgrade 后 update。
+        // 末尾的 `.detach()` 不能省：`Task` 被 drop 就等于取消任务
+        // （`gpui-pre-scheduler/src/executor.rs:396-402`），那样结果永远回不来。
+        // 用 `request_seq` 挡住"翻页时旧请求后到"覆盖新结果。
         cx.spawn(async move |this, cx| {
             let outcome = match join.await {
                 Ok(inner) => {
-                    log::debug!("搜索页：结果已回到前台执行器");
+                    log::debug!("搜索页：结果已回到前台执行器（请求 #{seq}）");
                     inner.map_err(|error| error.to_string())
                 }
                 Err(join_error) => Err(crate::app::describe_join_error(join_error)),
@@ -127,6 +135,10 @@ impl SearchPage {
                 return;
             };
             let _ = this.update(cx, |this, cx| {
+                if this.request_seq != seq {
+                    log::debug!("搜索页：请求 #{seq} 已被更新的请求取代，丢弃结果");
+                    return;
+                }
                 this.loading = false;
                 match outcome {
                     Ok(outcome) => {
@@ -150,7 +162,8 @@ impl SearchPage {
                 log::debug!("搜索页：状态已写入，卡片 {} 张", this.cards.len());
                 cx.notify();
             });
-        });
+        })
+        .detach();
     }
 
     /// 翻页：沿用已提交的关键词，只改页码。

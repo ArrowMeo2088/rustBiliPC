@@ -9,7 +9,7 @@
 /publish/data/
 cookies.json
 
-# 运行期日志（exe 同目录 debug.log）
+# 运行期日志现在写在 %LOCALAPPDATA%\rustBiliPC\（不在仓库里），下面两条只防历史遗留与手工放进去的副本
 /debug.log
 /publish/debug.log
 

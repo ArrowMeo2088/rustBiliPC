@@ -5,7 +5,8 @@
 //! gpui 的执行器不是 tokio，而 bpi-rs 底层是 reqwest（依赖 tokio 的 reactor 与
 //! timer）。把 bpi-rs 的 future 直接丢进 `cx.spawn` 会在 poll 时 panic
 //! （"there is no reactor running"）。所以本模块持有一个进程唯一的 runtime，
-//! [`crate::api`] 把请求 spawn 到它上面，再通过 channel 把结果送回 gpui 主线程。
+//! [`crate::api`] 把请求 spawn 到它上面，gpui 侧再 await 返回的 `JoinHandle`
+//! （await 它只需要 waker，不需要 reactor，唤醒会经调度器送回主线程）。
 
 use std::path::PathBuf;
 use std::sync::OnceLock;

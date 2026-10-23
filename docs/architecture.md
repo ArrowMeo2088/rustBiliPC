@@ -70,11 +70,11 @@ src/
 ├── main.rs            启动序列：logger → runtime → with_assets → init → theme → set_http_client → 开窗
 ├── lib.rs             模块树 + VERSION
 ├── app.rs             tokio runtime（OnceLock）、install_tls_provider()、describe_join_error()、exe_dir()/data_dir()
-├── logging.rs         debug.log 文件日志（每次启动清空、Debug 级、零依赖、同时写 stderr）
+├── logging.rs         debug.log 文件日志（写 %LOCALAPPDATA%\rustBiliPC\，每次启动清空、Debug 级、零依赖、同时写 stderr）
 ├── theme.rs           全局主题覆盖：accent = #FB7299，accent_foreground = #1F1F1F
 ├── api/
 │   ├── mod.rs         spawn_on_api_runtime()：gpui ↔ tokio 的调用桥
-│   ├── login.rs       扫码登录：取码/轮询 + 码值翻译 + cookie→凭据（纯函数可测）
+│   ├── login.rs       扫码登录：取码/轮询 + 码值翻译 + cookie→凭据 + 缺 buvid3 时补取（纯函数可测）
 │   ├── search.rs      搜索封装：DTO（SearchHit/PageInfo/SearchSort）+ 标签清洗 + 播放量格式化
 │   └── stream_select.rs  DASH 选择纯函数（HEVC 优先、画质档封顶 116）
 ├── store/
@@ -116,8 +116,15 @@ cx.spawn(async move |this, cx| {
             cx.notify();
         });
     }
-});
+})
+// 末尾的 detach() 或 `let _task = …` 二选一，缺了任务会被立即取消（第 4.9 节）。
+.detach();
 ```
+
+`cx.spawn` 交给闭包的是 `&mut AsyncApp`（`gpui/src/app/context.rs:230`），不是
+`AsyncWindowContext`；两者都有 `background_executor()`，但要写窗口相关操作时得改用
+`Context::spawn_in(window, …)`。gpui 的前台任务不要求 future 是 `Send`（`executor.rs:66-72` 走
+`spawn_local`），所以可以直接 await tokio 的 `JoinHandle`；唤醒来自任何线程都会被调度回主线程。
 
 ### 4.2 码流选择
 
@@ -193,45 +200,79 @@ bpi-rs 的 builder 默认 `no_proxy = true`、`timeout = 10s`、`connect_timeout
 
 **第七轮之后的新事实**：装好 provider 后请求确实发出去了（用户 Wireshark 抓到包），但界面仍停在
 加载态且没有错误文案 —— 说明"结果回到 UI"这一跳丢了。为把它拆开看，加了 `debug.log`（第 4.8 节）
-与登录页心跳；同时排除了两个猜测：`gpui::Task` 的 `Drop` 不取消任务
-（`gpui-pre-scheduler/src/executor.rs:402` 起没有 `Drop` impl，也没设 `cancel_on_drop`），
-bpi-rs 内部没有 `block_on`/跨 await 的 `std Mutex`。
+与登录页心跳；同时排除了另一类猜测：bpi-rs 内部没有 `block_on`、也没有跨 await 持有的 `std Mutex`，
+不会出现"后台任务自己卡死"。
+（这一节原先还写过"`gpui::Task` 的 `Drop` 不取消任务"——**那句是错的**，我的 grep 漏了文件，
+真正的结论见第 4.9 节。）
 
 ### 4.8 日志：debug.log 是唯一可依赖的现场
 
 GUI 程序双击启动时没有控制台，`stderr` 一律看不见，所以 `src/logging.rs` 自实现 `log::Log`：
 
-- 路径 `<exe 目录>/debug.log`，**每次启动 `File::create` 清空重写**，级别 `Debug`；
+- 路径 `%LOCALAPPDATA%\rustBiliPC\debug.log`（取不到 `LOCALAPPDATA` 才退回 `<exe 目录>/data/`），
+  **每次启动 `File::create` 清空重写**，级别 `Debug`。不放在 `publish/`：那是构建输出目录，
+  每轮取产物都会覆盖它（我们真的因此删掉过用户的一份现场）。
 - 每行 `HH:MM:SS.mmm LEVEL target: message`，写完立即 `flush`（崩溃也不丢最后几行）；
 - 同时把同一行复制到 stderr，便于从命令行启动时直接看；
 - 零新依赖（原来的 `env_logger` 已移除）。
 
 约定：**异步链路的每一跳都要有日志**，否则无法区分"没发出/没回来/回来了但没写进界面"：
 api 层在提交前、tokio 任务内请求前后（带 `Instant` 耗时与返回码）各一条；视图层在 `await` 前后、
-`upgrade()` 失败、`update()` 闭包内部各一条。登录页还带一个 2 秒一次、共 10 次的心跳，
-用来单独回答"前台执行器还在不被唤醒"这个问题。界面上会显示日志文件路径。
+`upgrade()` 失败、`update()` 闭包内部各一条。登录页还带一个 2 秒一次、共 `HEARTBEAT_TICKS`（当前 5）次
+的心跳，用来单独回答"前台队列到底会不会被后台事件唤醒"这个问题；根因定位到 Task 之后它只剩
+回归确认作用，登录跑通即可删。界面上会显示日志文件路径。
 
-### 4.9 启动期唤醒竞态（真机根因，已绕过）
+### 4.9 "请求发出去了但界面不动"的真实根因：Task 被丢弃即取消
 
-`debug.log` 给出的现场是：`提交 qr_generate` → `tokio 任务开始执行` → `qr_generate 返回，用时 190ms`
-都出现了，但**视图层 `cx.spawn` 闭包的第一行日志从未出现**，心跳 10 行也一行没有 —— 即前台队列
-根本没被排空。机制在 gpui 0.3.9 的 Windows 后端：
+`debug.log` 的现场是：tokio 侧 `qr_generate` 190ms 正常返回，而视图层 `cx.spawn` 闭包的**第一行日志
+从未出现**，心跳也一行没有 ⇒ 那段 future 从没被推进过。原因在我们自己的写法。gpui 执行器的
+`Task` 文档写得很明白（`gpui-pre-scheduler/src/executor.rs:396-402`）：
 
-- `gpui_windows/src/dispatcher.rs:121`：`if !wake_posted.swap(true, AcqRel) { …PostMessage… }`，
-  即"只允许第一次派发去唤醒主循环"；
-- `gpui_windows/src/platform.rs:299` `post_message`：把 `WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD`
-  广播给 `raw_window_handles` 里**已注册**的窗口，而窗口是在 `platform.rs:774` 才 push 进去的。
+> Task is a primitive that allows work to happen in the background. …
+> **If you drop a task it will be cancelled immediately.** Calling `Task::detach` allows the task
+> to continue running, but with no way to return a value.
+> `#[must_use] pub struct Task<T>`
 
-于是：在 `open_window` 的构造闭包里第一次 `cx.spawn`（此刻窗口尚未注册）= 唯一的唤醒发给了空列表，
-而标志位已经永久为 true，此后任何派发都不会再有人排空 —— 界面渲染正常（paint 走 WndProc），
-但所有异步任务永远不被 poll。这也解释了更早的"搜索一直显示搜索中"。
+我们每处都写成裸 `cx.spawn(...);`，返回的 `Task` 当场 drop ⇒ 任务立即取消。请求仍然出现在 Wireshark
+里，是因为 `fetch_qr(...)` 在 `cx.spawn` **之前**就把 tokio 任务发出去了；丢掉的只是"等结果并写回
+界面"那一段。rustls 双 provider 那条修复是必要的（不装连请求都发不出去），但它不是这个卡死的原因。
 
-**绕法（现在是硬规定）**：启动阶段的异步任务必须推迟到**首帧渲染**里再派发。实现是
-`RootView::startup_pending` 一次性标志 + `render()` 里 `login.update(cx, |v, cx| v.start(cx))`；
-`LoginPage::new` 本身不做任何 spawn。注意 `Window::defer` 救不了这个问题——它内部是
-`App::defer` → 前台执行器，走的正是同一条被卡住的队列。
+**修复与防复发**：
 
-上游视角这是 gpui 的缺陷（应当在没有窗口时自唤醒或延后重置标志位），我们只做规避，不改依赖。
+- 每个 `cx.spawn` 必须要么 `let _task = ...` 存进实体字段（实体析构即取消，适合长驻循环），
+  要么末尾 `.detach()`（适合一次性任务）。
+- **不要从任务自己的 future 里丢弃它的 `Task`**：`Task::cancel` 会等任务停止，自己等自己 = 主线程
+  死锁。所以登录流程用 `generation: u32` 序号，旧循环发现自己已被取代就自行 `return`；搜索页用
+  `request_seq` 同样处理（顺带解决"翻页时旧请求后到覆盖新结果"）。
+- `Cargo.toml` 加 `[lints.rust] unused_must_use = "deny"`：这类写法今后直接编译失败，
+  不再依赖"谁去翻 CI 日志里的 warning"——第十轮之前那条 `unused 'Task' that must be used` 一直躺在那里。
+
+顺带把这条链路的另一半也照着源码确认过，免得以后再怀疑"await 别人的 runtime 到底能不能醒"：
+gpui 的前台任务由 `async_task` 驱动（`gpui-pre-scheduler/src/executor.rs:2`），
+`LocalExecutor::spawn` 只要求 `F: Future + 'static`（**不要求 `Send`**，同文件 `:66-72`），而每个
+runnable 的 schedule 回调是 `Fn(Runnable) + Send + Sync`（同文件 `:190-194`），唤醒来自哪个线程都会被
+`dispatch` 送回主线程。所以"tokio 上跑请求、gpui 前台 await `JoinHandle`"这个模式本身是成立的，
+之前不成立只是因为任务被 drop 掉了。`Task::detach` 的实现就是 `async_task::Task::detach`
+（同文件 `:572-579`），detach 后无法取返回值，但会跑完。
+
+**撤回一个错误结论**：本节上一版把根因写成"gpui Windows 的 `wake_posted` 唤醒竞态"，**那是错的**：
+唤醒用的 `PostMessageW` 目标是平台隐藏窗口 `self.handle`，它在 `WindowsPlatform::new`
+（`gpui_windows/src/platform.rs:224` 的 `CreateWindowExW`）里就创建好了，与业务窗口注册时机无关；
+`RootView::startup_pending` 那套"首帧再派发"的规避已随之删除。教训：框架源码要读到底，
+但没验证过的推断不要写成结论。
+
+### 4.10 登录成功的最后一步：buvid3 不在扫码响应里
+
+`Account::validate_complete` 要求 `DedeUserID / SESSDATA / bili_jct / buvid3` 四个字段全部非空
+（`ref/bpi-rs/src/session/account.rs:110-115`），而 `qr_poll` 成功时 bpi-rs 只是把响应的
+Set-Cookie 原样收集进 `data.cookies`（`ref/bpi-rs/src/login/client.rs:211-223`，只在 `code==0`
+时才填）。B 站的轮询响应给的是登录三件套，`buvid3` 是**设备标识**、由匿名接口
+`/x/frontend/finger/spi` 下发（`ref/bpi-rs/src/misc/client.rs:11`，`misc().buvid() ->
+BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 且响应里没有 buvid3 时
+补取一次再交给凭据构造函数；补取失败就让界面显示"凭据不完整"，同时日志里列出这次响应到底带了
+哪些 cookie 名——真机上一看就知道是 B 站改了口径还是我们漏了字段。
+
+为此 `Cargo.toml` 的 bpi-rs features 多了 `misc`。
 
 ## 5. 阶段进度
 
@@ -239,7 +280,7 @@ api 层在提交前、tokio 任务内请求前后（带 `Instant` 耗时与返�
 | --- | --- | --- |
 | P0 | 依赖骨架、release CI、空窗口 + 中文输入框 + 假数据列表、`api/store/player` 纯逻辑层 | **完成**（run 39787252294 全绿） |
 | P1 | 搜索接线：`search().video()`、结果转换（剥 `<em>`）、封面网络图（gpui 原生 URI 加载）、分页/排序 | 代码与 CI 均完成（run 39795360593）；**验证并入登录之后**（定稿不做免登录搜索） |
-| P2a | 登录：扫码（取码/轮询/过期重载）+ 凭据落盘 + 启动判定 + 登录后进主界面 | 根因已定位（第 4.9 节启动期唤醒竞态），修复待编译与真机复验 |
+| P2a | 登录：扫码（取码/轮询/过期重载）+ 凭据落盘 + 启动判定 + 登录后进主界面 | 根因已修（第 4.9 节 Task 被丢弃即取消）+ buvid3 补齐（第 4.10 节），待编译与真机复验 |
 | P2b | 个人：我的信息 / 收藏 / 历史 入口与页面 | 未开始 |
 | P3 | 详情：`video().detail()`、多 P、tags/related、字幕列表 | 未开始 |
 | P4 | 播放：拉起 mpv、管道 IPC 读写、换清晰度（`loadfile` + `audio-remove`/`audio-add`）、`sub-add` | 未开始 |
@@ -258,7 +299,8 @@ api 层在提交前、tokio 任务内请求前后（带 `Instant` 耗时与返�
 | 7 | mpv 对 DASH/fmp4 双流 seek 无任何文档 | P4 实测；失败备选：合并下载后本地播放 |
 | 8 | 1080P 需登录、HDR/4K/8K 需大会员 | 按 `accept_quality` 降级 + `requires_vip` 提示 |
 | 9 | rustls 同时启用 aws-lc-rs 与 ring → 未装默认 provider 时 TLS 握手 panic（症状：加载态永不结束） | 启动时 `app::install_tls_provider()`；所有 `JoinHandle` 错误都上界面（第 4.7 节） |
-| 10 | **启动期在窗口注册前 `cx.spawn`** → gpui Windows 的 `wake_posted` 永久为 true，前台队列再也不被排空（渲染正常、异步全灭） | 已定位并绕过：启动异步只在首帧 `render()` 里派发一次，见第 4.9 节 |
+| 10 | **`cx.spawn` 的 `Task` 被丢弃 = 任务立即取消**（症状：请求发出去了、界面永远停在加载态，日志里连闭包第一行都没有） | 已修：所有 spawn 一律 `.detach()` 或存进实体字段，并用 `[lints.rust] unused_must_use = "deny"` 让这类写法编译失败，见第 4.9 节 |
+| 11 | 扫码成功的响应 cookie 里没有 `buvid3`，而 `Account::validate_complete` 要它 → 登录在最后一步失败 | `poll_qr` 在 `code==0` 且缺 buvid3 时调 `misc().buvid()`（`/x/frontend/finger/spi`）补一个，见第 4.10 节 |
 
 ## 7. 维护规则
 
@@ -329,7 +371,7 @@ api 层在提交前、tokio 任务内请求前后（带 `Instant` 耗时与返�
   现在两处（登录取码、轮询）都会把 `describe_join_error()` 的文案显示到界面上。
 - lock 只是本包依赖列表变化（新增直接依赖 `rustls`），包数仍 887。
 
-### 第八、九轮（run 39883479417）：日志埋点上机
+### 第八、九轮（run 39812160559 失败 / run 39883479417 通过）：日志埋点上机
 
 - 第八轮失败是我的两个流程错误叠加：上一轮没跑完就推新提交（白烧一轮），以及 `log::Level`
   上用了不存在的方法 `is_enabled`（`log` 门面在调用 `log()` 前已按 `set_max_level` 过滤，
@@ -342,9 +384,20 @@ api 层在提交前、tokio 任务内请求前后（带 `Instant` 耗时与返�
   只可能是进程内的问题：任务没被 tokio 调度，或结果回到 gpui 前台的那一跳丢了。
   对照第 4.8 节的埋点位置读 `debug.log` 即可分辨是哪一种。
 
+### 第十轮（run 39886233646）：一个错误的绕法
+
+- 全绿（28 passed），产物 31.9 MB；但这一轮按"`wake_posted` 唤醒竞态"的猜测加了"首帧 render 里
+  才派发启动异步"的绕法（`RootView::startup_pending`），**方向是错的**，真机仍然停在加载态。
+- 读到底才看清两件事：唤醒用的 `PostMessageW` 目标是 `WindowsPlatform::new` 里早就创建好的平台
+  隐藏窗口，与业务窗口注册时机无关；而 `debug.log` 里"闭包第一行都没有"的真正原因是我们自己把
+  `cx.spawn` 返回的 `Task` 当场丢掉了 —— CI 从第七轮起就在报
+  `unused 'Task' that must be used`，是我按"快速开发阶段先不管 warning"把它跳过了。
+  第 4.9 节记录了根因、绕法的撤回和防复发措施。
+
 ### debug.log 的实际结论
 
 日志显示 tokio 侧 190ms 正常返回，但视图层 `cx.spawn` 闭包的第一行与 10 行心跳**全部缺失**
-⇒ 属于第二类：前台队列从未被排空，根因与绕法见第 4.9 节。
+⇒ 属于第二类，但不是"前台队列不被唤醒"，而是**那段 future 从来没被 spawn 成功过**：
+返回的 `Task` 被当场 drop，任务在第一次 poll 之前就取消了（第 4.9 节）。
 `install_tls_provider` 那个修复也是必要的（不装 provider 连请求都发不出去），但单靠它不够——
-两处都要成立才能跑通。
+两处都要成立才能跑通。第十一轮同时补上第 4.10 节的 buvid3 补齐，否则登录会在写凭据那一步失败。

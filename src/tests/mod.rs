@@ -199,7 +199,7 @@ mod search_format_tests {
 
 #[cfg(test)]
 mod login_tests {
-    use crate::api::login::{QrPollState, credential_from_cookies};
+    use crate::api::login::{QrPollState, credential_from_cookies, needs_buvid3_backfill};
     use crate::store::credentials::SavedCredential;
 
     fn full_cookies() -> Vec<(String, String)> {
@@ -269,6 +269,21 @@ mod login_tests {
         let json = serde_json::to_string(&credential).unwrap();
         let back: SavedCredential = serde_json::from_str(&json).unwrap();
         assert_eq!(back, credential);
+    }
+
+    #[test]
+    fn only_a_successful_poll_without_buvid3_needs_backfill() {
+        // 真机事实：B 站扫码成功的响应里只有登录三件套，没有 buvid3，
+        // 而 `Account::validate_complete` 要它 —— 所以这种组合必须触发补取。
+        let without_buvid3: Vec<(String, String)> = full_cookies()
+            .into_iter()
+            .filter(|(key, _)| key != "buvid3")
+            .collect();
+        assert!(needs_buvid3_backfill(0, &without_buvid3));
+        // 齐了就不用补；没成功（等待扫码 86101 / 已过期 86038）也不该补，免得白发消息。
+        assert!(!needs_buvid3_backfill(0, &full_cookies()));
+        assert!(!needs_buvid3_backfill(86101, &[]));
+        assert!(!needs_buvid3_backfill(86038, &without_buvid3));
     }
 }
 

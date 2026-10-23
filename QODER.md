@@ -47,11 +47,14 @@
 - 播放：**外置 mpv 独立进程 + 独立窗口**，不做 `--wid` 嵌入，不自研解码渲染。
 - 凭据：明文 JSON 存 `<exe 同目录>/data/cookies.json`（用户知情选择）。要改加密只动
   `src/store/credentials.rs` 的 `save`/`load`。
-- **启动阶段的异步任务不要在实体构造里派发**：`open_window` 的构造闭包里窗口还没注册进平台，
-  第一次 `cx.spawn` 会把 gpui Windows 后端的 `wake_posted` 标志永久置真而唤醒发不到任何窗口，
-  之后所有前台任务都不再被 poll（表现：请求在 tokio 侧成功返回、界面却卡在加载态、日志里
-  连闭包第一行都没有）。规定：这类启动工作推迟到**首帧 `render()` 里一次性触发**
-  （见 `docs/architecture.md` 第 4.9 节）；`Window::defer` 不算规避，它走同一条队列。
+- **每个 `cx.spawn` 返回的 `gpui::Task` 必须持有或 `.detach()`**：Task 被 drop 即取消任务
+  （`gpui-pre-scheduler/src/executor.rs:396-402`），裸写 `cx.spawn(...);` 会让"等结果并写回界面"
+  那一段永远不执行，症状是请求在 tokio 侧正常返回、界面却卡在加载态、日志里连闭包第一行都没有。
+  要停旧循环用序号（`generation`/`request_seq`）判断"我已被取代"后 `return`，**不要**从任务自己的
+  future 里丢弃它的 Task（`Task::cancel` 等自己 = 主线程死锁）。已在 `Cargo.toml` 用
+  `unused_must_use = "deny"` 兜底。见 `docs/architecture.md` 第 4.9 节。
+- **CI 日志里的 warning 不能一律跳过**：快速开发阶段可以不管排版类 warning，但
+  `unused_must_use` 这类"语义会坏"的必须当场读并处理——这条就是第七轮到第十轮一直躺在那里的信号。
 - 快速开发阶段：能调库就不造轮子，不管 warning，不设 clippy/rustfmt/test 门禁；但编译必须无 error。
 
 ## 5. CI 相关的既成事实
@@ -76,6 +79,7 @@
 - 中文必须可读：UTF-8，禁止 `\uXXXX` 转义与 GBK 乱码；`.bat` 文件内容保持 ASCII（cmd 按 OEM 代码页解析）。
 - 从 `ref/` 得出的结论要抄进 `docs/`，因为 `ref/` 不入库。
 - **调试靠 `debug.log`，不靠猜测**：GUI 程序没有控制台，日志由 `src/logging.rs` 写到
-  `<exe 目录>/debug.log`（每次启动清空、Debug 级）。新增任何异步链路时，必须在
+  `%LOCALAPPDATA%\rustBiliPC\debug.log`（每次启动清空、Debug 级）。不要写到 `publish/`：
+  那是构建输出目录，每轮取产物都会覆盖它（已经因此丢过一份现场）。新增任何异步链路时，必须在
   "提交任务 / 任务内请求前后 / 回到 gpui / 写入状态"四类位置各留日志，否则真机问题无法定位。
   排查用户问题时先要这个文件。

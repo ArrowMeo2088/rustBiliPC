@@ -26,9 +26,6 @@ pub struct RootView {
     client: Arc<bpi_rs::BpiClient>,
     /// 订阅要跟根视图同寿命。
     _subscriptions: Vec<Subscription>,
-    /// 登录流程要推迟到首帧渲染时再启动（gpui 0.3.9 Windows 的唤醒竞态，
-    /// 详见 `LoginPage::new` 的注释）。
-    startup_pending: bool,
 }
 
 impl RootView {
@@ -56,7 +53,6 @@ impl RootView {
                     stage: Stage::Search(search),
                     client,
                     _subscriptions: Vec::new(),
-                    startup_pending: false,
                 }
             }
             None => {
@@ -73,7 +69,6 @@ impl RootView {
                     stage: Stage::Login(login),
                     client,
                     _subscriptions: vec![subscription],
-                    startup_pending: true,
                 }
             }
         }
@@ -81,16 +76,7 @@ impl RootView {
 }
 
 impl Render for RootView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // 一次性把登录流程推迟到这里：render 由 WndProc 的 paint 直接驱动，此刻窗口已经注册进
-        // 平台，第一次 `cx.spawn` 的 PostMessage 唤醒才能真正送达（见 LoginPage::new 的注释）。
-        if self.startup_pending {
-            self.startup_pending = false;
-            if let Stage::Login(login) = &self.stage {
-                login.update(cx, |login, cx| login.start(cx));
-            }
-        }
-
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
         div().size_full().child(match &self.stage {
             Stage::Login(view) => view.clone().into_any_element(),
             Stage::Search(view) => view.clone().into_any_element(),

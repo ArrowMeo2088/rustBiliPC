@@ -1,7 +1,7 @@
 //! rustBiliPC 启动入口。
 //!
 //! 启动顺序是有讲究的，别随意调换：
-//! 1. 日志 —— 写 `<exe 目录>/debug.log`（每次启动清空，级别 debug），见 [`rustbilipc::logging`]。
+//! 1. 日志 —— 写 `%LOCALAPPDATA%\rustBiliPC\debug.log`（每次启动清空、级别 debug），见 [`rustbilipc::logging`]。
 //! 2. tokio runtime + rustls 默认 provider —— 见 [`rustbilipc::app`] 的说明：API 调用依赖前者，
 //!    没有后者任何 HTTPS 请求都会在握手处 panic（表现是界面一直停在加载态）。
 //! 3. `with_assets` —— kit 的图标/字体资源，必须在 `init` 之前挂上。
@@ -23,7 +23,7 @@ use rustbilipc::theme;
 const HTTP_CLIENT_NAME: &str = "rustbilipc";
 
 fn main() {
-    // 日志必须第一个装：GUI 程序没有控制台，出问题时全靠 `<exe 目录>/debug.log`。
+    // 日志必须第一个装：GUI 程序没有控制台，出问题时全靠 `%LOCALAPPDATA%\rustBiliPC\debug.log`。
     let log_path = logging::init();
     log::info!(
         "rustBiliPC v{} 启动，工作目录 {:?}",

@@ -11,9 +11,11 @@
 //!
 //! ## 凭据字段
 //!
-//! `qr_poll` 成功时响应的 Set-Cookie 里带着 `DedeUserID / SESSDATA / bili_jct / buvid3`
-//! （bpi-rs 的 cookie 白名单见 `src/client.rs:79`），四个都齐才能通过
-//! `Account::validate_complete`，所以 [`credential_from_cookies`] 要求四个字段全部命中。
+//! `Account::validate_complete` 要求四个 cookie 全部非空（`src/session/account.rs:110-115`），
+//! 但 `qr_poll` 成功响应的 Set-Cookie 里一般只有 `DedeUserID / SESSDATA / bili_jct`
+//! （bpi-rs 只是把 `response.cookies()` 原样塞进 `data.cookies`，见 `src/login/client.rs:211-223`），
+//! `buvid3` 是设备标识、要靠 `misc().buvid()` 单取。所以 [`poll_qr`] 在 code==0 且缺 buvid3 时
+//! 自己去补一个，[`credential_from_cookies`] 仍要求四个字段全部命中。
 
 use std::sync::Arc;
 
@@ -107,18 +109,41 @@ pub fn fetch_qr(client: Arc<BpiClient>) -> tokio::task::JoinHandle<BpiResult<QrS
 }
 
 /// 轮询一次扫码状态。
+///
+/// 成功时额外补一次 `misc().buvid()`：B 站 poll 响应的 Set-Cookie 只给登录三件套
+/// （DedeUserID / SESSDATA / bili_jct），而 `Account::validate_complete` 还要求 buvid3，
+/// 缺它就构造不出账号、登录会在最后一步失败。buvid3 是设备标识，匿名接口 `/x/frontend/finger/spi`
+/// 就能拿到，与登录态无关。
 pub fn poll_qr(client: Arc<BpiClient>, qrcode_key: String) -> tokio::task::JoinHandle<BpiResult<QrPollState>> {
     log::debug!("提交 qr_poll 到 API runtime");
     spawn_on_api_runtime(async move {
         let started = std::time::Instant::now();
         let params = bpi_rs::login::LoginQrPollParams::new(qrcode_key)?;
-        let data = client.login().qr_poll(params).await?;
+        let mut data = client.login().qr_poll(params).await?;
         log::debug!(
-            "qr_poll 返回 code={} cookie 数={} 用时={:?}",
+            "qr_poll 返回 code={} cookie=[{}] 用时={:?}",
             data.code,
-            data.cookies.len(),
+            data.cookies
+                .iter()
+                .map(|(name, _)| name.as_str())
+                .collect::<Vec<_>>()
+                .join(","),
             started.elapsed()
         );
+
+        if needs_buvid3_backfill(data.code, &data.cookies) {
+            match client.misc().buvid().await {
+                Ok(buvid) => {
+                    log::debug!("qr_poll 成功但响应没有 buvid3，已向 finger/spi 补取一个");
+                    data
+                        .cookies
+                        .push(("buvid3".to_string(), buvid.buvid3));
+                }
+                // 补不到就让它走到"凭据不完整"的分支：界面会提示，日志里有 finger/spi 的错误。
+                Err(error) => log::warn!("向 finger/spi 补取 buvid3 失败: {error}"),
+            }
+        }
+
         Ok(QrPollState::from_code(
             data.code,
             data.message,
@@ -126,4 +151,12 @@ pub fn poll_qr(client: Arc<BpiClient>, qrcode_key: String) -> tokio::task::JoinH
             data.refresh_token,
         ))
     })
+}
+
+/// 这次轮询需不需要自己去补一个 buvid3。
+///
+/// 抽成纯函数是为了在 CI 里锁住这条真机才暴露出来的规则：**成功**（`code == 0`）且响应里
+/// **没有** buvid3 才补；其余情况（还在等待扫码、已过期）不要多发一次无意义的请求。
+pub fn needs_buvid3_backfill(code: i32, cookies: &[(String, String)]) -> bool {
+    code == 0 && !cookies.iter().any(|(name, _)| name == "buvid3")
 }

@@ -9,10 +9,14 @@
 //!
 //! ```ignore
 //! let join = crate::api::spawn_on_api_runtime(async move { client.search().video(params).await });
-//! cx.spawn(async move |_, cx| {
+//! cx.spawn(async move |this, cx| {
 //!     let result = join.await;
-//!     cx.update(|_, cx| { /* 写回页面状态 */ }).ok();
-//! });
+//!     if let Some(view) = this.upgrade() {
+//!         view.update(cx, |view, cx| { /* 写回页面状态 */ }).ok();
+//!     }
+//! })
+//! // 末尾的 detach() 不能省：`Task` 被 drop 即取消任务（docs/architecture.md 第 4.9 节）。
+//! .detach();
 //! ```
 //!
 //! ## 已知需要自己补的空白
