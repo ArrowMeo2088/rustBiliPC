@@ -272,9 +272,12 @@ async fn pump(
         // 1) 先把待发命令写干净（一次写不完就留着，下轮接着写）。
         while !pending.is_empty() {
             match client.try_write(&pending) {
-                Ok(written) => {
-                    pending.drain(..written);
-                }
+                // 写进去多少就丢掉多少（`replace_range` 而不是 `drain`：后者返回迭代器，
+                // 不消费它会撞上本项目的 `unused_must_use = "deny"`）。
+                Ok(written) if written > 0 => pending.replace_range(..written, &[]),
+                // **一次都没写进去就退出这一轮**，去等下一次可写。少了这个分支就是在这条
+                // runtime 线程上死转：`pending` 永远非空、`written` 永远是 0。
+                Ok(_zero) => break,
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(error) => {
                     log::debug!("IPC：写管道失败：{error}");
