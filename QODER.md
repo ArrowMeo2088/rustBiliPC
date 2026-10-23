@@ -47,6 +47,11 @@
 - 播放：**外置 mpv 独立进程 + 独立窗口**，不做 `--wid` 嵌入，不自研解码渲染。
 - 凭据：明文 JSON 存 `<exe 同目录>/data/cookies.json`（用户知情选择）。要改加密只动
   `src/store/credentials.rs` 的 `save`/`load`。
+- **启动阶段的异步任务不要在实体构造里派发**：`open_window` 的构造闭包里窗口还没注册进平台，
+  第一次 `cx.spawn` 会把 gpui Windows 后端的 `wake_posted` 标志永久置真而唤醒发不到任何窗口，
+  之后所有前台任务都不再被 poll（表现：请求在 tokio 侧成功返回、界面却卡在加载态、日志里
+  连闭包第一行都没有）。规定：这类启动工作推迟到**首帧 `render()` 里一次性触发**
+  （见 `docs/architecture.md` 第 4.9 节）；`Window::defer` 不算规避，它走同一条队列。
 - 快速开发阶段：能调库就不造轮子，不管 warning，不设 clippy/rustfmt/test 门禁；但编译必须无 error。
 
 ## 5. CI 相关的既成事实

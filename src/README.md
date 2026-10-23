@@ -36,6 +36,9 @@ Rust crate 根目录（crate 名 `rustbilipc`）。职责划分与维护契约�
 请求前后各一条（带耗时与返回码），视图层在 `await` 前后、`upgrade()` 失败、`update()` 闭包内各一条。
 GUI 程序没有控制台，只有落盘的日志能区分"没发出 / 没回来 / 回来了但没写进界面"。
 
+启动期的异步任务由 `root.rs` 在**首帧 render 里一次性派发**（`startup_pending` 标志），实体构造函数
+里不 spawn——gpui 0.3.9 Windows 的唤醒竞态，见 `docs/architecture.md` 第 4.9 节。
+
 **写 gpui/kit 调用前先确认该写法在已发布版本里存在**：`ref/gpui-kit/examples/` 用的是 kit 本地
 main，比 crates.io 的 0.8.0 新。已踩过两条：没有 `v_flex()`/`h_flex()` 自由函数（用
 `div().flex()` + `.flex_col()`）；`overflow_y_scroll()` 属于 `Stateful<Div>`，必须先 `.id("...")`。

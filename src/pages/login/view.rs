@@ -40,24 +40,38 @@ pub struct LoginPage {
     status: SharedString,
     /// 成功后停止一切轮询，避免重复发事件。
     finished: bool,
+    /// 是否已在首帧后启动过流程（`start` 幂等用）。
+    started: bool,
 }
 
 impl LoginPage {
-    /// 建页并立刻去取第一张二维码。
-    pub fn new(client: Arc<bpi_rs::BpiClient>, cx: &mut Context<Self>) -> Self {
-        let mut this = Self {
+    /// 建页。**故意不在这里启动异步任务**：构造发生在 `open_window` 的闭包里，那时窗口还没注册进
+    /// 平台的 `raw_window_handles`，而 gpui 0.3.9 的 Windows 后端只允许"第一次派发"去
+    /// `PostMessageW` 唤醒主循环（`gpui_windows/src/dispatcher.rs:121` 的 `wake_posted.swap(true)`
+    /// + `platform.rs:299` 的广播给已注册窗口）。在那一刻派发 = 唯一的唤醒被吞掉且标志位永久为 true，
+    /// 前台队列之后再也不被排空（真机表现：tokio 侧 190ms 就返回了，界面仍停在加载态）。
+    /// 启动改由根视图在首帧渲染时调 [`LoginPage::start`]——paint 由 WndProc 直接驱动，那时窗口已注册。
+    pub fn new(client: Arc<bpi_rs::BpiClient>, _cx: &mut Context<Self>) -> Self {
+        Self {
             client,
             session: None,
             matrix: Vec::new(),
             status: "正在获取登录二维码…".into(),
             finished: false,
-        };
-        this.refresh_qr(cx);
-        // 诊断用心跳：证明"gpui 前台任务被后台事件重新唤醒"这条链路本身是通的。
-        // 如果 debug.log 里有心跳却没有请求结果，问题在 JoinHandle 的唤醒；两者都没有，
-        // 说明前台执行器根本没被再次调度。
-        this.start_heartbeat(cx);
-        this
+            started: false,
+        }
+    }
+
+    /// 首帧之后启动登录流程：取二维码 + 心跳 + 轮询。重复调用无效果。
+    pub fn start(&mut self, cx: &mut Context<Self>) {
+        if self.started {
+            return;
+        }
+        self.started = true;
+        log::debug!("登录页：首帧后启动登录流程");
+        self.refresh_qr(cx);
+        // 诊断用心跳：证明"gpui 前台任务能被后台事件唤醒"。
+        self.start_heartbeat(cx);
     }
 
     /// 每 2 秒记一行，共 10 次；不显示任何界面内容。

@@ -211,13 +211,35 @@ api 层在提交前、tokio 任务内请求前后（带 `Instant` 耗时与返�
 `upgrade()` 失败、`update()` 闭包内部各一条。登录页还带一个 2 秒一次、共 10 次的心跳，
 用来单独回答"前台执行器还在不被唤醒"这个问题。界面上会显示日志文件路径。
 
+### 4.9 启动期唤醒竞态（真机根因，已绕过）
+
+`debug.log` 给出的现场是：`提交 qr_generate` → `tokio 任务开始执行` → `qr_generate 返回，用时 190ms`
+都出现了，但**视图层 `cx.spawn` 闭包的第一行日志从未出现**，心跳 10 行也一行没有 —— 即前台队列
+根本没被排空。机制在 gpui 0.3.9 的 Windows 后端：
+
+- `gpui_windows/src/dispatcher.rs:121`：`if !wake_posted.swap(true, AcqRel) { …PostMessage… }`，
+  即"只允许第一次派发去唤醒主循环"；
+- `gpui_windows/src/platform.rs:299` `post_message`：把 `WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD`
+  广播给 `raw_window_handles` 里**已注册**的窗口，而窗口是在 `platform.rs:774` 才 push 进去的。
+
+于是：在 `open_window` 的构造闭包里第一次 `cx.spawn`（此刻窗口尚未注册）= 唯一的唤醒发给了空列表，
+而标志位已经永久为 true，此后任何派发都不会再有人排空 —— 界面渲染正常（paint 走 WndProc），
+但所有异步任务永远不被 poll。这也解释了更早的"搜索一直显示搜索中"。
+
+**绕法（现在是硬规定）**：启动阶段的异步任务必须推迟到**首帧渲染**里再派发。实现是
+`RootView::startup_pending` 一次性标志 + `render()` 里 `login.update(cx, |v, cx| v.start(cx))`；
+`LoginPage::new` 本身不做任何 spawn。注意 `Window::defer` 救不了这个问题——它内部是
+`App::defer` → 前台执行器，走的正是同一条被卡住的队列。
+
+上游视角这是 gpui 的缺陷（应当在没有窗口时自唤醒或延后重置标志位），我们只做规避，不改依赖。
+
 ## 5. 阶段进度
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | P0 | 依赖骨架、release CI、空窗口 + 中文输入框 + 假数据列表、`api/store/player` 纯逻辑层 | **完成**（run 39787252294 全绿） |
 | P1 | 搜索接线：`search().video()`、结果转换（剥 `<em>`）、封面网络图（gpui 原生 URI 加载）、分页/排序 | 代码与 CI 均完成（run 39795360593）；**验证并入登录之后**（定稿不做免登录搜索） |
-| P2a | 登录：扫码（取码/轮询/过期重载）+ 凭据落盘 + 启动判定 + 登录后进主界面 | 编译通过（run 39802276345，28 个测试全绿），待真机验证 |
+| P2a | 登录：扫码（取码/轮询/过期重载）+ 凭据落盘 + 启动判定 + 登录后进主界面 | 根因已定位（第 4.9 节启动期唤醒竞态），修复待编译与真机复验 |
 | P2b | 个人：我的信息 / 收藏 / 历史 入口与页面 | 未开始 |
 | P3 | 详情：`video().detail()`、多 P、tags/related、字幕列表 | 未开始 |
 | P4 | 播放：拉起 mpv、管道 IPC 读写、换清晰度（`loadfile` + `audio-remove`/`audio-add`）、`sub-add` | 未开始 |
@@ -236,6 +258,7 @@ api 层在提交前、tokio 任务内请求前后（带 `Instant` 耗时与返�
 | 7 | mpv 对 DASH/fmp4 双流 seek 无任何文档 | P4 实测；失败备选：合并下载后本地播放 |
 | 8 | 1080P 需登录、HDR/4K/8K 需大会员 | 按 `accept_quality` 降级 + `requires_vip` 提示 |
 | 9 | rustls 同时启用 aws-lc-rs 与 ring → 未装默认 provider 时 TLS 握手 panic（症状：加载态永不结束） | 启动时 `app::install_tls_provider()`；所有 `JoinHandle` 错误都上界面（第 4.7 节） |
+| 10 | **启动期在窗口注册前 `cx.spawn`** → gpui Windows 的 `wake_posted` 永久为 true，前台队列再也不被排空（渲染正常、异步全灭） | 已定位并绕过：启动异步只在首帧 `render()` 里派发一次，见第 4.9 节 |
 
 ## 7. 维护规则
 
@@ -318,3 +341,10 @@ api 层在提交前、tokio 任务内请求前后（带 `Instant` 耗时与返�
   预期响应，`wbi_img` 在里面）。所以"界面停在加载态"与网络、DNS、系统代理无关，
   只可能是进程内的问题：任务没被 tokio 调度，或结果回到 gpui 前台的那一跳丢了。
   对照第 4.8 节的埋点位置读 `debug.log` 即可分辨是哪一种。
+
+### debug.log 的实际结论
+
+日志显示 tokio 侧 190ms 正常返回，但视图层 `cx.spawn` 闭包的第一行与 10 行心跳**全部缺失**
+⇒ 属于第二类：前台队列从未被排空，根因与绕法见第 4.9 节。
+`install_tls_provider` 那个修复也是必要的（不装 provider 连请求都发不出去），但单靠它不够——
+两处都要成立才能跑通。
