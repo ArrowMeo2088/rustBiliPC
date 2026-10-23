@@ -23,7 +23,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use gpui_kit::component::button::{Button, ButtonVariants};
+// 这一页的按钮没有用 `.primary()`（那是 `ButtonVariants` trait 上的方法），所以只导入 `Button`。
+use gpui_kit::component::button::Button;
 use gpui_kit::*;
 
 use crate::api::login::{self, QrPollState, QrSession, credential_from_cookies};

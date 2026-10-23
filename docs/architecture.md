@@ -401,3 +401,13 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 返回的 `Task` 被当场 drop，任务在第一次 poll 之前就取消了（第 4.9 节）。
 `install_tls_provider` 那个修复也是必要的（不装 provider 连请求都发不出去），但单靠它不够——
 两处都要成立才能跑通。第十一轮同时补上第 4.10 节的 buvid3 补齐，否则登录会在写凭据那一步失败。
+
+### 第十一轮（run 39890864644）：Task 修复 + buvid3 补齐，一次通过
+
+- 全步骤 success，**29 passed / 0 failed**（新增 `only_a_successful_poll_without_buvid3_needs_backfill`）。
+- 依赖图缓存全命中：`bpi-rs`（因新增 `misc` feature 重编）+ 我们的 crate 共 **47 秒**编完，
+  整轮约 5 分钟。`unused_must_use = "deny"` 没有绊倒任何东西——说明四处 `cx.spawn` 都持有了。
+- 唯一 warning 是登录页多余的 `ButtonVariants` 导入（这一页没用到 `.primary()`），已删。
+- **待真机验证**：二维码能否出现、扫码后状态能否推进到"已扫码→登录成功"、
+  `publish/data/cookies.json` 能否写出四个字段、`%LOCALAPPDATA%\rustBiliPC\debug.log` 里
+  应出现"qr_generate 结果已回到前台（代 1）"与 5 行心跳。
