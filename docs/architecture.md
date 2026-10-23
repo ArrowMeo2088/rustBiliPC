@@ -330,6 +330,7 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | 9 | rustls 同时启用 aws-lc-rs 与 ring → 未装默认 provider 时 TLS 握手 panic（症状：加载态永不结束） | 启动时 `app::install_tls_provider()`；所有 `JoinHandle` 错误都上界面（第 4.7 节） |
 | 10 | **`cx.spawn` 的 `Task` 被丢弃 = 任务立即取消**（症状：请求发出去了、界面永远停在加载态，日志里连闭包第一行都没有） | 已修：所有 spawn 一律 `.detach()` 或存进实体字段，并用 `[lints.rust] unused_must_use = "deny"` 让这类写法编译失败，见第 4.9 节 |
 | 11 | 扫码成功的响应 cookie 里没有 `buvid3`，而 `Account::validate_complete` 要它 → 登录在最后一步失败 | `poll_qr` 在 `code==0` 且缺 buvid3 时调 `misc().buvid()`（`/x/frontend/finger/spi`）补一个，见第 4.10 节 |
+| 12 | 收藏/历史那几个响应结构**没有 `#[serde(default)]`**（`HistoryListData.cursor/tab/list`、`FavListDetailData.info/has_more/ttl` 等），B 站少给任何一个字段就变成 `BpiError::parse` | 症状可控：那一块显示自己的错误位而不是整页空白（第 4.11 节），日志里有原始错误文本可判断缺哪个字段 |
 
 ## 7. 维护规则
 
@@ -441,9 +442,21 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
   登录成功并写出 `publish/data/cookies.json`（四个字段齐全，`buvid3` 由 finger/spi 补取），
   之后进入搜索页可用。心跳打满 5 次以后再扫码照样成功——证实心跳只是诊断脚手架、不参与登录。
 
-### 第十二轮：日志回到运行同目录，删掉心跳
+### 第十二轮（run 39893441663）：日志回运行同目录 + 删心跳 —— 我自己写坏了一处匹配
 
-- `logging::log_dir()` 改回 `exe_dir()`：按定稿，日志与凭据同层（`publish/debug.log`），
-  每次启动 `File::create` 清空。同时把"取产物只搬 exe、不整目录清空"写成规矩（第 4.8 节）。
-- 删除登录页的心跳任务与 `HEARTBEAT_TICKS`，改为轮询循环里一条常驻的
+- 这一轮的改动本身：`logging::log_dir()` 改回 `exe_dir()`，按定稿日志与凭据同层
+  （`publish/debug.log`），每次启动 `File::create` 清空；同时把"取产物只搬 exe、不整目录清空"
+  写成规矩（第 4.8 节）。删掉登录页的心跳任务与 `HEARTBEAT_TICKS`，改为轮询循环里一条常驻的
   "轮询结果已回到前台（代 N）"，证据力更强且不刷无用行。
+- 失败：5 个 E0308，全在登录页那个 `match state`。原因是我把 `Ok(Ok(state))` 改成了 `Ok(inner)`
+  并把日志行插进去，于是被匹配的值变成了 `Result<QrPollState, BpiError>`。
+- 教训不是"少改"，而是**改完要把整段读一遍**：这一处只是给一条日志挪位置，
+  却把匹配的形状改了；一行 review 就能拦住，不用等 5 分钟的 CI。
+
+### 第十三轮（run 39895258094）：P2b 个人中心 —— 只有一个错，还是生命周期
+
+- 失败：1 个 E0310，`MinePage::spawn_load<T>` 的 `T` 要跨 `cx.spawn` 的 `'static` future，
+  缺 `T: 'static`；rustc 直接把该加什么写在 help 里（`<T: 'static>`）。
+- 有价值的信息：**整个 lib 只报了这一个错**，说明 P2b 那三个 api 封装（profile/favorites/history）、
+  外壳、根视图的类型全部核对到位——`space_info` / `created_list` / `collected_list` /
+  `history_list` 的签名与字段名都没猜错（逐个查 `ref/bpi-rs` 起作用了）。
