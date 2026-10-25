@@ -419,7 +419,10 @@ fn badge_or_nothing(duration: &SharedString) -> AnyElement {
 }
 
 /// 右下角的时长角标（`VideoCardControl.xaml:37-50`：`Margin=8`、`Padding=4`、黑 60%、白字 12）。
-fn badge(duration: &SharedString) -> impl IntoElement {
+///
+/// 返回类型写 `AnyElement` 而不是 `impl IntoElement`：上面那个 `badge_or_nothing` 要在
+/// "空 div" 和"角标"之间二选一，opaque 类型是没法当 `AnyElement` 直接返回的。
+fn badge(duration: &SharedString) -> AnyElement {
     div()
         .absolute()
         .right(px(palette::BADGE_INSET))

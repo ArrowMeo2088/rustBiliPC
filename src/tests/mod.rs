@@ -680,6 +680,19 @@ mod space_tests {
     }
 
     #[test]
+    fn last_page_rounds_up_without_growing_an_extra_page() {
+        // 这里踩过一次：写成 `total / ps + 1` 在"正好 30 个"时会多给一页，
+        // 用户点"下一页"看到一片空。整除的边界必须算准。
+        assert_eq!(crate::api::space::last_page(0, 30), 1);
+        assert_eq!(crate::api::space::last_page(1, 30), 1);
+        assert_eq!(crate::api::space::last_page(30, 30), 1);
+        assert_eq!(crate::api::space::last_page(31, 30), 2);
+        assert_eq!(crate::api::space::last_page(60, 30), 2);
+        // 每页大小给 0（接口没回 page_size）时不能除崩，也不能算出 0 页。
+        assert_eq!(crate::api::space::last_page(100, 0), 1);
+    }
+
+    #[test]
     fn section_and_order_labels_read_in_chinese() {
         assert_eq!(SpaceSection::Videos.label(), "投稿");
         assert_eq!(SpaceSection::Posts.label(), "图文");

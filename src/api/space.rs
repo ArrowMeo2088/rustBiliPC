@@ -94,10 +94,25 @@ impl SpaceSection {
     }
 }
 
+/// 一共几页（向上取整），至少 1 页。
+///
+/// 单独做成函数是因为这里最容易错：写成 `total / ps + 1` 在"总数正好是 30"这类边界上会多算一页，
+/// 用户点"下一页"就看到一片空。总数为 0（还没回来，或这个筛选下确实没有）时给 1，
+/// 界面上的"1 / 1"才是诚实的。
+pub fn last_page(total: u64, page_size: u32) -> u32 {
+    if page_size == 0 {
+        return 1;
+    }
+    let pages = (total + u64::from(page_size) - 1) / u64::from(page_size);
+    pages.max(1) as u32
+}
+
 /// 资料卡（一次 `card()` 给的头像/昵称/签名/数字）。
+///
+/// 这里**不留 mid**：页面自己存着进入时的 `mid`，资料卡回一次就把头像/昵称/数字覆盖掉，
+/// 再存一份会有"两个 mid 不一致到底信谁"的坑，也没有界面读它。
 #[derive(Clone, Debug, Default)]
 pub struct SpaceProfile {
-    pub mid: u64,
     pub name: String,
     pub face: String,
     pub sign: String,
@@ -109,8 +124,6 @@ pub struct SpaceProfile {
     pub archive_count: u64,
     /// 专栏/图文数。
     pub article_count: u64,
-    /// 是否已关注 TA。
-    pub followed: bool,
 }
 
 /// 一个投稿。字段已经是展示形态。
@@ -126,15 +139,14 @@ pub struct SpaceVideo {
     pub play_text: String,
     /// 弹幕数（`video_review`）。
     pub danmaku_text: String,
-    /// 所属分区 ID（chips 选中态与它对齐）。
-    pub tid: u64,
 }
 
 /// 一条图文（opus）。
+///
+/// 接口还给了 `opus_id` 和 `jump_url`，这里都不留：图文点不开详情页（那一层页面不在清单里），
+/// 列表项也不是可交互元素，没有稳定 key 的需求。
 #[derive(Clone, Debug, Default)]
 pub struct SpacePost {
-    /// 图文 id（列表项的稳定 key）。
-    pub opus_id: String,
     /// 正文（接口不给标题，正文就是全部）。
     pub text: String,
     /// 封面（`cover.url`，可能没有）。
@@ -207,7 +219,6 @@ pub fn fetch_profile(
         let card = client.user().card(UserCardParams::new(Mid::new(mid)?)).await?;
         log::debug!("空间资料卡返回 {:?}，用时 {:?}", card.card.name, started.elapsed());
         Ok(SpaceProfile {
-            mid,
             name: card.card.name,
             face: card.card.face,
             sign: card.card.sign,
@@ -215,7 +226,6 @@ pub fn fetch_profile(
             follow_text: format_count(card.card.attention),
             archive_count: card.archive_count,
             article_count: card.article_count,
-            followed: card.following,
         })
     })
 }
@@ -242,7 +252,7 @@ pub fn fetch_videos(
         let data = client.user().uploaded_videos(params).await?;
         let filters = parse_tlist(&data.list.tlist);
         let total = data.page.count;
-        let videos = data
+        let videos: Vec<SpaceVideo> = data
             .list
             .videos
             .into_iter()
@@ -253,7 +263,6 @@ pub fn fetch_videos(
                 duration: item.length,
                 play_text: format_count(item.play),
                 danmaku_text: format_count(item.video_review),
-                tid: item.typeid,
             })
             .collect();
         log::debug!(
@@ -283,7 +292,7 @@ pub fn fetch_posts(
             params = params.with_offset(offset)?;
         }
         let data = client.opus().space_feed(params).await?;
-        let posts = data
+        let posts: Vec<SpacePost> = data
             .items
             .into_iter()
             .map(|item| {
@@ -292,7 +301,6 @@ pub fn fetch_posts(
                     None => (String::new(), cover_ratio(0, 0)),
                 };
                 SpacePost {
-                    opus_id: item.opus_id,
                     text: item.content,
                     cover_url,
                     cover_ratio: ratio,

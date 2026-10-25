@@ -1124,3 +1124,35 @@ error[E0277]: the trait bound `CommentSortKind: std::default::Default` is not sa
 
 
 
+
+### 第三十轮（P7 用户空间）：红，三条编译错，全是我自己的写法问题
+
+| 项 | 值 |
+| --- | --- |
+| run | 40209688820（SHA `0e71db4`） |
+| 结果 | **failure**，`cargo build --release` 16:03:44 → 16:04:27（**约 43 秒**就挂了，编译缓存全命中） |
+| 错误 | `E0282` ×2（`api/space.rs`）+ `E0308` ×1（`ui/video_card.rs`） |
+| 产物 | 无（没走到打包） |
+
+三条错没有一条是库或接口的问题，全是我新写的形状：
+
+1. **`let videos = …collect()` / `let posts = …collect()` 推不出类型**（`space.rs:245`、`:286`）。
+   `.map(→ SpaceVideo).collect()` 的收集目标是泛型 `C: FromIterator<_>`，编译器不会替我挑 `Vec`；
+   上一行 `let data = …` 的类型要等我用到 `data.list.videos` 才定得下来，于是它把整条链判成"类型未知"。
+   修法是**给 `let` 写显式类型**（`let videos: Vec<SpaceVideo> = …`），不是给闭包加标注。
+   教训：`collect()` 只有在返回值能由函数签名或 `collect::<Vec<_>>()` 决定时才免标注。
+2. **`badge()` 签名写成 `-> impl IntoElement`，外层 `badge_or_nothing` 要返回 `AnyElement`**（`video_card.rs:418`）。
+   `impl IntoElement` 是不透明类型，`AnyElement` 是具体类型，两者不能直接对接——`badge()` 函数体
+   本来就以 `.into_any_element()` 结尾，签名改成 `-> AnyElement` 就一致了。这是本项目第二次栽在
+   "复用件到底返回哪个类型"上（第一次是详情页 `content()` 忘转 `AnyElement`），
+   **规矩：会被别的函数当值返回的复用件，签名一律写 `AnyElement`。**
+
+顺手把两处真实缺陷一起带上（不是编译错，是逻辑与卫生）：
+
+- **页数算错**：`video_controls` 里写的是 `total / ps + 1`，总数正好是 30 的整数倍时多算一页，
+  用户点"下一页"看到一片空。抽成 `api::space::last_page(total, page_size)`（向上取整、至少 1 页、
+  `page_size=0` 不除崩），并补一条边界单测（0/1/30/31/60 + ps=0）。
+- **四个"从来没被读"的字段**：`SpaceProfile.mid`/`followed`、`SpaceVideo.tid`、`SpacePost.opus_id`。
+  我们是二进制 crate，`pub` 字段一样进 `dead_code` 分析，留着就是 warning；
+  而且它们确实是"顺手抄接口"抄进来的——页面用的是自己的 `mid`，图文点不开详情所以不需要稳定 key。
+  删掉，并在类型文档里写明"为什么不留"，免得下一轮又被"补回来"。

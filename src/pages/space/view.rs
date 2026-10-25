@@ -507,7 +507,7 @@ impl UserSpacePage {
     /// 排序档 + 翻页。
     fn video_controls(&self, cx: &mut Context<Self>) -> AnyElement {
         let page = self.video_page;
-        let last_page = (self.video_total / u64::from(VIDEO_PAGE_SIZE) + 1) as u32;
+        let last_page = space::last_page(self.video_total, VIDEO_PAGE_SIZE);
         let mut bar = div()
             .flex()
             .w_full()
