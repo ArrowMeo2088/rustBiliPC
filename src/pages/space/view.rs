@@ -426,7 +426,15 @@ impl UserSpacePage {
                 .text_size(px(palette::FONT_CAPTION))
                 .text_color(palette::text_tertiary())
                 .child(match self.section {
-                    SpaceSection::Videos => format!("共 {} 个投稿", self.video_total),
+                    // 这一行的数字跟着当前筛选走（它就是本页的总数，翻页也用它），
+                    // 所以文字要说清是"这个分区的"，别和 chips 上"全部"那个总数打架。
+                    SpaceSection::Videos => {
+                        if self.video_tid == 0 {
+                            format!("共 {} 个投稿", self.video_total)
+                        } else {
+                            format!("当前分区 {} 个投稿", self.video_total)
+                        }
+                    }
                     SpaceSection::Posts => format!("已加载 {} 条", self.posts.len()),
                     SpaceSection::Folders => format!("{} 个收藏夹", self.folders.len()),
                 }),
@@ -446,7 +454,14 @@ impl UserSpacePage {
             // 接口没给分区（新号、或这一格换了形状）：不画空的一排。
             return div().into_any_element();
         }
-        let mut chips = vec![(0u64, "全部".to_string(), self.video_total)];
+        // "全部"那一格的计数**不能**用 `video_total`：那是当前筛选（`tid`）的总数，
+        // 点进某个分区后它会等于那个分区的数，于是"全部 12 / 游戏 12 / 单机 3"这种自相矛盾的
+        // 一排就出现了。`tlist` 的计数与筛选无关（每个分区的投稿数），加起来才是诚实的总数。
+        let mut chips = vec![(
+            0u64,
+            "全部".to_string(),
+            self.video_filters.iter().map(|filter| filter.count).sum::<u64>(),
+        )];
         chips.extend(
             self.video_filters
                 .iter()

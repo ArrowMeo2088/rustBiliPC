@@ -645,14 +645,19 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
   所以 `video_seq / post_seq / folder_seq` 各一套，提示位也各一套（与第 4.11 节同一个道理）。
 - **标签（分区）筛选不额外打接口**：投稿响应里 `list.tlist` 就是"这个 UP 用过的分区 + 条数"，
   第一页回来就画成 chips，点一个带 `tid` 重取第 1 页。"全部"那一档是我们自己加的（`tid = 0`）。
+  两个口径要分开：**chips 上"全部"的数字是 `tlist` 各分区之和**（`tlist` 的计数与筛选无关，
+  用 `page.count` 的话点进分区后会出现"全部 12 / 游戏 12 / 单机 3"这种自相矛盾的一排）；
+  **页头右侧与翻页用的是 `page.count`**，因为那是本页真正的总数，文字因此写成"当前分区 N 个投稿"。
   `tlist` 在库里是 `serde_json::Value`，**没有类型可跟**，所以
   [`parse_tlist`](../src/api/space.rs) 只认"`{tid: {name,count}}`"，认不出来就少一个 chip，
   绝不让整块投稿失败——这条有单测（含畸形输入与"键当 tid"的回退）。
 - **chips 排序是必要的，不是美观**：`serde_json` 的对象不保序，不排序的话每次刷新 chips 都会换位置，
   用户刚点过的那一格就跑到了别处。
 - **图文条目只有"正文 + 封面 + 点赞"**：`SpaceItem` 不给标题也不给发布时间，`stat.like` 已经是字符串
-  （`ref/bpi-rs/src/opus/space.rs:29-40`）。所以另给了一个 [`video_card::post_row`]，
-  不硬套视频卡那三行——套上去会留下两个空档，看着像坏了。
+  （`ref/bpi-rs/src/opus/space.rs:29-40`）。所以另给了一个 [`video_card::post_card`](../src/ui/video_card.rs)，
+  不硬套视频卡那三行——套上去会留下两个空档，看着像坏了。封面是**按接口给的宽高比**摆的
+  （[`space::cover_ratio`](../src/api/space.rs)：图文有横有竖，写死 16:9 会把竖图裁掉半张脸；
+  没给封面就整档不占位）。
 - **这一轮没做**：收藏夹**只列不钻**（点进去看内容是 `fav().list_detail`，我们已经在"我的"那页用过，
   差的是"再压一层什么页"这个结构决定）；关注/取关是写操作，不在客户端清单里。
 
