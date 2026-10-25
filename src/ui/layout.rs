@@ -18,6 +18,9 @@
 //!   所以点选不会让内容位移。我们照做：`border_2` + 透明/主色。
 //! - 圆头像：它一律用"直径即圆角"（头像 44/48/40，`CornerRadius = w/2`），
 //!   所以 [`avatar`] 直接把圆角设成尺寸的一半，不需要单独的"圆形"控件。
+//! - 字重：WinUI 那边"要强一档的字"用的是 `*Strong` 样式（`AccountCard.xaml:44` 的
+//!   `BodyStrongTextBlockStyle`），对应到 gpui 就是 `font_weight(FontWeight::SEMIBOLD)`（600）；
+//!   正文不加粗。层级仍然是"字号 + 三档灰 + 这一档字重"，不靠别的。
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
@@ -51,6 +54,7 @@ pub fn header(
                     div()
                         .w_full()
                         .text_size(px(palette::FONT_TITLE))
+                        .font_weight(FontWeight::SEMIBOLD)
                         .text_color(palette::text_primary())
                         .whitespace_nowrap()
                         .text_ellipsis()

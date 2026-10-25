@@ -32,11 +32,12 @@
 
 ## 3. GitHub 访问代理
 
-- **访问 GitHub 一律走 HTTP 代理 `http://127.0.0.1:7887`**：
-  - git：`git -c http.proxy=http://127.0.0.1:7887 -c https.proxy=http://127.0.0.1:7887 push ...`
-    （本仓库已设仓库级代理配置）。
-  - gh CLI / curl：`HTTPS_PROXY=http://127.0.0.1:7887 HTTP_PROXY=http://127.0.0.1:7887`。
-- 直连与代理都可能偶发失败；一种报错就换另一种重试，不要长时间前台轮询等待。
+- **访问 GitHub 一律走 HTTP 代理 `http://127.0.0.1:7890`**（2026-10-25 用户改的口，原先是 7887；
+  仓库级 `git config` 里还写着 7887，**不要改 config**，用命令行覆盖）：
+  - git：`git -c http.proxy=http://127.0.0.1:7890 -c https.proxy=http://127.0.0.1:7890 push origin main`
+  - gh CLI / curl：`HTTPS_PROXY=http://127.0.0.1:7890 HTTP_PROXY=http://127.0.0.1:7890`
+- 直连与代理都可能偶发失败；一种报错就换另一种重试，不要长时间前台轮询等待
+  （第二十五轮的文档提交就是在 7887 上重试到第 8 次才推上去的）。
 
 ## 4. 选型红线（已由用户定稿，不要"顺手优化"掉）
 

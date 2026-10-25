@@ -23,6 +23,14 @@ use gpui_kit::{Rgba, rgb, rgba};
 /// 所以这是我们的选择，不是从它那里抄的。
 pub const ACCENT: u32 = 0xFB7299;
 
+/// 主按钮的悬停/按下两档。
+///
+/// **不是抄来的数字**：WinUI 的 accent 有三档派生色，我们手上只有一支粉，
+/// 就按"悬停提亮一档、按下压暗一档"各取一档明度变化。
+/// 亮度过渡本身不重要，重要的是**别拿同一支粉当 hover**——那样鼠标移动看不出反馈。
+pub const ACCENT_HOVER: u32 = 0xFC8AA9;
+pub const ACCENT_ACTIVE: u32 = 0xE4607F;
+
 /// 页面底色 = WinUI `SolidBackgroundFillColorBase`（暗色 `#202020`）。
 pub fn page_background() -> Rgba {
     rgb(0x202020)

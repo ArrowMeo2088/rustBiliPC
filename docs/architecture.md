@@ -542,6 +542,21 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 - **不模仿的部分**：Acrylic/Mica 毛玻璃、`ItemsView`、icon font。gpui 没有等价物，
   硬做会得到"像但更糟"的结果（风险表第 6 条）。`ItemContainer` 的**选中视觉**这次是照做了的
   （上面那条），剩下的差异是它带圆角动画，我们没有。
+- **kit 组件的颜色不读我们的 palette，读全局主题**（2026-10-25 用户指出"右上角搜索框还是白底黑字"）：
+  `gpui_kit::init` 里写死了 `Theme::change(ThemeMode::Light, …)`（gpui-component 0.8.0
+  `src/theme/mod.rs:40`），所以 Input/Button/滚动条一律按亮色画，而我们的页面 div 是硬编码暗色——
+  于是"页面黑、控件白"。修法是**在 `theme::apply` 里先切暗色再覆盖语义色**，
+  不是给某个控件单独打补丁（打补丁只修好这一个控件，下一个组件又是白的）。顺序不能反：
+  `Theme::change` 会整体换上该模式的调色板。这一层现在映射了
+  `background/foreground/border/input/muted_foreground/accent(±foreground)/ring/button*/list_hover/scrollbar*`
+  以及 `radius=4`、`font_size=14`（WinUI 的 `ControlCornerRadius` 与 Body 字号）。
+  两个容易踩的点：**主按钮读的是 `button_primary` 而不是 `accent`**
+  （gpui-component 0.8.0 `src/button/button.rs:1002`），只改 accent 主按钮还是白的；
+  暗色下输入框的底是 `input` 混 30% 透明来的（`theme/mod.rs:485` 的 `input_background()`），
+  所以"黑底"这件事是靠 `colors.input` 控制的。
+- **字重也归这一套**：参考项目"要强一档的字"用 `*Strong` 样式（`AccountCard.xaml:44` 的
+  `BodyStrongTextBlockStyle`），这里对应 `font_weight(FontWeight::SEMIBOLD)`（600），
+  用在页头标题、侧栏应用名、资料卡昵称上；正文与卡片标题不加粗。
 - **本轮的验收方式改不了**：本地没有工具链，我只能保证**数字来自 XAML、方法名来自宏的生成表**，
   不能保证"看着对"。所以产物出来后请他重点看四件事：卡片网格的节奏与留白、
   卡片文字三行的顺序（UP 主在上）、页头/侧栏的比例、详情页右栏的高度分配。

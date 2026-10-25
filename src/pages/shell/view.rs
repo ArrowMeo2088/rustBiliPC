@@ -159,6 +159,7 @@ impl MainShell {
                     .child(
                         div()
                             .text_size(px(palette::FONT_TITLE))
+                            .font_weight(FontWeight::SEMIBOLD)
                             .text_color(palette::text_primary())
                             .child("rustBiliPC"),
                     ),

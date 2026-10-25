@@ -231,6 +231,9 @@ impl MinePage {
                 .child(
                     div()
                         .text_size(px(palette::FONT_BODY))
+                        // 昵称是"要强一档的字"：参考项目这类一律用 *Strong 样式
+                        // （`AccountCard.xaml:44` 的 `BodyStrongTextBlockStyle`）。
+                        .font_weight(FontWeight::SEMIBOLD)
                         .text_color(palette::text_primary())
                         .child(name),
                 )

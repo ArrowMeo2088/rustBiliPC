@@ -254,6 +254,14 @@ bpi-rs 自己请求时会加 `User-Agent` + `Referer: https://www.bilibili.com/`
   （`@320w_180h.jpg`），比下完原图再解码更省，见第 3 节。
 - 它的画质逻辑与我们的定稿一致：`p.Codecs.Contains(prefer_codec)`，默认偏好 `"avc"`（我们改成 HEVC 优先），
   降级用 `availableFormats.Max(Quality)`。
+- **kit 组件走全局主题，`gpui_kit::init` 默认亮色**（这是"搜索框白底黑字"的根因）：
+  gpui-component 0.8.0 `src/theme/mod.rs:40` 是 `Theme::change(ThemeMode::Light, None, cx)`。
+  核过的取值链路：`Input` 的底 = `Theme::input_background()`（`theme/mod.rs:485`，暗色下是
+  `colors.input` 与透明色混 30%），字色 = `colors.foreground`，描边 = `colors.input`；
+  `Button::primary()` 的底色 = `tokens.button_primary`（`button/button.rs:1002`），
+  **不是 `colors.accent`**；`Theme::change(mode, …)` 会整体换上该模式的调色板（`theme/mod.rs:386-391`），
+  所以自定义色必须在它之后写。`Theme::radius`（`:185`）与 `Theme::font_size`（`:168`）也是公开字段，
+  可以直接改成 WinUI 的 4px 圆角与 14px Body。
 - **gpui 侧的一条查证方法（本轮新增）**：`rounded` / `border_2` / `gap` / `min_h` / `h_full` / `p_4`
   在 `ref/gpui/gpui/src/styled.rs` 里 **grep 不到**，它们是 `gpui-pre-macros` 的 `styles.rs` 用
   "前缀表 × 后缀表"生成的（`styled.rs:27-34` 那一串 `gpui_macros::*_style_methods!()`）。
