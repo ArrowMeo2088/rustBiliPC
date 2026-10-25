@@ -83,6 +83,7 @@ src/
 │   ├── history.rs     观看历史：historytoview().history_list()（游标分页）+ 秒数格式化纯函数
 │   ├── comments.rs    评论区：comment().list()（type=1、oid=aid、ps≤20）+ 相对时间与翻页判断纯函数
 │   ├── home.rs        主页：video().homepage_recommendations()（WBI 由库里签）+ **按 goto 过滤**
+│   ├── space.rs       用户空间：card()（不签 WBI）+ uploaded_videos()（签 WBI、带分区筛选）+ opus 图文（游标）
 │   ├── search.rs      搜索封装：DTO（SearchHit/PageInfo/SearchSort）+ 标签清洗 + 播放量格式化
 │   ├── stream.rs      播控：video().play_url() 取地址 + 选流成 StreamChoice（DASH 双流 / durl 单文件）
 │   └── stream_select.rs  DASH 选择纯函数（HEVC 优先、画质档封顶 116）
@@ -94,11 +95,12 @@ src/
 ├── pages/
 │   ├── mod.rs         页面层出口 + 共用导航事件 `OpenVideo`（三个页面发同一个信号）
 │   ├── root.rs        窗口根视图：无凭据→登录页，有凭据→主界面外壳；登录成功后原地切换
-│   ├── shell/         外壳：左侧 240 导航栏（主页/搜索/我的）+ **详情页栈**（打开 push、返回 pop），订阅 OpenVideo
+│   ├── shell/         外壳：左侧 240 导航栏（主页/搜索/我的）+ **下钻栈**（详情页或空间页），订阅 OpenVideo 与 OpenUser
 │   ├── home/          主页（P6 第一步，默认页）：首页推荐流网格 + "换一批"，懒加载与序号让位同个人中心
 │   ├── login/         扫码登录页（二维码 + 1.5s 轮询 + 过期自动重载）
 │   ├── mine/          个人中心页（资料 + 收藏夹 + 历史，三路并发各自显示错误；懒加载）
 │   ├── detail/        详情页（主列信息 + 播放块 + 字幕 + 评论区；右栏 360 选集与相关推荐；持 mpv 子进程并在 Drop 时收掉）
+│   ├── space/         用户空间页（P7：资料卡 + 投稿/图文/收藏三块，投稿带分区筛选 chips）
 │   └── search/        阶段一页面（view.rs 为根视图）
 ├── ui/
 │   ├── palette.rs     **颜色与度量的唯一出处**：把 Bili.Copilot 的 WinUI 主题键与 xaml 数字翻译成 gpui 的值
@@ -625,6 +627,35 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 - **没接的东西**：楼中楼展开（`comment().replies()`，证据在 api-notes 第 11 节末尾）、
   点赞与发评论（要 csrf，且属于写操作）。展开子回复要先定"插在哪"这个结构问题，不在这一轮顺手加。
 
+### 4.18 用户空间（P7）：点详情页的 UP 主就压一层空间页
+
+接口与行号在 `docs/api-notes.md` 第 12 节，这里记结构与口径。
+
+- **入口**：详情页 UP 主那一行整行可点（`div().id("detail-open-up").on_click(..).hover(..)`），
+  发的是新事件 [`OpenUser{mid,name}`](../src/pages/mod.rs)。带 `name` 是因为资料卡要一次请求才回来，
+  没有它的话那一瞬间标题只能空着。参考项目里这个位置也是按钮
+  （`UpSectionControl` 的头像与昵称都挂 `ShowUserSpaceCommand`）。
+- **栈改成一个枚举而不是两个栈**：`StackPage::{Detail, Space}`。
+  从 P7 起下钻是交错的（详情 → 空间 → 点卡片又进详情 → 再点 UP 主…），
+  两个栈的话"返回上一层"就不知道该弹哪一个。`MainShell::watch` 对泛型 `T` 提
+  `EventEmitter<OpenVideo> + EventEmitter<OpenUser>` 两个约束，新压进来的一页两条订阅都装上。
+- **三块内容的分页口径不一样，所以各一个序号**：投稿是页码（`pn`/`ps` + 总数，界面给"上一页/下一页"）、
+  图文是 **offset 游标**（只能往后，界面是"加载更多"并累加）、收藏一次给全。
+  共用一个 `seq` 会出现"图文在途时点了投稿的下一页，两边互相把对方的结果判成过期"，
+  所以 `video_seq / post_seq / folder_seq` 各一套，提示位也各一套（与第 4.11 节同一个道理）。
+- **标签（分区）筛选不额外打接口**：投稿响应里 `list.tlist` 就是"这个 UP 用过的分区 + 条数"，
+  第一页回来就画成 chips，点一个带 `tid` 重取第 1 页。"全部"那一档是我们自己加的（`tid = 0`）。
+  `tlist` 在库里是 `serde_json::Value`，**没有类型可跟**，所以
+  [`parse_tlist`](../src/api/space.rs) 只认"`{tid: {name,count}}`"，认不出来就少一个 chip，
+  绝不让整块投稿失败——这条有单测（含畸形输入与"键当 tid"的回退）。
+- **chips 排序是必要的，不是美观**：`serde_json` 的对象不保序，不排序的话每次刷新 chips 都会换位置，
+  用户刚点过的那一格就跑到了别处。
+- **图文条目只有"正文 + 封面 + 点赞"**：`SpaceItem` 不给标题也不给发布时间，`stat.like` 已经是字符串
+  （`ref/bpi-rs/src/opus/space.rs:29-40`）。所以另给了一个 [`video_card::post_row`]，
+  不硬套视频卡那三行——套上去会留下两个空档，看着像坏了。
+- **这一轮没做**：收藏夹**只列不钻**（点进去看内容是 `fav().list_detail`，我们已经在"我的"那页用过，
+  差的是"再压一层什么页"这个结构决定）；关注/取关是写操作，不在客户端清单里。
+
 ## 5. 阶段进度
 
 
@@ -640,7 +671,8 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | P5 | 视觉：照 `ref/Bili.Copilot` 的度量重做（色板/字号层级/卡片 232×238/网格/页头 56 + 侧栏 240/右栏 360/hover 换底色） | **完成**（他真机看过说"没什么问题"，唯一剩下的是右上角搜索框——根因是 kit 一直用亮色主题，第二十六轮已修，第 4.15 节最后两条） |
 | P6a | 主页：首页推荐流当默认页 + "换一批"（第 4.16 节） | **编译与测试已绿**（第二十七轮 43 passed、零 Rust warning，产物 `dd2bf73`）；待真机看：能不能"换一批"、`goto` 过滤后有没有内容 |
 | P6b | 评论区（顶层列表 + 翻页 + 最热/最新） | **编译与测试已绿**（第二十九轮 48 passed、零 Rust warning，产物 `edd553e`）；待真机看：评论有没有内容、翻页与排序（第 4.17 节） |
-| P6c | 字幕 `sub-add`、换清晰度保住窗口与进度（要恢复第 4.14 节那套管道） | 未开始 |
+| P6c | 曾计划做"字幕 `sub-add` + 同实例换清晰度保住进度" | **用户 2026-10-25 判定不做**（"我认为P6c两个都没必要做"）：换清晰度现在就重开一个实例、字幕只列清单。第 4.14 节那套管道机制仍然留档，将来要捡起来照那份做 |
+| P7 | 用户空间：点详情页 UP 主 → 资料卡 + 投稿（带分区筛选）/ 图文 / 收藏（第 4.18 节） | 代码完成，等编译与真机 |
 
 ## 6. 已知风险与待验证
 

@@ -234,6 +234,78 @@ fn horizontal_inner(data: VideoCardData) -> impl IntoElement {
         )
 }
 
+/// 图文（opus）条目：**竖排一张卡**——封面、正文、点赞。空间页的"图文"页签用。
+///
+/// 为什么不复用 [`horizontal`] 或 [`render`]：接口**不给标题、也不给时间**，`stat.like`
+/// 已经是字符串（`ref/bpi-rs/src/opus/space.rs:29-40`）。硬套视频卡那三行（UP 主/标题/播放量）
+/// 会留下两个空档，看着像坏了。形状照 `PersonalVideoMomentPresenter.xaml:14-20`：
+/// `Padding=12`、`RowSpacing=12`，行是"发布者 / 封面 `*` / 正文 / 操作"，我们只有三档。
+///
+/// `ratio` 是封面宽除以高（接口自己给了 `cover.width/height`，见
+/// [`crate::api::space::cover_ratio`]）：**图文的图有横有竖**，写死 16:9 会把竖图裁掉一半。
+pub fn post_card(
+    text: SharedString,
+    like: SharedString,
+    cover_url: SharedString,
+    ratio: f32,
+) -> AnyElement {
+    let card = div()
+        .flex()
+        .flex_col()
+        .w_full()
+        .gap(px(palette::STAT_ITEM_GAP))
+        .p(px(palette::COMMENT_ROW_PADDING))
+        .rounded(px(palette::RADIUS))
+        .bg(palette::card_background())
+        .overflow_hidden();
+
+    // 没封面就整档不占位（接口给的是 Option，画一个空灰块比少一张图更难看）。
+    let card = if cover_url.is_empty() {
+        card
+    } else {
+        card.child(
+            div()
+                .w_full()
+                .aspect_ratio(ratio)
+                .overflow_hidden()
+                .rounded(px(palette::RADIUS))
+                .child(
+                    img(SharedString::from(cover::for_display(
+                        cover_url.as_str(),
+                        SIDE_DEVICE_WIDTH,
+                        SIDE_DEVICE_HEIGHT,
+                    )))
+                    .size_full()
+                    .object_fit(ObjectFit::Cover)
+                    .with_fallback(|| {
+                        div()
+                            .size_full()
+                            .bg(palette::card_background_elevated())
+                            .into_any_element()
+                    }),
+                ),
+        )
+    };
+
+    card.child(
+        div()
+            .w_full()
+            .text_size(px(palette::FONT_BODY))
+            .line_height(px(palette::LINE_HEIGHT_BODY))
+            .text_color(palette::text_primary())
+            .child(text),
+    )
+    .when(!like.is_empty(), |this| {
+        this.child(
+            div()
+                .text_size(px(palette::FONT_CAPTION))
+                .text_color(palette::text_tertiary())
+                .child(format!("{like} 点赞")),
+        )
+    })
+    .into_any_element()
+}
+
 /// 只有一行的元信息（UP 主名这种），12px + Tertiary 灰 + 单行省略。
 fn meta_line(text: SharedString) -> impl IntoElement {
     div()
@@ -315,7 +387,7 @@ fn cover_box(
     if cover_url.is_empty() {
         return box_base
             .bg(palette::card_background_elevated())
-            .child(badge(duration))
+            .child(badge_or_nothing(duration))
             .into_any_element();
     }
 
@@ -334,8 +406,16 @@ fn cover_box(
                         .into_any_element()
                 }),
         )
-        .child(badge(duration))
+        .child(badge_or_nothing(duration))
         .into_any_element()
+}
+
+/// 时长角标：没有时长就不画（图文条目没有时长，画一个空黑块会像个 bug）。
+fn badge_or_nothing(duration: &SharedString) -> AnyElement {
+    if duration.is_empty() {
+        return div().into_any_element();
+    }
+    badge(duration)
 }
 
 /// 右下角的时长角标（`VideoCardControl.xaml:37-50`：`Margin=8`、`Padding=4`、黑 60%、白字 12）。

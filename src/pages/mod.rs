@@ -12,6 +12,7 @@ pub mod mine;
 pub mod root;
 pub mod search;
 pub mod shell;
+pub mod space;
 
 pub use root::RootView;
 
@@ -24,4 +25,16 @@ pub use root::RootView;
 pub struct OpenVideo {
     /// 稿件号。
     pub bvid: String,
+}
+
+/// 另一个共用导航事件：点开 UP 主 → 打开 TA 的空间页。
+///
+/// `name` 是**从上一页带过来的昵称**：空间页的资料卡要一次网络请求才回来，
+/// 没有这个名字的话，那一瞬间标题只能空着或者写一串 mid。资料卡回来后页面会用接口值覆盖它。
+#[derive(Clone, Debug)]
+pub struct OpenUser {
+    /// 用户 ID。
+    pub mid: u64,
+    /// 昵称（用于首屏占位）。
+    pub name: String,
 }

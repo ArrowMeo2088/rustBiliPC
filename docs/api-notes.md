@@ -365,3 +365,28 @@ bpi-rs 自己请求时会加 `User-Agent` + `Referer: https://www.bilibili.com/`
   P6b 只做顶层 + 翻页，**没接子回复展开**：要做的话得先定"展开后插在哪"这个结构问题。
 - 相对时间在接口里**没有**，只有 `ctime`（unix 秒）。参考项目也是自己算的
   （`CommentItemControl.xaml:97-104` 绑的是 `RelativeTime`，绝对时间只进 ToolTip）。
+
+## 12. 用户空间（P7，已核对到行号）
+
+| 项 | 结论 | 证据（`ref/bpi-rs`） |
+| --- | --- | --- |
+| 资料卡 | `user().card(UserCardParams::new(mid))` → `UserCardProfile` | `src/user/client.rs:124-130` |
+| 资料卡载荷 | `card: UserCardSummary{mid,name,sex,face,sign,fans,attention}` + 顶层 `following, archive_count, article_count, follower, like_num` | `src/user/model.rs:7-52` |
+| WBI | `card()` **不签**；`uploaded_videos()` **签**（`sign_wbi_params`） | `client.rs:125-130` 与 `:271-278` |
+| 投稿端点 | `https://api.bilibili.com/x/space/wbi/arc/search` | `tests/contracts/user/public-read/uploaded-videos/contract.json` 的 `request.url` |
+| 投稿参数 | `new(mid)` / `with_order(UserUploadedVideoOrder)` / `with_tid(u64)`（**0=全部**）/ `with_keyword` / `with_page(pn)?` / `with_page_size(ps)?` | `src/user/params.rs:532-586` |
+| 排序枚举 | `Pubdate / Click / Stow` → 查询值 `pubdate/click/stow` | `params.rs:495-512` |
+| 投稿载荷 | `UserUploadedVideos{ list: UserUploadedVideoList{ tlist: Value, videos: Vec<UserUploadedVideo> }, page: {count,pn,ps}, episodic_button: Option, is_risk }` | `model.rs:796-818` |
+| 单条投稿 | `UserUploadedVideo{aid,bvid,mid,title,author,pic,length,description,created,play,comment,typeid,video_review,hide_click}`，**除四个标识外都带 `#[serde(default)]`** | `model.rs:821-861` |
+| 时长口径 | `length` 已经是 `"mm:ss"` 字符串（搜索接口一致，历史接口才是数字秒） | `model.rs:833-834` |
+| **分区筛选来源** | `list.tlist` —— 同一个响应里回"这个 UP 用过的分区摘要"，键是 tid，值里有 `name`/`count`；**库里给的是 `serde_json::Value`，没有类型可跟** | `model.rs:812-814` |
+| 图文 | `opus().space_feed(OpusSpaceFeedParams::new(mid).with_page(page).with_offset(str)?.with_kind(kind))` → `SpaceData{has_more, items, offset, update_num}` | `src/opus/client.rs:24-31`、`src/opus/params.rs:24-77`、`src/opus/space.rs:44-53` |
+| 图文端点 | `https://api.bilibili.com/x/polymer/web-dynamic/v1/opus/feed/space`，分页是 **offset 游标**（下一页要回传上一次给的 `offset`） | `src/opus/client.rs:4-5`、`params.rs:64-77` |
+| 图文条目 | `SpaceItem{content, cover: Option<SpaceCover{height,url,width}>, jump_url, opus_id, stat: SpaceStat{like: String, view: Option}}` —— **没有标题、没有发布时间，点赞已经是字符串** | `src/opus/space.rs:10-40` |
+| 收藏 | 复用 `fav().created_list(FavCreatedListParams::new(up_mid))`：`up_mid` 就是入参，**取别人的收藏夹和取自己的是同一条代码** | `src/fav/params.rs:22-37`、我们的 `src/api/favorites.rs::fetch_folders` |
+| feature | `opus = []`、`user = []`、`fav = []` 都是纯 cfg 开关，不引入新 crate | `ref/bpi-rs/Cargo.toml:59,67,69` |
+
+- 空间页三块的**分页口径互不相同**：投稿是页码（`pn/ps` + 总数），图文是游标（只能往后、界面做"加载更多"并累加），收藏一次给全。
+  所以三块各用一个序号（`video_seq/post_seq/folder_seq`），不能共用：共用会出现"图文在途时点了投稿的下一页，两边互相把对方判成过期"。
+- `tlist` 的解析**不许让整页失败**：`api::space::parse_tlist` 只认"`{tid: {name,count}}`"，认不出来就少一个 chip，
+  这条有单测（含畸形输入与"键当 tid"的回退）。

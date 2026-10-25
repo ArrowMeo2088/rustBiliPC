@@ -632,6 +632,65 @@ mod comment_tests {
 }
 
 #[cfg(test)]
+mod space_tests {
+    use crate::api::space::{SpaceSection, VideoOrder, parse_tlist};
+    use serde_json::json;
+
+    #[test]
+    fn tlist_becomes_chips_sorted_by_count() {
+        let value = json!({
+            "17": {"tid": 17, "count": 3, "name": "单机游戏"},
+            "28": {"tid": 28, "count": 12, "name": "游戏"}
+        });
+        let filters = parse_tlist(&value);
+        assert_eq!(filters.len(), 2);
+        // 按投稿数从多到少：serde_json 的对象是无序的，不排序的话 chips 每次刷新都会换位置。
+        assert_eq!(filters[0].name, "游戏");
+        assert_eq!(filters[1].name, "单机游戏");
+        assert_eq!(filters[0].tid, 28);
+    }
+
+    #[test]
+    fn malformed_tlist_gives_no_chips_instead_of_failing() {
+        // 这一格在 bpi-rs 里就是 `serde_json::Value`（没有类型可跟）。
+        // 形状变了只允许"少一排 chips"，不许把整个投稿块判成失败。
+        assert!(parse_tlist(&json!(null)).is_empty());
+        assert!(parse_tlist(&json!([])).is_empty());
+        assert!(parse_tlist(&json!({"17": "游戏"})).is_empty());
+        assert!(parse_tlist(&json!({"17": {"count": 2}})).is_empty());
+        assert!(parse_tlist(&json!({"17": {"name": "", "count": 2}})).is_empty());
+    }
+
+    #[test]
+    fn tid_falls_back_to_the_map_key() {
+        // B 站两处都给 tid；只给键的时候也不该丢这一格（否则用户少一个筛选项）。
+        let filters = parse_tlist(&json!({"17": {"name": "单机游戏", "count": 1}}));
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].tid, 17);
+        assert_eq!(filters[0].count, 1);
+    }
+
+    #[test]
+    fn cover_ratio_uses_the_response_and_falls_back_to_widescreen() {
+        // 图文的图有横有竖：接口给了 width/height 就必须按它摆，否则竖图会被裁掉半张脸。
+        assert!((crate::api::space::cover_ratio(300, 400) - 0.75).abs() < 1e-6);
+        // 缺数据（0）时退回 16:9，不能算出 0 或 NaN 把整档高度塌成一条缝。
+        assert!(crate::api::space::cover_ratio(0, 0) > 1.7 && crate::api::space::cover_ratio(0, 0) < 1.8);
+        assert!(crate::api::space::cover_ratio(640, 0) > 1.7);
+    }
+
+    #[test]
+    fn section_and_order_labels_read_in_chinese() {
+        assert_eq!(SpaceSection::Videos.label(), "投稿");
+        assert_eq!(SpaceSection::Posts.label(), "图文");
+        assert_eq!(SpaceSection::Folders.label(), "收藏");
+        assert_eq!(VideoOrder::Latest.label(), "最新发布");
+        assert_eq!(VideoOrder::MostPlay.label(), "最多播放");
+        assert_eq!(VideoOrder::MostFavorite.label(), "最多人收藏");
+    }
+}
+
+#[cfg(test)]
 mod scaffold_tests {
     use crate::VERSION;
 

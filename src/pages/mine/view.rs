@@ -334,32 +334,11 @@ impl MinePage {
                 } else {
                     format!(" · {}", folder.upper)
                 };
-                div()
-                    .flex()
-                    .w_full()
-                    .min_h(px(palette::LIST_ROW_MIN_HEIGHT))
-                    .gap_2()
-                    .px(px(palette::LIST_ROW_PADDING_X))
-                    .py(px(palette::LIST_ROW_PADDING_Y))
-                    .items_center()
-                    .rounded(px(palette::RADIUS))
-                    .bg(palette::card_background())
-                    .child(
-                        div()
-                            .flex_1()
-                            .text_size(px(palette::FONT_BODY))
-                            .text_color(palette::text_primary())
-                            .child(folder.title.clone()),
-                    )
-                    .child(
-                        div()
-                            .text_size(px(palette::FONT_CAPTION))
-                            .text_color(palette::text_tertiary())
-                            .child(format!(
-                                "{kind} · {} 个内容{upper}",
-                                folder.media_count
-                            )),
-                    )
+                // 行的形状走复用件：用户空间那页的收藏夹列表是同一个形状，抄两份必漏一处。
+                layout::list_row(
+                    folder.title.clone(),
+                    format!("{kind} · {} 个内容{upper}", folder.media_count),
+                )
             }))
             .into_any_element()
     }

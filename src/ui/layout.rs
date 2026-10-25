@@ -191,6 +191,43 @@ pub fn avatar(url: &str, size: f32) -> AnyElement {
         .into_any_element()
 }
 
+/// 一条"标题 + 右侧说明"的列表行（收藏夹、分区这类）。
+///
+/// 度量照 `VideoPartsSection.xaml:18-21`：`MinHeight=40`、`Padding=12,8`、列距 8、
+/// 每行都带卡片底色。个人中心与用户空间两处都是这个形状，所以做成复用件——
+/// 抄两遍的话下次改度量一定漏一处。
+pub fn list_row(label: impl Into<SharedString>, meta: impl Into<SharedString>) -> AnyElement {
+    div()
+        .flex()
+        .w_full()
+        .min_h(px(palette::LIST_ROW_MIN_HEIGHT))
+        .gap(px(palette::LIST_ROW_PADDING_Y))
+        .items_center()
+        .px(px(palette::LIST_ROW_PADDING_X))
+        .py(px(palette::LIST_ROW_PADDING_Y))
+        .overflow_hidden()
+        .rounded(px(palette::RADIUS))
+        .bg(palette::card_background())
+        .child(
+            div()
+                .flex_1()
+                .text_size(px(palette::FONT_BODY))
+                .text_color(palette::text_primary())
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .overflow_hidden()
+                .child(label.into()),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(palette::FONT_CAPTION))
+                .text_color(palette::text_tertiary())
+                .child(meta.into()),
+        )
+        .into_any_element()
+}
+
 /// 一行统计（12px 辅助灰、组内间距 12）。参考项目所有"数字行"都是这个规格。
 pub fn stat_line(items: Vec<SharedString>) -> AnyElement {
     div()

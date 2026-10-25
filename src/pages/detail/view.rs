@@ -49,7 +49,7 @@ use gpui_kit::*;
 use crate::api::comments::{self, CommentItem, CommentSortKind};
 use crate::api::detail::{self, PageInfo, SubtitleBrief, VideoDetailInfo};
 use crate::api::stream::{self, StreamChoice};
-use crate::pages::OpenVideo;
+use crate::pages::{OpenUser, OpenVideo};
 use crate::store::credentials::SavedCredential;
 use crate::ui::{cover, layout, palette};
 use crate::ui::video_card::{self, VideoCardData};
@@ -856,15 +856,23 @@ impl DetailPage {
             )
             .child(
                 // UP 主那一行：44 的圆头像 + 名字 + 稿件号（`UpSectionControl.xaml:21-33`）。
+                // **整行可点**，点进去是 TA 的空间页（P7）——参考项目里这个位置也是按钮
+                // （`UpSectionControl` 的头像/昵称都挂了 `ShowUserSpaceCommand`）。
                 div()
+                    .id("detail-open-up")
                     .flex()
                     .w_full()
-                    .gap(px(palette::STAT_ITEM_GAP))
                     .items_center()
+                    .gap(px(palette::STAT_ITEM_GAP))
+                    .px(px(palette::CARD_TEXT_PADDING_X))
+                    .py(px(palette::CARD_LINE_GAP))
+                    .rounded(px(palette::RADIUS))
+                    .cursor_pointer()
                     .child(layout::avatar(&info.owner_face, palette::AVATAR_UP))
                     .child(
                         div()
                             .text_size(px(palette::FONT_BODY))
+                            .font_weight(FontWeight::SEMIBOLD)
                             .text_color(palette::text_primary())
                             .child(info.owner_name.clone()),
                     )
@@ -873,7 +881,23 @@ impl DetailPage {
                             .text_size(px(palette::FONT_CAPTION))
                             .text_color(palette::text_tertiary())
                             .child(format!("{} · {} P", info.bvid, info.videos)),
-                    ),
+                    )
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(palette::FONT_CAPTION))
+                            .text_color(palette::text_tertiary())
+                            .child("TA 的空间 ›"),
+                    )
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        let (mid, name) = match this.detail.as_ref() {
+                            Some(info) => (info.owner_mid, info.owner_name.clone()),
+                            None => return,
+                        };
+                        cx.emit(OpenUser { mid, name });
+                    }))
+                    .hover(|style| style.bg(palette::card_background_hover())),
             )
             .child(layout::stat_line(vec![
                 format!("播放 {}", info.stat.play_text).into(),
@@ -935,6 +959,9 @@ impl DetailPage {
 
 /// 相关推荐点开来是同一层导航：发同一个事件给外壳。
 impl EventEmitter<OpenVideo> for DetailPage {}
+/// 点 UP 主那一行 = 请外壳压一层空间页（P7）。名字也一起带上，
+/// 空间页的资料卡要一次请求才回来，先拿这个名字占住标题。
+impl EventEmitter<OpenUser> for DetailPage {}
 
 impl Render for DetailPage {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
