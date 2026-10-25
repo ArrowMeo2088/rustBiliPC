@@ -1047,5 +1047,28 @@ run 39941368216，SHA `12e63aa`，`cargo build` 在 2 分 23 秒后失败（10:4
   `RcmdItem` 会不会哪天少给字段（第 17 条），都要真机看。产物已换到 `publish/rustbilipc.exe`，
   登录后第一眼应该是主页的推荐卡片网格。
 
+### 第二十八轮（P6b 评论区）：1 个错，是 derive 的连带条件
+
+run 40206928324（SHA `63dbcac`）2 分 32 秒失败：**E0277 ×1**。
+
+```text
+error[E0277]: the trait bound `CommentSortKind: std::default::Default` is not satisfied
+   --> src\api\comments.rs:107:5
+    | pub sort: CommentSortKind,   // CommentPage 派生了 Default，字段就必须都能默认
+```
+
+- **教训（本地就能查的那类）**：`#[derive(Default)]` 不是免费的——它要求**每个字段类型都能默认**。
+  我给 `CommentPage` 派了 `Default`，里面的 `sort` 是自己的枚举，没派 `Default` 就整体不成立。
+  修法是给枚举 `#[derive(Default)]` + `#[default] Hot`（默认"最热"，与参考项目一致），
+  而不是把 `CommentPage` 的 `Default` 删掉：外壳与单测都靠它做初值。
+  编译器直接把 help 写出来了（`consider annotating ... with #[derive(Default)]`），
+  这种错**不需要联网查证**，是我在写 `derive` 时没顺着看一眼字段。
+- 顺带说明这轮的信息量：整份 `bpi-rs`（含新开的 `comment` feature）与本项目其余部分都编过了，
+  评论区的接口调用、详情页那一块的排版、`layout::avatar(&str)` 这些**都没报错**；
+  也证实了"开 `comment` feature 不动 `Cargo.lock`"（`comment = []` 是纯 cfg）这条判断。
+- `cargo build` 失败 ⇒ 这轮**没跑到 `cargo test`**，所以 `comment_tests` 五条还没被编译过；
+  第二十九轮才是一次完整的验证。
+
+
 
 

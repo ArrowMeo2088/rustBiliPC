@@ -53,9 +53,13 @@ pub const COMMENT_TYPE_VIDEO: i32 = 1;
 pub const COMMENT_PAGE_SIZE: u32 = 20;
 
 /// 评论排序口径（页面不碰 bpi 的类型，分层规则）。
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+///
+/// `Default` 是必须的：`CommentPage` 派生了 `Default`，字段就得都能默认。
+/// 默认给"最热"，与参考项目的评论区一致。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum CommentSortKind {
     /// 按点赞（参考项目的默认）。
+    #[default]
     Hot,
     /// 按时间。
     Latest,
