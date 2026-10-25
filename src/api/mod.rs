@@ -30,6 +30,7 @@
 pub mod detail;
 pub mod favorites;
 pub mod history;
+pub mod home;
 pub mod login;
 pub mod profile;
 pub mod search;

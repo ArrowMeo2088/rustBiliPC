@@ -537,6 +537,41 @@ mod playback_tests {
 }
 
 #[cfg(test)]
+mod home_tests {
+    use crate::api::home::{HOME_PAGE_SIZE, is_archive_goto, play_text_of};
+    use bpi_rs::video::recommend::HomeRmdStat;
+
+    #[test]
+    fn only_archive_goto_can_be_opened() {
+        // 推荐流里混着直播与剧集项（`ref/bpi-rs/src/video/recommend.rs:135-136`），
+        // 它们的 bvid 不是稿件号，放进可点卡片里就是"点了进详情页然后报错"。
+        assert!(is_archive_goto("av"));
+        assert!(!is_archive_goto("live"));
+        assert!(!is_archive_goto("ogv"));
+        assert!(!is_archive_goto(""));
+    }
+
+    #[test]
+    fn missing_stat_shows_nothing_instead_of_zero() {
+        // `stat` 在这个接口里是 Option。写 0 会把"没给数据"说成"没人看"。
+        assert_eq!(play_text_of(None), "");
+        let stat = HomeRmdStat {
+            view: 15_000,
+            danmaku: 20,
+            like: 30,
+        };
+        assert_eq!(play_text_of(Some(&stat)), "1.5万");
+    }
+
+    #[test]
+    fn page_size_stays_inside_the_api_bounds() {
+        // bpi-rs 直接拒 0 与 >30（`ref/bpi-rs/src/video/params.rs:366-371`），
+        // 这个常量要是被改成越界，第一次请求就会在本地失败而不是网络失败——更难查。
+        assert!(HOME_PAGE_SIZE > 0 && HOME_PAGE_SIZE <= 30);
+    }
+}
+
+#[cfg(test)]
 mod scaffold_tests {
     use crate::VERSION;
 

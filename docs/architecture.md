@@ -81,6 +81,7 @@ src/
 │   ├── detail.rs      视频详情：view() 主体 + desc()/tags()/related_videos() 三块各自容错 + 字幕列表
 │   ├── favorites.rs   收藏夹：fav().created_list() + collected_list()，合并成一个 DTO
 │   ├── history.rs     观看历史：historytoview().history_list()（游标分页）+ 秒数格式化纯函数
+│   ├── home.rs        主页：video().homepage_recommendations()（WBI 由库里签）+ **按 goto 过滤**
 │   ├── search.rs      搜索封装：DTO（SearchHit/PageInfo/SearchSort）+ 标签清洗 + 播放量格式化
 │   ├── stream.rs      播控：video().play_url() 取地址 + 选流成 StreamChoice（DASH 双流 / durl 单文件）
 │   └── stream_select.rs  DASH 选择纯函数（HEVC 优先、画质档封顶 116）
@@ -92,7 +93,8 @@ src/
 ├── pages/
 │   ├── mod.rs         页面层出口 + 共用导航事件 `OpenVideo`（三个页面发同一个信号）
 │   ├── root.rs        窗口根视图：无凭据→登录页，有凭据→主界面外壳；登录成功后原地切换
-│   ├── shell/         外壳：左侧 240 导航栏 + **详情页栈**（打开 push、返回 pop），订阅 OpenVideo
+│   ├── shell/         外壳：左侧 240 导航栏（主页/搜索/我的）+ **详情页栈**（打开 push、返回 pop），订阅 OpenVideo
+│   ├── home/          主页（P6 第一步，默认页）：首页推荐流网格 + "换一批"，懒加载与序号让位同个人中心
 │   ├── login/         扫码登录页（二维码 + 1.5s 轮询 + 过期自动重载）
 │   ├── mine/          个人中心页（资料 + 收藏夹 + 历史，三路并发各自显示错误；懒加载）
 │   ├── detail/        详情页（主列信息 + 右栏 360 选集与相关推荐；持 mpv 子进程并在 Drop 时收掉）
@@ -562,7 +564,37 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
   卡片文字三行的顺序（UP 主在上）、页头/侧栏的比例、详情页右栏的高度分配。
   视觉问题要靠眼睛，不靠编译器。
 
+### 4.16 主页（P6 第一步）：首页推荐流当默认页，"换一批"而不是分页
+
+接口与字段口径全部核在 `docs/api-notes.md` 第 10 节，这里只记结构性决定。
+
+- **为什么它当默认页**：用户清单里"主页"排第一，登录后第一眼是一片空白不对；
+  所以 `MainShell::new` 里 `tab = ShellTab::Home`，并**在构造末尾就把第一批推荐取回来**
+  （`home.update(cx, |page, cx| page.ensure_loaded(cx))`）。
+  "我的"仍然懒加载（用户可能根本不点），差别就在这里：默认页不该懒。
+- **内容选的是"首页推荐"而不是"热门"**：`video().homepage_recommendations()` 在**已启用的 `video`
+  feature** 里、WBI 由库里签（`ref/bpi-rs/src/video/client.rs:218`）、载荷是**typed** 的 `RcmdItem`。
+  而 `video_ranking().popular_list()` 属于另一个 feature，且它的 `list` 是 `Vec<serde_json::Value>`
+  （`src/video_ranking/popular.rs:9-15`），得我们自己挖字段。少加一个 feature、少写一堆 Value 解析，
+  是当前更稳的一条。分区侧栏（Bili.Copilot 那种"分区 + 该区内容"）**没做**：它要先定侧栏怎么摆、
+  点分区走哪条接口，是结构问题，等他拍板。
+- **只有 `goto == "av"` 能进卡片**：推荐流混着 `live`/`ogv` 项，它们的 `bvid` 不是稿件号，
+  做成可点卡片等于"点了必然报错"。过滤规则单独做成 `is_archive_goto` 并进单测。
+- **分页做成"换一批"**：这个接口没有 `num_pages`（`recommend.rs:165-172` 只有 `item/mid/两个百分比`），
+  所以页头右侧是一颗"换一批"按钮（对应参考项目 `PopularMainHeader.xaml:38-49` 那颗"刷新"位），
+  批次号 `page` 同时喂给 `fresh_idx` 与 `fetch_row`。**这条口径没有官方文档**，
+  真机看"换一批是否真的换出不同内容"，不行就改成只递增 `fresh_idx`。
+- **载荷是严格结构，缺字段就整批失败**：`RcmdItem` 除四个 `Option` 外都没有 `#[serde(default)]`，
+  `preload_expose_pct` 这类外层字段也是必填。风险与收藏/历史同一类（第 6 节第 12 条），
+  处置也一样：**原因写在这一页的提示位**，不许只进日志；已有列表 + 新失败时两者都显示，
+  不清空列表藏起来。
+- **时长单位是秒**：`RcmdItem.duration: u64` 是数字秒（搜索接口给的是 `"mm:ss"` 字符串），
+  所以走 `api::format_seconds(seconds_to_u32(..))`，与历史/详情同一口径。
+- **卡片第三格给"推荐理由"**：`rcmd_reason.content`（B 站的 0 无 / 1 已关注 / 3 高点赞量）
+  填进 `VideoCardData.extra`，空串时那一格自动不出现（`video_card` 里用 `when` 控制）。
+
 ## 5. 阶段进度
+
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
@@ -573,8 +605,10 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | P3 | 详情：`video().view()`、多 P、tags/related、字幕列表 | **完成**（第十七轮产物真机通过；机制见第 4.12 节。发布时间/分区按用户决定**不做**——live 的 `VideoView` 没有这两个字段） |
 | P4a | 起播：playurl 取地址 + 选流 + 拉起外置 mpv（不遥控） | **完成**（第十八轮真机失败：mpv 窗口没出现，根因是 `--opt value` 写法 + mpv 该从运行目录取；第十九轮修好，43 passed、零 warning，真机确认能起播出声） |
 | P4b | 曾按"遥控"理解做过一版（连管道、订阅属性、进度行、暂停/±10 秒）——第二十三轮 57 passed 全绿，但**方向错了**：播放期 UI 归 mpv。已按范围删净，机制留在第 4.14 节 |
-| P5 | 视觉：照 `ref/Bili.Copilot` 的度量重做（色板/字号层级/卡片 232×238/网格/页头 56 + 侧栏 240/右栏 360/hover 换底色） | **编译与测试已绿**（第二十五轮 40 passed、零 Rust warning，产物 `89d97a7`）；**只剩他真机看过**（第 4.15 节） |
-| P6 | 播放之外的功能补全：主页（热门）、评论区、字幕 `sub-add`、换清晰度保住窗口与进度 | 未开始（这是范围定稿后剩下的正事） |
+| P5 | 视觉：照 `ref/Bili.Copilot` 的度量重做（色板/字号层级/卡片 232×238/网格/页头 56 + 侧栏 240/右栏 360/hover 换底色） | **完成**（他真机看过说"没什么问题"，唯一剩下的是右上角搜索框——根因是 kit 一直用亮色主题，第二十六轮已修，第 4.15 节最后两条） |
+| P6a | 主页：首页推荐流当默认页 + "换一批"（第 4.16 节） | 代码完成，等编译与真机看（接口口径核在 api-notes 第 10 节） |
+| P6b | 评论区（列表 + 分页） | 未开始 |
+| P6c | 字幕 `sub-add`、换清晰度保住窗口与进度（要恢复第 4.14 节那套管道） | 未开始 |
 
 ## 6. 已知风险与待验证
 
@@ -596,6 +630,8 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | 14 | 目标机 i5-6200U 是 Skylake：**没有 AV1 硬解**，HEVC 只到 8bit；`--hwdec=auto` 选不到就退软解，1080P AV1 大概率丢帧 | 选流已把 HEVC 排在 AV1 之前（第 4.2 节），`player_note` 会打出实际 `codecs`；真机先看那串是 `hev1/hvc1` 还是 `avc1/av01`，再谈要不要在封顶档内偏好某一编码。第十九轮真机报的是 `hev1.1.6.L150.90` ✅ |
 | 15 | 视觉重做只经过编译与代码核对，**没人眼看过**：度量抄的是 xaml，gpui 的排版引擎是 taffy，字体度量/行高/滚动条与 WinUI 不可能一模一样 | 必须真机看过再谈"完成"；第一版允许局部丑，但色板与字号层级不许在页面里各写一套（一律走 `ui/palette.rs`） |
 | 16 | gpui 没有 Acrylic/Mica、没有 ItemContainer 选中视觉、没有图标字库 | 用纯色 + 1px 描边 + 圆角 + 字号差 + 三档灰表达层级；图标暂时用文字（参考项目自己也用"弹"字），需要成套图标时再自绘 SVG 走 asset |
+| 17 | **主页载荷是严格结构**：`RcmdItem` 除四个 `Option` 外没有 `#[serde(default)]`，外层 `preload_expose_pct` 等也必填，B 站少给任一字段就整批 `BpiError::parse` | 症状可控：主页那一块显示原因文本、其余页不受影响（第 4.16 节）。真机若出现"主页永远失败"，先失败在哪个字段——日志里有原始错误文本，据此在 `api/home.rs` 里改成自己解析 `Value`（bpi-rs 那条 `popular_list` 用 Value 就是同一原因的产物） |
+| 18 | `fresh_idx`/`fetch_row` 的递增口径**没有官方文档**（bpi-rs 只把两者原样发出去） | 真机验证"换一批"是否真换出不同内容；不换就改成只递增 `fresh_idx`、`fetch_row` 恒为 1，再不行就换 `video_ranking().popular_list()` 那条热门接口 |
 
 ## 7. 维护规则
 

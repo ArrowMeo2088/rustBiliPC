@@ -27,10 +27,11 @@
 //! 所以每条订阅都存进 `_subscriptions`。从栈里 pop 掉的详情页会留下一条指向已释放实体的订阅，
 //! gpui 随实体释放让它自动失效，不会累积回调数量之外的成本。
 //!
-//! ## 两个入口页面都一直持有
+//! ## 三个入口页面都一直持有
 //!
-//! 切回来时不重新请求：搜索结果和已加载的收藏/历史都还在。个人中心是懒加载
-//! （第一次切到它才 `ensure_loaded`，见 `pages/mine/view.rs`）。
+//! 切回来时不重新请求：主页那一批推荐、搜索结果和已加载的收藏/历史都还在。
+//! 主页是默认页（构造时就取第一批），个人中心与"搜索后才有内容"保持懒加载
+//! （见 `pages/home/view.rs`、`pages/mine/view.rs`）。
 
 use std::sync::Arc;
 
@@ -38,6 +39,7 @@ use gpui_kit::*;
 
 use crate::pages::OpenVideo;
 use crate::pages::detail::DetailPage;
+use crate::pages::home::HomePage;
 use crate::pages::mine::MinePage;
 use crate::pages::search::SearchPage;
 use crate::ui::{layout, palette};
@@ -45,6 +47,8 @@ use crate::ui::{layout, palette};
 /// 栈空时显示哪一页。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ShellTab {
+    /// 主页（P6：首页推荐流）。登录后第一眼就是它。
+    Home,
     /// 搜索页（P1）。
     Search,
     /// 个人中心页（P2b）。
@@ -54,6 +58,7 @@ pub enum ShellTab {
 /// 主界面外壳视图。
 pub struct MainShell {
     client: Arc<bpi_rs::BpiClient>,
+    home: Entity<HomePage>,
     search: Entity<SearchPage>,
     mine: Entity<MinePage>,
     tab: ShellTab,
@@ -71,12 +76,20 @@ impl MainShell {
         mid_raw: String,
     ) -> Self {
         let search = cx.new(|cx| SearchPage::new(window, cx, Arc::clone(&client)));
-        // 个人中心随外壳一起构造，但第一次切到它才发请求（懒加载见 MinePage::ensure_loaded）。
+        // 个人中心与主页都随外壳一起构造，但第一次被看到才发请求（懒加载见各自 ensure_loaded）。
         let mine = cx.new(|_cx| MinePage::new(Arc::clone(&client), mid_raw));
+        let home = cx.new(|_cx| HomePage::new(Arc::clone(&client)));
 
-        // 两个入口页面的卡片点击都走同一个事件。`subscribe_in` 的回调要 window，
+        // 三个入口页面的卡片点击都走同一个事件。`subscribe_in` 的回调要 window，
         // 因为压栈时 `cx.new` 建视图实体要用它。
         let mut subscriptions = Vec::new();
+        subscriptions.push(cx.subscribe_in(
+            &home,
+            window,
+            |this, _home, event: &OpenVideo, window, cx| {
+                this.open_detail(&event.bvid, window, cx);
+            },
+        ));
         subscriptions.push(cx.subscribe_in(
             &search,
             window,
@@ -92,11 +105,16 @@ impl MainShell {
             },
         ));
 
+        // 主页是默认页：构造完就把第一批推荐取回来，登录后第一眼不该是一片空白。
+        // （"我的"仍然懒加载——用户可能根本不点它。）
+        home.update(cx, |page, cx| page.ensure_loaded(cx));
+
         Self {
             client,
+            home,
             search,
             mine,
-            tab: ShellTab::Search,
+            tab: ShellTab::Home,
             detail_stack: Vec::new(),
             _subscriptions: subscriptions,
         }
@@ -120,7 +138,7 @@ impl MainShell {
         cx.notify();
     }
 
-    /// 侧栏：应用名 + 返回（栈非空时）+ 两个入口。
+    /// 侧栏：应用名 + 返回（栈非空时）+ 三个入口（主页 / 搜索 / 我的）。
     fn side_bar(&self, cx: &mut Context<Self>) -> AnyElement {
         let mut items: Vec<AnyElement> = Vec::new();
 
@@ -136,6 +154,7 @@ impl MainShell {
             ));
         }
 
+        items.push(self.side_tab(ShellTab::Home, "主页", cx));
         items.push(self.side_tab(ShellTab::Search, "搜索", cx));
         items.push(self.side_tab(ShellTab::Mine, "我的", cx));
 
@@ -188,8 +207,11 @@ impl MainShell {
                 if this.tab != tab {
                     this.tab = tab;
                     // 第一次进"我的"时触发它自己的首轮加载；已加载过就只是换个显示。
-                    if tab == ShellTab::Mine {
-                        this.mine.update(cx, |mine, cx| mine.ensure_loaded(cx));
+                    // 主页在构造时已经取过第一批，这里的 ensure_loaded 只是同一条规则的写法统一。
+                    match tab {
+                        ShellTab::Home => this.home.update(cx, |home, cx| home.ensure_loaded(cx)),
+                        ShellTab::Mine => this.mine.update(cx, |mine, cx| mine.ensure_loaded(cx)),
+                        ShellTab::Search => {}
                     }
                     cx.notify();
                 }
@@ -226,6 +248,7 @@ impl Render for MainShell {
         let page: AnyElement = match self.detail_stack.last() {
             Some(top) => top.clone().into_any_element(),
             None => match self.tab {
+                ShellTab::Home => self.home.clone().into_any_element(),
                 ShellTab::Search => self.search.clone().into_any_element(),
                 ShellTab::Mine => self.mine.clone().into_any_element(),
             },

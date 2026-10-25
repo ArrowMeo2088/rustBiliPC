@@ -322,3 +322,24 @@ bpi-rs 自己请求时会加 `User-Agent` + `Referer: https://www.bilibili.com/`
 - 时长与进度是**数字秒**：`duration: Option<u32>`、`progress: i32`（`history.rs:97/101`，
   "没进度"时可能是 `-1`）；跟搜索接口的 `"mm:ss"` 字符串**不是一回事**，格式化在
   `src/api/history.rs::format_seconds`。
+
+## 10. 主页（P6 第一步，已核对到行号）
+
+| 项 | 结论 | 证据（`ref/bpi-rs`） |
+| --- | --- | --- |
+| 调用 | `client.video().homepage_recommendations(VideoHomepageRecommendationsParams)` → `RcmdFeedResponseData` | `src/video/client.rs:215-225` |
+| 端点 | `https://api.bilibili.com/x/web-interface/wbi/index/top/feed/rcmd` | `src/video/recommend.rs:6-7` |
+| WBI | **库里自动签**：`get_wbi_sign2(params.query_pairs())` 在发请求前调用 | `src/video/client.rs:218` |
+| 参数 | `ps`（1–30，默认 12）、`fresh_idx`、`fetch_row`；查询串还会固定带上 `fresh_type=4` 并把 `brush` 写成 `fresh_idx` | `src/video/params.rs:350-397` |
+| 校验 | `page_size` 越界 → `BpiError::invalid_parameter`（**本地就失败，不会发请求**）；`fresh_idx`/`fetch_row` 必须非 0 | `params.rs:366-371/377-385` |
+| 条目字段 | `bvid/cid/duration/goto/id/is_followed/is_stock/owner/pic/pos/pubdate/rcmd_reason/show_info/stat/title/track_id/uri`；`av_feature`/`business_info`/`room_info` 是 `Option<Value>`，`stat` 是 `Option<HomeRmdStat>` | `recommend.rs:125-163` |
+| 时长单位 | **数字秒**（`duration: u64`），与搜索接口的 `"mm:ss"` 字符串不同 ⇒ 必须 `format_seconds` | `recommend.rs:131` |
+| `goto` | `"av"`=稿件、`"live"`=直播、`"ogv"`=剧集；后两者的 `bvid` 不是稿件号 | `recommend.rs:135-136` |
+| 统计数据 | `HomeRmdStat { view, danmaku, like }`（**只有这三个**，没有收藏/硬币） | `recommend.rs:52-60` |
+| 推荐理由 | `RcmdReason { reason_type: u8, content: Option<String> }`（0 无 / 1 已关注 / 3 高点赞量） | `recommend.rs:114-122` |
+| 响应外层 | `RcmdFeedResponseData { item, mid, preload_expose_pct, preload_floor_expose_pct }`，**除 `item` 外都是必填数字**，B 站少给任一都会解析失败 | `recommend.rs:165-172` |
+
+- 与"热门/排行榜"的区别：`video_ranking().popular_list()` / `ranking_list()` 在**另一个 feature**
+  （`video_ranking`）里，而且载荷直接是 `Vec<serde_json::Value>`
+  （`src/video_ranking/popular.rs:9-15`、`ranking.rs:8-14` 的注释写"字段未提供，用 Value 代替"），
+  要我们自己从 JSON 里挖字段。主页先走已启用的 `video` feature 这条路，不新增 feature、不自己挖 Value。
