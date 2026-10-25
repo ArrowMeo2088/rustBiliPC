@@ -3,7 +3,8 @@
 //! ## 这一页做什么
 //!
 //! 主体（标题/封面/UP 主/统计/简介/标签/分P/相关推荐）来自 `api/detail.rs`，字幕列表来自
-//! `api/detail::fetch_subtitles`，"播放"只负责**把选中的那一路流交给 mpv 起进程**——
+//! `api/detail::fetch_subtitles`，评论区来自 `api/comments.rs`（它要的是 **aid**，所以只能挂在主体
+//! 回来之后），"播放"只负责**把选中的那一路流交给 mpv 起进程**——
 //! 进度、暂停、音量、字幕显示一律在 mpv 那个窗口里，不在这一页（范围定稿见
 //! `docs/architecture.md` 第 4.3 节）。
 //!
@@ -45,6 +46,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
+use crate::api::comments::{self, CommentItem, CommentSortKind};
 use crate::api::detail::{self, PageInfo, SubtitleBrief, VideoDetailInfo};
 use crate::api::stream::{self, StreamChoice};
 use crate::pages::OpenVideo;
@@ -77,6 +79,14 @@ pub struct DetailPage {
     player: Option<std::process::Child>,
     /// 正在为哪个 cid 取地址；取回来时不是它就丢掉（用户可能又点了别的 P）。
     planning_cid: Option<u64>,
+    /// 评论区当前这一页（None = 还没取到）。总数与页码都在里面，"还有下一页"由它自己算。
+    comment: Option<comments::CommentPage>,
+    /// 评论区的排序口径（决定"最热/最新"哪颗按钮亮着）。
+    comment_sort: CommentSortKind,
+    /// 评论区的提示位：加载中 / 失败原因 / 空评论。
+    comment_note: SharedString,
+    /// 评论自己的请求序号：换排序或翻页时，旧结果回来要自己让位（第 4.9 节）。
+    comment_seq: u32,
 }
 
 /// 详情页退出时必须带走自己拉起的 mpv：外壳把这一层 pop 掉（或整个窗口关掉）时，
@@ -107,6 +117,10 @@ impl DetailPage {
             player_note: "".into(),
             player: None,
             planning_cid: None,
+            comment: None,
+            comment_sort: CommentSortKind::Hot,
+            comment_note: "".into(),
+            comment_seq: 0,
         };
         this.load(cx);
         this
@@ -158,7 +172,17 @@ impl DetailPage {
 
             let Some(cid) = cid else { return };
             let Some(view) = this.upgrade() else { return };
-            view.update(cx, |view, cx| view.load_subtitles(cid, seq, cx));
+            view.update(cx, |view, cx| {
+                // 评论区的 `oid` 是**数字稿件号**（不是 bvid，见 `api/comments.rs` 文件头），
+                // 所以它只能挂在主体之后：这里顺手把 aid 取出来。
+                let aid = view.detail.as_ref().map(|info| info.aid);
+                let sort = view.comment_sort;
+                view.load_subtitles(cid, seq, cx);
+                match aid {
+                    Some(aid) => view.load_comments(aid, 1, sort, cx),
+                    None => view.comment_note = "主体里没有可用的稿件号，取不了评论".into(),
+                }
+            });
         })
         .detach();
     }
@@ -198,9 +222,65 @@ impl DetailPage {
         .detach();
     }
 
+    /// 取评论区的一页。`aid` 必须由调用方给（评论区的 `oid` 是数字稿件号，只能等主体回来才有）。
+    ///
+    /// 失败**不清空已有列表**：翻下一页失败时把旧的一页留着 + 显示原因，比把整块抹成空白好查。
+    fn load_comments(&mut self, aid: u64, page: u32, sort: CommentSortKind, cx: &mut Context<Self>) {
+        self.comment_seq += 1;
+        let seq = self.comment_seq;
+        self.comment_sort = sort;
+        self.comment_note = format!("评论加载中…（第 {page} 页）").into();
+        cx.notify();
+
+        let join = comments::fetch_comments(Arc::clone(&self.client), aid, page, sort);
+        cx.spawn(async move |this, cx| {
+            let outcome = match join.await {
+                Ok(inner) => inner.map_err(|error| error.to_string()),
+                Err(join_error) => Err(crate::app::describe_join_error(join_error)),
+            };
+            log::debug!("详情页：评论结果已回到前台（#{seq}）");
+
+            let Some(view) = this.upgrade() else {
+                log::warn!("详情页：等待期间实体已释放，丢弃评论结果");
+                return;
+            };
+            view.update(cx, |view, cx| {
+                if view.comment_seq != seq {
+                    log::debug!("详情页：评论请求 #{seq} 已被取代，丢弃");
+                    return;
+                }
+                match outcome {
+                    Ok(page_data) => {
+                        view.comment_note = if page_data.items.is_empty() {
+                            "这条稿件没有评论"
+                        } else {
+                            ""
+                        }
+                        .into();
+                        view.comment = Some(page_data);
+                    }
+                    Err(message) => {
+                        view.comment_note = format!("取评论失败：{message}").into();
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// 翻页/换排序的入口：自己取 aid，取不到就只写提示（不发无意义的请求）。
+    fn request_comments(&mut self, page: u32, sort: CommentSortKind, cx: &mut Context<Self>) {
+        let Some(aid) = self.detail.as_ref().map(|info| info.aid) else {
+            self.comment_note = "还没有主体信息，取不了评论".into();
+            cx.notify();
+            return;
+        };
+        self.load_comments(aid, page, sort, cx);
+    }
+
     /// 当前选中的分 P。
-    fn selected_page(&self) -> Option<PageInfo> {
-        let info = self.detail.as_ref()?;
+    fn selected_page(&self) -> Option<PageInfo> {        let info = self.detail.as_ref()?;
         info.pages
             .get(self.selected)
             .cloned()
@@ -529,6 +609,201 @@ impl DetailPage {
             .into_any_element()
     }
 
+    /// 一条评论。度量照 `CommentItemControl.xaml:21-46`：整行是卡片底 + 1px **同色**描边、
+    /// `Padding=12`、头像列与文字列距 12、头像 40；行内三行间距 8（`:76-118`）。
+    ///
+    /// 参考项目把评论做成播放器页签里的单独一页，这里排成主列的一节：
+    /// `NavigationView` 那种页签控件在 gpui 侧没有等价物，硬造一个只会更难看（风险表第 16 条）。
+    fn comment_row(&self, item: &CommentItem) -> AnyElement {
+        // 点赞与"共 N 条回复"挤在同一行：这一行只是元信息，不值得再开一档高度。
+        let meta = if item.reply_count > 0 {
+            format!("{} 赞 · 共 {} 条回复", item.like, item.reply_count)
+        } else {
+            format!("{} 赞", item.like)
+        };
+        div()
+            .flex()
+            .w_full()
+            .items_start()
+            .gap(px(palette::COMMENT_COLUMN_GAP))
+            .p(px(palette::COMMENT_ROW_PADDING))
+            .rounded(px(palette::RADIUS))
+            .bg(palette::card_background())
+            .border_1()
+            .border_color(palette::card_background())
+            .child(layout::avatar(&item.face, palette::AVATAR_COMMENT))
+            .child(
+                div()
+                    .flex_1()
+                    .flex()
+                    .flex_col()
+                    .gap(px(palette::CARD_TEXT_ROW_GAP))
+                    .overflow_hidden()
+                    .child(
+                        div()
+                            .flex()
+                            .w_full()
+                            .items_center()
+                            .gap(px(palette::CARD_TEXT_ROW_GAP))
+                            .child(
+                                div()
+                                    .text_size(px(palette::FONT_BODY))
+                                    .font_weight(FontWeight::SEMIBOLD)
+                                    .text_color(palette::text_primary())
+                                    .child(item.author.clone()),
+                            )
+                            // 昵称与时间分居两端：中间这一档把宽度吃掉。
+                            .child(div().flex_1())
+                            .child(
+                                div()
+                                    .flex_shrink_0()
+                                    .text_size(px(palette::FONT_CAPTION))
+                                    .text_color(palette::text_tertiary())
+                                    .child(item.time_text.clone()),
+                            ),
+                    )
+                    // 正文不折限行数：评论就是给人读完的，砍掉尾巴比整块难看。
+                    .child(
+                        div()
+                            .w_full()
+                            .text_size(px(palette::FONT_BODY))
+                            .text_color(palette::text_primary())
+                            .child(item.message.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(palette::FONT_CAPTION))
+                            .text_color(palette::text_tertiary())
+                            .child(meta),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    /// 评论区那一整块：区块标题 + 排序与翻页 + 一行行评论。
+    ///
+    /// 加载中/失败/没有评论都走 `comment_note` 这一行（第 4.7 节"失败必须看得见"）；
+    /// 翻页失败时上一批还留着，不会把已经读到的东西抹掉。
+    fn comments_block(&self, cx: &mut Context<Self>) -> AnyElement {
+        let current_page = self
+            .comment
+            .as_ref()
+            .map(|page| page.page)
+            .unwrap_or(1);
+        let total_text = self
+            .comment
+            .as_ref()
+            .and_then(|page| page.total)
+            .map(|total| format!("共 {total} 条"))
+            .unwrap_or_default();
+        let rows: Vec<AnyElement> = self
+            .comment
+            .as_ref()
+            .map(|page| {
+                page.items
+                    .iter()
+                    .map(|item| self.comment_row(item))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut head = div()
+            .flex()
+            .w_full()
+            .items_center()
+            .gap(px(palette::CARD_TEXT_ROW_GAP))
+            .px(px(palette::LIST_ROW_PADDING_X));
+        for kind in [CommentSortKind::Hot, CommentSortKind::Latest] {
+            let button = Button::new(format!("comment-sort-{}", kind.label()))
+                .label(kind.label())
+                .on_click(cx.listener(move |this, _event, _window, cx| {
+                    // 换排序回到第 1 页：停在第 3 页换口径读起来像是"数据跳了"。
+                    if this.comment_sort != kind {
+                        this.request_comments(1, kind, cx);
+                    }
+                }));
+            head = head.child(if self.comment_sort == kind {
+                button.primary()
+            } else {
+                button
+            });
+        }
+        let head = head
+            .child(
+                div()
+                    .flex_1()
+                    .text_size(px(palette::FONT_CAPTION))
+                    .text_color(palette::text_tertiary())
+                    .child(total_text),
+            )
+            .child(
+                Button::new("comment-prev")
+                    .label("上一页")
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        let page = this
+                            .comment
+                            .as_ref()
+                            .map(|page| page.page)
+                            .unwrap_or(1);
+                        if page > 1 {
+                            let sort = this.comment_sort;
+                            this.request_comments(page - 1, sort, cx);
+                        }
+                    })),
+            )
+            .child(
+                Button::new("comment-next")
+                    .label("下一页")
+                    .on_click(cx.listener(|this, _event, _window, cx| {
+                        // `has_more` 自己会处理"接口没给总数"那种情况（满一页就认为还能翻）。
+                        if this.comment.as_ref().is_some_and(|page| page.has_more()) {
+                            let page = this
+                                .comment
+                                .as_ref()
+                                .map(|page| page.page)
+                                .unwrap_or(1);
+                            let sort = this.comment_sort;
+                            this.request_comments(page + 1, sort, cx);
+                        }
+                    })),
+            );
+
+        let mut block = div()
+            .flex()
+            .flex_col()
+            .w_full()
+            .child(layout::section_title(format!("评论 · 第 {current_page} 页")))
+            .child(head);
+        if !self.comment_note.is_empty() {
+            block = block.child(
+                div()
+                    .w_full()
+                    .px(px(palette::LIST_ROW_PADDING_X))
+                    .py(px(palette::CARD_TEXT_ROW_GAP))
+                    .text_size(px(palette::FONT_BODY))
+                    .text_color(if rows.is_empty() {
+                        palette::text_secondary()
+                    } else {
+                        // 已经有内容，说明这是"翻页/换排序失败"，按错误色提示。
+                        palette::critical()
+                    })
+                    .child(self.comment_note.clone()),
+            );
+        }
+        block
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .gap(px(palette::COMMENT_ROW_GAP))
+                    .px(px(palette::LIST_ROW_PADDING_X))
+                    .pb(px(palette::CARD_TEXT_PADDING_TOP))
+                    .children(rows),
+            )
+            .into_any_element()
+    }
+
     /// 主列的内容（拿到了详情才走这里）。
     fn content(&self, info: &VideoDetailInfo, cx: &mut Context<Self>) -> AnyElement {
         let hero = if info.cover.is_empty() {
@@ -626,6 +901,8 @@ impl DetailPage {
             })
             .child(layout::section_title("字幕"))
             .child(self.subtitles_body())
+            // 评论区挂在主列最下面：它依赖主体的 aid，且是"读完简介往下翻"的自然位置。
+            .child(self.comments_block(cx))
             // 这一串链子的终点是 `Div`，函数签名要的是 `AnyElement`（两条分支都得是同一种元素）。
             .into_any_element()
     }

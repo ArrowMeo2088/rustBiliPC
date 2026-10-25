@@ -572,6 +572,66 @@ mod home_tests {
 }
 
 #[cfg(test)]
+mod comment_tests {
+    use crate::api::comments::{
+        COMMENT_PAGE_SIZE, CommentPage, CommentSortKind, relative_time,
+    };
+
+    fn page(items: usize, page_no: u32, total: Option<u64>) -> CommentPage {
+        CommentPage {
+            items: (0..items).map(|_| Default::default()).collect(),
+            total,
+            page: page_no,
+            sort: CommentSortKind::Hot,
+        }
+    }
+
+    #[test]
+    fn video_comment_target_type_is_one() {
+        // 网上不少帖子写"视频=11"，但 11 是相簿；bpi-rs 的类型与它的 live 测试都是 1。
+        // 写错这个数字的症状是"评论永远空"，所以钉成断言。
+        assert_eq!(crate::api::comments::COMMENT_TYPE_VIDEO, 1);
+    }
+
+    #[test]
+    fn has_more_uses_total_when_available() {
+        // 第 1 页 20 条、总共 20 条 → 到底了。
+        assert!(!page(20, 1, Some(20)).has_more());
+        assert!(page(20, 1, Some(21)).has_more());
+        // 第 2 页只回 5 条、总共 25 条 → 正好读完了。
+        assert!(!page(5, 2, Some(25)).has_more());
+        assert!(page(5, 2, Some(26)).has_more());
+    }
+
+    #[test]
+    fn has_more_falls_back_to_full_page_without_total() {
+        // `page` 那一层是 Option：没给总数时只能按"这一页取满了 ps"推断还有下一页。
+        assert!(page(COMMENT_PAGE_SIZE as usize, 1, None).has_more());
+        assert!(!page(3, 1, None).has_more());
+    }
+
+    #[test]
+    fn relative_time_steps_down_from_days() {
+        let now = 1_700_000_000;
+        assert_eq!(relative_time(now, now), "刚刚");
+        assert_eq!(relative_time(now - 59, now), "刚刚");
+        assert_eq!(relative_time(now - 60, now), "1分钟前");
+        assert_eq!(relative_time(now - 3_600, now), "1小时前");
+        assert_eq!(relative_time(now - 86_400, now), "1天前");
+        assert_eq!(relative_time(now - 30 * 86_400, now), "1个月前");
+        assert_eq!(relative_time(now - 365 * 86_400, now), "1年前");
+        // 评论时间戳在未来（时钟漂移）不该显示出负数。
+        assert_eq!(relative_time(now + 600, now), "刚刚");
+    }
+
+    #[test]
+    fn sort_labels_are_chinese() {
+        assert_eq!(CommentSortKind::Hot.label(), "最热");
+        assert_eq!(CommentSortKind::Latest.label(), "最新");
+    }
+}
+
+#[cfg(test)]
 mod scaffold_tests {
     use crate::VERSION;
 

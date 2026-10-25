@@ -343,3 +343,25 @@ bpi-rs 自己请求时会加 `User-Agent` + `Referer: https://www.bilibili.com/`
   （`video_ranking`）里，而且载荷直接是 `Vec<serde_json::Value>`
   （`src/video_ranking/popular.rs:9-15`、`ranking.rs:8-14` 的注释写"字段未提供，用 Value 代替"），
   要我们自己从 JSON 里挖字段。主页先走已启用的 `video` feature 这条路，不新增 feature、不自己挖 Value。
+
+## 11. 评论区（P6b，已核对到行号）
+
+| 项 | 结论 | 证据（`ref/bpi-rs`） |
+| --- | --- | --- |
+| 调用 | `client.comment().list(CommentListParams)` → `CommentListData` | `src/client.rs:484`、`src/comment/client.rs:43-50` |
+| 端点 | `https://api.bilibili.com/x/v2/reply`，**普通 GET，没有 WBI 签名**（对比 `homepage_recommendations` 会先 `get_wbi_sign2`） | `src/comment/client.rs:7`、`:44-50` |
+| 目标 | `CommentTarget::new(type: i32, oid: i64)`，两者都必须 >0；**视频是 `type=1`，`oid` 是 aid（数字稿件号，不是 bvid）** | `src/comment/list.rs:20-40` |
+| 类型代码 | `1 视频 / 2 话题 / 8 直播 / 11 相簿 / 12 专栏 / 14 音频 / 17 动态 / 18 播单 …`。**11 是相簿**——网上很多帖子把"视频"写成 11，是混了另一套编号 | bilibili-API-collect 的 comment 类型代码表；bpi-rs 的 `CommentType::Video = 1`（`src/comment/action.rs:22-27`）与它 live 测试里的 `TEST_TYPE: i32 = 1`（`src/comment/list.rs:322`）互相印证 |
+| 分页 | 页码制：`pn`（≥1）+ `ps`；**本库把 `ps` 卡在 1–20**（接口本身允许到 49），超了直接 `InvalidParameter` | `src/comment/list.rs:89-101` |
+| 排序 | `sort`：0 时间 / 1 按点赞 / 2 按回复（`CommentSort::{Time, Like, Replies}`） | `src/comment/list.rs:52-66`、`:74` |
+| 总数 | `CommentListData.page` 是 `Option<PageInfo>`，`PageInfo.count` = 根评论条数、`acount: Option<u64>` 是含楼中楼的总数 | `src/comment/list.rs:247-249`、`src/comment/types.rs:53-61` |
+| 列表 | `CommentListData.replies: Option<Vec<Comment>>`（禁用评论区时是 null）；另有 `upper`（置顶）、`top`、`cursor` | `src/comment/list.rs:247-259` |
+| 单条 | `Comment { rpid, oid, count(子评论数), rcount, ctime(秒), like, member: Member, content: Content, ... }`；`Member.uname / Member.avatar`、`Content.message` | `src/comment/types.rs:11-52`、`:62-95`、`:158-170` |
+| 严格性 | `member`、`content`、`up_action`、`reply_control`、`folder` 以及 `Member` 里的 `level_info/pendant/nameplate/official_verify/vip` **都不是 Option、也没有 `#[serde(default)]`** ⇒ B 站少给任一就 `BpiError::parse` | `src/comment/types.rs` 通篇 |
+| feature | `comment = []` 是**纯 cfg 开关**，不引入新 crate，`Cargo.lock` 应当一字不变 | `ref/bpi-rs/Cargo.toml:54` |
+
+- 回复（楼中楼）另有一条 `comment().replies(CommentRepliesParams::new(target, root_rpid)?...)`
+  （`src/comment/client.rs:53-58`、`list.rs:132-142`），返回同一个 `CommentListData`。
+  P6b 只做顶层 + 翻页，**没接子回复展开**：要做的话得先定"展开后插在哪"这个结构问题。
+- 相对时间在接口里**没有**，只有 `ctime`（unix 秒）。参考项目也是自己算的
+  （`CommentItemControl.xaml:97-104` 绑的是 `RelativeTime`，绝对时间只进 ToolTip）。

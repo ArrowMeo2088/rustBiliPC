@@ -173,9 +173,16 @@ pub const BADGE_PADDING_X: f32 = 4.;
 /// 那边写的是 `Width/Height=48` + `CornerRadius="24"` + `DecodeWidth="100"`
 /// ——即"直径即圆角"，而且**取图按 2× 边长要**（48 的头像解 100 宽），
 /// 所以 [`avatar`](crate::ui::layout::avatar) 直接圆角=尺寸/2、向图床要 2× 设备像素。
-/// 评论区还要一个 40（`CommentItemControl.xaml:41-46`），等做评论区时再补，不留用不到的常量。
 pub const AVATAR_UP: f32 = 44.;
 pub const AVATAR_ACCOUNT: f32 = 48.;
+
+/// 评论区一行的度量（`CommentItemControl.xaml:21-46`）：
+/// 整行是 `Margin="0,0,0,4"` + `Padding="12"` + 卡片底 + 1px 同色描边 + `ControlCornerRadius`，
+/// 头像与文字列的列距 12，头像 **40**（`CornerRadius="20"`、`DecodeWidth="80"`）。
+pub const AVATAR_COMMENT: f32 = 40.;
+pub const COMMENT_ROW_GAP: f32 = 4.;
+pub const COMMENT_ROW_PADDING: f32 = 12.;
+pub const COMMENT_COLUMN_GAP: f32 = 12.;
 
 /// 分 P / 侧栏列表项的行高与内边距（`VideoPartsSection.xaml:18-21`：`MinHeight 40`、`12,8`、
 /// 列距 8，每行都带卡片底色 `CardBackgroundFillColorDefaultBrush`）。

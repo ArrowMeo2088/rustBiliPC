@@ -9,7 +9,7 @@ Direct3D11 + DirectComposition + DirectWrite 原生绘制；视频播放交给�
 | 方面 | 选择 |
 | --- | --- |
 | 界面 | `gpui-kit 0.8.0`（umbrella，内含 gpui-component 0.8.0 组件层），实际 gpui 快照 `gpui-pre =0.3.9` |
-| 接口 | `bpi-rs 0.3.1`，关闭默认 `full`，只开 login/search/video/user/fav/historytoview/misc |
+| 接口 | `bpi-rs 0.3.1`，关闭默认 `full`，只开 login/search/video/user/fav/historytoview/misc/comment |
 | 登录 | 扫码登录为主，凭据明文存 `<exe 同目录>/data/cookies.json`，下次启动自动复用 |
 | 播放 | 把 DASH 直链 URL 交给外部 mpv **在线流式播**（不下整片），独立窗口。**播放期的一切（进度条/时间/暂停/音量/全屏/字幕显示）都归 mpv 自带的 OSC，本项目不做**；我们只做播放之外（见下一行） |
 | 范围 | rustBiliPC 负责：主页/热门、搜索、个人中心、视频详情、评论区、分集分P 的呈现、清晰度选择、字幕列表与投递、拉起并观测 mpv。不负责：播放器界面本身 |

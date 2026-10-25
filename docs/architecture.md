@@ -21,7 +21,7 @@ Bilibili 桌面客户端（Windows x64），功能顺序 **搜索 → 个人 →
 | UI 框架 | `gpui-kit = "0.8.0"`（umbrella，`default = ["component","assets"]`） | 60+ 组件、Lucide 图标、JSON 主题令牌；实测默认 features **不含 webview** |
 | gpui 实际版本 | `gpui-pre = "=0.3.9"`（Zed@93d7456 的重发布快照），由 kit 携带精确 pin | 0.2.2 与 0.3.x 的 `App/Window/Entity` 类型互不兼容，不能混 |
 | 放弃 | `ref/gpui-component`（0.2.2）与 Ely 作依赖 | 分别因为：拉 tree-sitter + `lb-wry`（WebView2）且与 0.3.9 类型不兼容；`publish=false` 只能 git 依赖 + Rust 1.95 |
-| API | `bpi-rs = "0.3.1"`，`default-features = false` + 6 个 feature | 关掉 `full` 的 27 个模块，只开 login/search/video/user/fav/historytoview |
+| API | `bpi-rs = "0.3.1"`，`default-features = false` + 8 个 feature | 关掉 `full` 的 27 个模块，只开 login/search/video/user/fav/historytoview/misc/comment（最后一个是 P6b 评论区；它在 bpi-rs 里写作 `comment = []`，纯 cfg 开关、不引入新 crate） |
 | 异步 | 自建 tokio runtime（`src/app.rs`） | gpui 执行器不是 tokio，reqwest 需要 reactor |
 | 编译配置 | **release**，`lto = "off"`、`strip = false`、`debug = true` | 见下节 |
 | 依赖锁定 | **提交 `Cargo.lock`** 作为版本种子，CI **不加** `--locked` | 挡住 gpui-pre 每周快照的破坏性变更；本机无 cargo，加 `--locked` 会让任何新增依赖直接卡死 CI |
@@ -81,6 +81,7 @@ src/
 │   ├── detail.rs      视频详情：view() 主体 + desc()/tags()/related_videos() 三块各自容错 + 字幕列表
 │   ├── favorites.rs   收藏夹：fav().created_list() + collected_list()，合并成一个 DTO
 │   ├── history.rs     观看历史：historytoview().history_list()（游标分页）+ 秒数格式化纯函数
+│   ├── comments.rs    评论区：comment().list()（type=1、oid=aid、ps≤20）+ 相对时间与翻页判断纯函数
 │   ├── home.rs        主页：video().homepage_recommendations()（WBI 由库里签）+ **按 goto 过滤**
 │   ├── search.rs      搜索封装：DTO（SearchHit/PageInfo/SearchSort）+ 标签清洗 + 播放量格式化
 │   ├── stream.rs      播控：video().play_url() 取地址 + 选流成 StreamChoice（DASH 双流 / durl 单文件）
@@ -97,7 +98,7 @@ src/
 │   ├── home/          主页（P6 第一步，默认页）：首页推荐流网格 + "换一批"，懒加载与序号让位同个人中心
 │   ├── login/         扫码登录页（二维码 + 1.5s 轮询 + 过期自动重载）
 │   ├── mine/          个人中心页（资料 + 收藏夹 + 历史，三路并发各自显示错误；懒加载）
-│   ├── detail/        详情页（主列信息 + 右栏 360 选集与相关推荐；持 mpv 子进程并在 Drop 时收掉）
+│   ├── detail/        详情页（主列信息 + 播放块 + 字幕 + 评论区；右栏 360 选集与相关推荐；持 mpv 子进程并在 Drop 时收掉）
 │   └── search/        阶段一页面（view.rs 为根视图）
 ├── ui/
 │   ├── palette.rs     **颜色与度量的唯一出处**：把 Bili.Copilot 的 WinUI 主题键与 xaml 数字翻译成 gpui 的值
@@ -593,6 +594,37 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 - **卡片第三格给"推荐理由"**：`rcmd_reason.content`（B 站的 0 无 / 1 已关注 / 3 高点赞量）
   填进 `VideoCardData.extra`，空串时那一格自动不出现（`video_card` 里用 `when` 控制）。
 
+### 4.17 评论区（P6b）：挂在主列最下面，翻页失败不许把已读到的评论抹掉
+
+接口证据在 `docs/api-notes.md` 第 11 节，这里记结构性决定。
+
+- **为什么在详情页里、而不是单独一页**：评论区的 `oid` 是 **aid**，必须先有主体响应才有它
+  （`api/comments.rs` 文件头），所以它的生命周期天然属于详情页；参考项目把它做成播放器窗口左侧的
+  页签（`VideoPlayerPanel`），而页签控件在 gpui 侧没有等价物，我们把它排成主列最下面的一节。
+- **它排在字幕之后**：`content()` 的最后一节是"评论 · 第 N 页"，顺序是
+  信息 → 播放块 → 标签/简介 → 字幕 → 评论（"读完简介往下翻"的自然位置）。
+- **类型代码 1 不是 11**：`bilibili-API-collect` 的类型代码表里 **1=视频、11=相簿、12=专栏、17=动态**，
+  网上大量帖子把"视频"写成 11 是混了编号；bpi-rs 自己的 `CommentType::Video = 1`
+  （`src/comment/action.rs:22-27`）和它 live 测试用的 `TEST_TYPE = 1`（`src/comment/list.rs:322`）
+  相互印证。写错的症状是"评论永远是空的"而不是报错，所以钉了单测
+  `video_comment_target_type_is_one`（另见风险表第 19 条）。
+- **每页 20 条是库的上限**：`with_page_size` 把 `ps` 卡在 1–20（`src/comment/list.rs:94-101`，
+  接口本身允许到 49）。
+- **"还有下一页"有两种口径**：有 `page.count` 就按总数算；没给（那一层是 `Option`）就退成
+  "这一页取满了 20 条就认为还有"。两者都写在 `CommentPage::has_more` 里并进单测——
+  按钮点下去没反应比转圈更难查。
+- **时间只做减法**：接口只有 `ctime`（unix 秒），相对时间（"3天前"）与时区无关，
+  所以既不引 `chrono`、也不手搓公历换算；参考项目显示的也是 `RelativeTime`
+  （`CommentItemControl.xaml:97-104`），绝对时间只进 ToolTip。
+  `relative_time(ctime, now)` 收两个参数就是为了单测，读时钟只发生在 `fetch_comments` 里。
+- **失败保留旧内容**：翻页或换排序失败时，`comment` 里还是上一批，提示行按错误色显示；
+  只有首批失败或"这条稿件没有评论"才只剩一行说明。
+- **一行评论的度量**：整行卡片底 + 1px **同色**描边、`Padding=12`、头像列与文字列距 12、
+  头像 **40**（`CornerRadius=20`、`DecodeWidth=80`）、行距 8、行间 `Margin=0,0,0,4`
+  （`CommentItemControl.xaml:21-46` 与 `:76-118`）。昵称走 SEMIBOLD（那边写的是 `FontWeight=Bold`）。
+- **没接的东西**：楼中楼展开（`comment().replies()`，证据在 api-notes 第 11 节末尾）、
+  点赞与发评论（要 csrf，且属于写操作）。展开子回复要先定"插在哪"这个结构问题，不在这一轮顺手加。
+
 ## 5. 阶段进度
 
 
@@ -607,7 +639,7 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | P4b | 曾按"遥控"理解做过一版（连管道、订阅属性、进度行、暂停/±10 秒）——第二十三轮 57 passed 全绿，但**方向错了**：播放期 UI 归 mpv。已按范围删净，机制留在第 4.14 节 |
 | P5 | 视觉：照 `ref/Bili.Copilot` 的度量重做（色板/字号层级/卡片 232×238/网格/页头 56 + 侧栏 240/右栏 360/hover 换底色） | **完成**（他真机看过说"没什么问题"，唯一剩下的是右上角搜索框——根因是 kit 一直用亮色主题，第二十六轮已修，第 4.15 节最后两条） |
 | P6a | 主页：首页推荐流当默认页 + "换一批"（第 4.16 节） | **编译与测试已绿**（第二十七轮 43 passed、零 Rust warning，产物 `dd2bf73`）；待真机看：能不能"换一批"、`goto` 过滤后有没有内容 |
-| P6b | 评论区（列表 + 分页） | 未开始 |
+| P6b | 评论区（顶层列表 + 翻页 + 最热/最新） | 代码完成，等编译与真机（第 4.17 节；接口口径核在 api-notes 第 11 节） |
 | P6c | 字幕 `sub-add`、换清晰度保住窗口与进度（要恢复第 4.14 节那套管道） | 未开始 |
 
 ## 6. 已知风险与待验证
@@ -632,6 +664,7 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | 16 | gpui 没有 Acrylic/Mica、没有 ItemContainer 选中视觉、没有图标字库 | 用纯色 + 1px 描边 + 圆角 + 字号差 + 三档灰表达层级；图标暂时用文字（参考项目自己也用"弹"字），需要成套图标时再自绘 SVG 走 asset |
 | 17 | **主页载荷是严格结构**：`RcmdItem` 除四个 `Option` 外没有 `#[serde(default)]`，外层 `preload_expose_pct` 等也必填，B 站少给任一字段就整批 `BpiError::parse` | 症状可控：主页那一块显示原因文本、其余页不受影响（第 4.16 节）。真机若出现"主页永远失败"，先失败在哪个字段——日志里有原始错误文本，据此在 `api/home.rs` 里改成自己解析 `Value`（bpi-rs 那条 `popular_list` 用 Value 就是同一原因的产物） |
 | 18 | `fresh_idx`/`fetch_row` 的递增口径**没有官方文档**（bpi-rs 只把两者原样发出去） | 真机验证"换一批"是否真换出不同内容；不换就改成只递增 `fresh_idx`、`fetch_row` 恒为 1，再不行就换 `video_ranking().popular_list()` 那条热门接口 |
+| 19 | 评论区类型代码如果写错（**11 是相簿、1 才是视频**），症状是"评论永远是空的"而不报错；另外 `Comment`/`Member` 全是必填字段，少给任一就 `BpiError::parse` | 类型代码钉成常量 + 单测 `video_comment_target_type_is_one`（值来自 bpi-rs 的 `CommentType::Video = 1` 与它的 live 测试，见 api-notes 第 11 节）；解析失败只砸在评论区那一块，原因写在提示位，详情页其余部分照常 |
 
 ## 7. 维护规则
 

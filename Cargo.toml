@@ -24,6 +24,10 @@ bpi-rs = { version = "0.3.1", default-features = false, features = [
     "fav",
     "historytoview",
     "misc",
+    # 详情页的评论区（`comment().list()`）。这个 feature 在 bpi-rs 里是 `comment = []`
+    # （`ref/bpi-rs/Cargo.toml:54`）——纯 cfg 开关，不拉任何新 crate，
+    # 所以 Cargo.lock 理论上**一字不变**；CI 回来的那份要拿 diff 核一遍。
+    "comment",
 ] }
 
 # bpi-rs 基于 reqwest，poll 其 future 必须在有 tokio reactor 的环境里进行；
