@@ -35,6 +35,8 @@ use gpui_kit::BackgroundExecutor;
 use crate::player::{BILIBILI_REFERER, MPV_USER_AGENT};
 use crate::store::auth::Auth;
 
+use super::stream::StreamChoice;
+
 /// 单个地址的探测超时（含连接与首字节）。
 ///
 /// 6 秒太宽容：真不通的节点会让人干等。四秒 + 最多三个候选 = 一条轨最坏 12 秒，
