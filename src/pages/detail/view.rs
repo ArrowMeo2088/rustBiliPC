@@ -574,36 +574,21 @@ impl DetailPage {
         let Some(plan) = self.plan.clone() else { return };
         let http = cx.http_client();
         // `.clone()` 不是多余：`background_executor()` 拿到的那个句柄**借的是 `cx`**，
-        // 直接存进局部变量就会一路占着这个不可变借东西（下一行 `cx.notify()` 立刻 E0502，
+        // 直接存进局部变量就会一路占着这个不可变借用（下一行 `cx.notify()` 立刻 E0502，
         // 而 `cx.spawn` 要求 future 是 `'static`，接着还吃一发 E0521 —— 第四十四轮 CI 三条错都是它）。
         // 克隆出来那份是 owning 的轻句柄，与 `cx` 的借用就此脱钩。
         let executor = cx.background_executor().clone();
         let headers = probe::cdn_headers();
-        let video_urls = probe::ordered_urls(&plan.video_url, &plan.backup_urls);
-        let audio_urls = plan
-            .audio_url
-            .as_ref()
-            .map(|url| probe::ordered_urls(url, &plan.audio_backup_urls));
         self.probe_seq += 1;
         let seq = self.probe_seq;
         self.player_note = "探测 CDN 地址…".into();
         cx.notify();
 
         cx.spawn(async move |this, cx| {
-            let video = probe::probe_track(
-                Arc::clone(&http),
-                video_urls,
-                headers.clone(),
-                executor.clone(),
-            )
-            .await;
-            let audio = match audio_urls {
-                Some(urls) => Some(
-                    probe::probe_track(Arc::clone(&http), urls, headers.clone(), executor.clone())
-                        .await,
-                ),
-                None => None,
-            };
+            // 音视频**并行探**（`probe_plan` 里做的是 `join`）：串行等于把两个 RTT 加起来，
+            // 而那两件事毫无依赖关系。
+            let (video, audio) =
+                probe::probe_plan(Arc::clone(&http), &plan, headers.clone(), executor.clone()).await;
             log::debug!(
                 "详情页：CDN 探测完成 视频={} 音频={:?}",
                 video.attempted,

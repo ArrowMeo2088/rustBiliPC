@@ -37,7 +37,9 @@ bpi-rs = { version = "0.3.1", default-features = false, features = [
 # gpui 的执行器不是 tokio，所以我们在 src/app.rs 里自建 runtime 并做桥接。
 # 这里曾有 "net"（为 mpv 命名管道客户端 `tokio::net::windows::named_pipe`），
 # 那套"在客户端里显示播放进度/做暂停"的东西按范围划掉删干净了，见 src/player/mod.rs 文件头。
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+# 也曾有 "macros"：那是给 `#[tokio::main]`/`#[tokio::test]` 用的，我们两个都没用
+# （runtime 是 `OnceLock` 手建的，测试是普通 `#[test]`），少一个 proc-macro 依赖就少一段编译。
+tokio = { version = "1", features = ["rt-multi-thread", "time", "sync"] }
 # 下载要把 HTTP 响应体**当流读**（一次一块，边读边写盘），这需要 `futures::AsyncReadExt`。
 # gpui 自己的图片加载器就是这条读法（`ref/gpui/gpui/src/elements/img.rs:637-645`：
 # `use futures::AsyncReadExt as _;` + `response.body_mut().read_to_end(..)`），

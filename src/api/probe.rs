@@ -36,7 +36,17 @@ use crate::player::{BILIBILI_REFERER, MPV_USER_AGENT};
 use crate::store::auth::Auth;
 
 /// 单个地址的探测超时（含连接与首字节）。
-pub const PROBE_TIMEOUT: Duration = Duration::from_millis(6000);
+///
+/// 6 秒太宽容：真不通的节点会让人干等。四秒 + 最多三个候选 = 一条轨最坏 12 秒，
+/// 而且**音视频两轨是并行探的**（见 [`probe_plan`]），happy path 就是一个 RTT。
+pub const PROBE_TIMEOUT: Duration = Duration::from_millis(4000);
+
+/// 一条轨最多探几个候选地址（主地址 + 这么多备用域名）。
+///
+/// B 站一般给 2–3 个。全探一遍的收益递减、代价是线性叠加的等待，
+/// 所以到上限就停：**剩下的地址仍然会交给 mpv 自己重试**（它内部有重试），
+/// 我们只是不再替它提前问。
+pub const MAX_PROBE_CANDIDATES: usize = 3;
 
 /// 一条轨的候选地址：主地址在前，B 站给的 `backupUrl` 按原顺序跟在后面。
 ///
@@ -172,8 +182,10 @@ pub async fn probe_track(
     headers: Vec<(String, String)>,
     executor: BackgroundExecutor,
 ) -> ProbeOutcome {
-    let mut results: Vec<(String, Result<u16, String>)> = Vec::with_capacity(urls.len());
-    for url in urls {
+    let mut results: Vec<(String, Result<u16, String>)> = Vec::new();
+    // 到 [`MAX_PROBE_CANDIDATES`] 就不问了：剩下的地址 mpv 自己会重试，
+    // 我们只是不再替它提前一个个问（每个不通的地址都要付一整段超时）。
+    for url in urls.into_iter().take(MAX_PROBE_CANDIDATES) {
         let outcome = probe_one(&http, &url, &headers, &executor).await;
         let playable = matches!(&outcome, Ok(status) if is_playable_status(*status));
         results.push((url, outcome));
@@ -182,6 +194,40 @@ pub async fn probe_track(
         }
     }
     choose(&results)
+}
+
+/// 一次把**两轨都探完**，两条并行等。
+///
+/// 为什么要并行：串行就是"视频的 RTT + 音频的 RTT"，而这两件事毫无依赖关系——
+/// 起播按钮点下去多等两百毫秒是能感觉到的。
+/// `plan.audio_url` 是 `None`（durl 单文件）时返回 `None` 而**不是**一个空结果：
+/// 上层要分得清"这条轨不存在"与"探了一圈没探出来"。
+pub async fn probe_plan(
+    http: Arc<dyn HttpClient>,
+    plan: &StreamChoice,
+    headers: Vec<(String, String)>,
+    executor: BackgroundExecutor,
+) -> (ProbeOutcome, Option<ProbeOutcome>) {
+    use futures::future::Either;
+
+    let video = probe_track(
+        Arc::clone(&http),
+        ordered_urls(&plan.video_url, &plan.backup_urls),
+        headers.clone(),
+        executor.clone(),
+    );
+    let audio = match plan.audio_url.as_ref() {
+        // 两条分支的输出类型必须一致（`Either` 要求 `B: Future<Output = A::Output>`），
+        // 所以探的那一支也包成 `Option`。
+        Some(url) => Either::Left(async move {
+            Some(probe_track(http, ordered_urls(url, &plan.audio_backup_urls), headers, executor).await)
+        }),
+        None => Either::Right(async move { None }),
+    };
+    // `Either` 在这里不是为了好看：`join` 要求两个 future 都摆在那儿，
+    // 而"没有音频轨"这一支压根不该发请求。
+    let (video, audio) = futures::future::join(video, audio).await;
+    (video, audio)
 }
 
 /// 发一个 `Range: bytes=0-0` 的 GET，只看状态码，响应体立刻丢掉。

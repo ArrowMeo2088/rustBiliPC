@@ -57,6 +57,14 @@ pub struct AboutPage {
     save_note: SharedString,
     /// 选 mpv 那条路上"对话框已经弹出去、还没回来"的提示。
     pick_state: SharedString,
+    /// **缓存下来的 mpv 解析结果**（`Some` = 找到的文件，`None` = 没找到），
+    /// 由 [`refresh_mpv_status`](Self::refresh_mpv_status) 填。
+    ///
+    /// 为什么不直接在 `render` 里调 `player::find_mpv()`：那个函数要读 `PATH` 再对每个目录
+    /// `is_file()` 一次，而 `render` 是**每帧**都跑的（按住拖动滚动时每帧一次）。
+    /// 把一轮磁盘扫描挂在重绘上，症状是"设置页拖起来发涩"，而且这台机的 PATH 里有网络盘时更明显。
+    /// 所以只在"进页 / 改过 mpv 相关设置"这两种真需要重算的时候刷新。
+    mpv_found: Option<std::path::PathBuf>,
     seq: u32,
     loaded: bool,
 }
@@ -72,6 +80,7 @@ impl AboutPage {
             note: "".into(),
             save_note: "".into(),
             pick_state: "".into(),
+            mpv_found: None,
             seq: 0,
             loaded: false,
         }
@@ -82,11 +91,17 @@ impl AboutPage {
         self.mid_raw = mid_raw;
     }
 
+    /// 重算一次 mpv 的位置并缓存。见 `mpv_found` 那条注释：**这是全页唯一做磁盘扫描的地方**。
+    fn refresh_mpv_status(&mut self) {
+        self.mpv_found = crate::player::find_mpv();
+    }
+
     /// 第一次被看到时取一次账户资料。
     pub fn ensure_loaded(&mut self, cx: &mut Context<Self>) {
         if self.loaded {
             return;
         }
+        self.refresh_mpv_status();
         self.reload(cx);
     }
 
@@ -120,6 +135,9 @@ impl AboutPage {
 
     /// 改一项设置并写盘。失败把原因写进 `save_note`（不静默）。
     fn set(&mut self, description: String, change: impl FnOnce(&mut config::Config), cx: &mut Context<Self>) {
+        // 四项里只有 mpv 那项会改变解析结果，但重算一次只是一轮 `PATH` 扫描、
+        // 而且是**点一下按钮**才做一次（不是每帧），所以这里一律重算，省得区分哪项影响哪项。
+        self.refresh_mpv_status();
         match crate::app::update_config(change) {
             Ok(path) => {
                 self.save_note =
@@ -321,14 +339,13 @@ impl AboutPage {
         ]));
 
         // —— MPV 播放器位置 ——
-        let resolved = crate::player::find_mpv();
         let specified = !config.mpv_path.trim().is_empty();
         let current = if specified {
             config.mpv_path.clone()
         } else {
             "自动：PATH → 运行目录".to_string()
         };
-        let resolved_text = match resolved.as_ref() {
+        let resolved_text = match self.mpv_found.as_ref() {
             Some(path) => format!("当前实际使用：{}", path.display()),
             None => format!(
                 "没找到 {}：把它放进 PATH，或用下面的「选择…」指给程序",
@@ -394,7 +411,7 @@ impl AboutPage {
             ),
             Self::button_row(debug_buttons),
             Self::option_hint(
-                "下一次启动才生效：要不要创建日志文件、要不要输出日志都在启动时决定，运行中不能改。关闭时不创建 debug.log，也不做任何日志输出；程序在 Windows 上是 GUI 子系统，两种模式下双击都不会弹控制台窗口。"
+                "下一次启动才生效：要不要创建日志文件、要不要输出日志都在启动时决定，运行中不能改。关闭时不创建 debug.log，也不做任何日志输出；程序在 Windows 上是 GUI 子系统，两种模式下双击都不会弹控制台窗口。崩溃记录（crash.log）不受这一项影响，永远会写。"
                     .to_string(),
             ),
         ]));
@@ -418,6 +435,10 @@ impl AboutPage {
             ("凭据文件".to_string(), Auth::path().display().to_string()),
             ("配置文件".to_string(), config::Config::path().display().to_string()),
             ("日志文件".to_string(), log_line),
+            (
+                "崩溃记录".to_string(),
+                crate::logging::crash_log_path().display().to_string(),
+            ),
             (
                 "程序目录".to_string(),
                 crate::app::exe_dir().display().to_string(),

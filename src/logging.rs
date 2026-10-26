@@ -1,12 +1,15 @@
 //! 文件日志：写 `%APPDATA%/ArrowMeo/rustBiliPC/debug.log`，每次启动清空重写，级别 debug。
 //!
-//! ## 它现在是可关的（P13）
+//! ## 它现在是可关的（P13），但崩溃那份不可关
 //!
 //! 设置页新增"调试模式"，默认**关**。关掉时 [`init`] 不建文件、不装 logger，
 //! 于是全项目那些 `log::info!/debug!/warn!` 都是空转（`log` 门面在没装 logger 时直接丢弃记录）。
-//! 两条必须记住的连带事实：
-//! 1. **exe 现在是 GUI 子系统**（`main.rs` 上的 `#![windows_subsystem = "windows"]`），
-//!    双击不再弹那个黑色控制台窗口——它与调试模式无关，两种模式下都没有控制台。
+//! **唯一的例外是 [`install_panic_hook`] 写的 `crash.log`：它永远写、且追加不清空。**
+//! 理由写在那个函数上——exe 现在是 GUI 子系统，panic 只打 stderr，而那份 stderr 没人看得见。
+//!
+//! 其余两条必须记住的连带事实：
+//! 1. exe 现在是 GUI 子系统（`main.rs` 上的 `#![windows_subsystem = "windows"]`），
+//!    双击不弹那个黑色控制台窗口——它与调试模式无关，两种模式下都没有控制台。
 //!    想要"调试时弹控制台"得另外做 `AttachConsole`，那没做。
 //! 2. 配置**坏了**时（`config.json` 读不出来）这一轮会**强制开日志**：
 //!    调试模式就写在那个坏文件里，不开日志他就既看不到错误也没法打开它。
@@ -38,10 +41,72 @@ static LOG_PATH: OnceLock<PathBuf> = OnceLock::new();
 
 /// 日志文件名（放在 [`log_dir`] 里）。
 pub const FILE_NAME: &str = "debug.log";
+/// **崩溃记录**文件名：与"调试模式"无关，永远写（见 [`install_panic_hook`]）。
+pub const CRASH_FILE_NAME: &str = "crash.log";
+/// `crash.log` 的大小上限；超了就在写之前重新开一份（崩溃档案要能跨启动对比，但不能长到天边）。
+const CRASH_MAX_BYTES: u64 = 256 * 1024;
 
 /// 日志目录：`%APPDATA%/ArrowMeo/rustBiliPC`（与 `auth.json`、`config.json` 同一处）。
 fn log_dir() -> PathBuf {
     crate::app::settings_dir()
+}
+
+/// `crash.log` 的路径（**不管调试模式开不开都会写到这里**）。
+pub fn crash_log_path() -> PathBuf {
+    log_dir().join(CRASH_FILE_NAME)
+}
+
+/// 装 panic 钩子：把崩溃现场写进 `crash.log`（并顺带写一份常规日志与 stderr）。
+///
+/// **为什么这一条与"调试模式"无关**：P13 把 exe 改成 GUI 子系统之后，
+/// panic 默认只往 stderr 打一份，而 GUI 程序的 stderr **没有人看**——
+/// 表现就是"双击没反应/用着用着窗口自己没了，且什么痕迹都不留"。
+/// 那比"没有运行日志"严重得多：运行日志是排查用的，崩溃现场是**唯一**能说明"为什么退了"的东西。
+/// 所以它单独开一份文件，永远写，且**追加而不清空**（跨启动能对比）。
+///
+/// 钩子里不能再用会 panic 的东西：`log::error!` 走的是我们的 `FileLogger`，
+/// 那里所有写盘失败都被吞掉、锁中毒走 `if let Ok`（不 unwrap），所以不会二次 panic 或死锁。
+pub fn install_panic_hook() {
+    std::panic::set_hook(Box::new(|info| {
+        let location = info
+            .location()
+            .map(|where_| format!("{}:{}:{}", where_.file(), where_.line(), where_.column()))
+            .unwrap_or_else(|| "位置未知".to_string());
+        let payload = info
+            .payload()
+            .downcast_ref::<&str>()
+            .map(|text| (*text).to_string())
+            .or_else(|| info.payload().downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "（panic 没带消息）".to_string());
+        let line = format!("{} PANIC {location}: {payload}\n", timestamp());
+
+        log::error!("程序 panic（{location}）: {payload}");
+        let _ = std::io::stderr().write_all(line.as_bytes());
+
+        let path = crash_log_path();
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        // 太长就重来一份，但重来之前先留一行"上面被截断了"，别让对比的人以为只有这几条。
+        let truncate = std::fs::metadata(&path).map(|meta| meta.len() > CRASH_MAX_BYTES).unwrap_or(false);
+        let opened = if truncate {
+            std::fs::OpenOptions::new()
+                .create(true)
+                .write(true)
+                .truncate(true)
+                .open(&path)
+                .and_then(|mut file| {
+                    file.write_all(format!("{} （上一段超过 {CRASH_MAX_BYTES} 字节，已重新开始）\n", timestamp()).as_bytes())?;
+                    Ok(file)
+                })
+        } else {
+            std::fs::OpenOptions::new().create(true).append(true).open(&path)
+        };
+        if let Ok(mut file) = opened {
+            let _ = file.write_all(line.as_bytes());
+            let _ = file.flush();
+        }
+    }));
 }
 
 /// 本次启动**实际**写出来的日志文件路径。

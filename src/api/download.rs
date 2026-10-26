@@ -281,8 +281,10 @@ async fn run(
 
 /// 写一条轨：按顺序试每个地址，成功就改名成成品。
 ///
-/// 换地址时**已写的字节不计入总数**（见 `attempt` 返回的 `Ok(bytes)` 用法），
-/// 所以进度不会因为一个失败地址吐了几 MB 垃圾就一路虚高。
+/// `done` 是"已经算进进度的字节"，**包含换地址时丢掉的那一段**：
+/// 分母是整个文件的大小，如果丢掉的不计进去，一个 900 MB 的地址在下到 40% 时失败，
+/// 进度就会从 36% 一路掉回 0% 再往上爬 —— 那看起来像"下载逻辑坏了"，其实是口径没定对。
+/// 丢掉的那段确实没留在磁盘上，所以日志里另外写了一句"其中 N 字节是换地址前下的"。
 async fn pull_track(
     client: &Arc<dyn HttpClient>,
     track: &Track,
@@ -300,19 +302,23 @@ async fn pull_track(
                 *done = base + bytes;
                 return Ok(());
             }
-            // 取消是全局意图，不换域名、不重试。
-            Err(Stop::Cancelled) => {
-                let _ = sender.send(DownloadEvent::Progress { done: base });
+            // 取消是全局意图，不换域名、不重试；那一段字节已经不计了（任务本身就废了）。
+            Err(AttemptStop::Cancelled { bytes }) => {
+                *done = base + bytes;
+                let _ = sender.send(DownloadEvent::Progress { done: *done });
                 return Err(Stop::Cancelled);
             }
-            Err(Stop::Failed(message)) => {
+            Err(AttemptStop::Failed { message, bytes }) => {
+                // 只写**主机名**：完整直链里带着 `deadline`/`gen` 这些签名参数，
+                // 谁拿到日志就能在有效期内替他把这条流下走。日志要能定位问题不假，
+                // 但没有理由把可用凭证写进一个会被发回来的文件（`probe::host_of` 同一条口径）。
+                *done = base + bytes;
                 log::warn!(
-                    "下载：{}轨的这个地址失败，换下一个（{:?}）：{}",
+                    "下载：{}轨的这个地址失败，换下一个（{}）：{message}（丢弃 {bytes} 字节，进度里仍算已下）",
                     track.label,
-                    url,
-                    message
+                    super::probe::host_of(url),
                 );
-                let _ = sender.send(DownloadEvent::Progress { done: base });
+                let _ = sender.send(DownloadEvent::Progress { done: *done });
                 last_error = message;
             }
         }
@@ -324,6 +330,12 @@ async fn pull_track(
     )))
 }
 
+/// 一次"用一个地址试"的失败形状：除了原因，还要带回**已经下到手的字节数**。
+enum AttemptStop {
+    Cancelled { bytes: u64 },
+    Failed { message: String, bytes: u64 },
+}
+
 /// 用**一个**地址把一条轨写到 `.part` 再改名，返回这次写的字节数。
 async fn attempt(
     client: &Arc<dyn HttpClient>,
@@ -333,7 +345,7 @@ async fn attempt(
     cancel: &AtomicBool,
     sender: &tokio::sync::mpsc::UnboundedSender<DownloadEvent>,
     base: u64,
-) -> Result<u64, Stop> {
+) -> Result<u64, AttemptStop> {
     let request = Builder::new()
         .uri(url)
         .follow_redirects(RedirectPolicy::FollowAll)
@@ -347,21 +359,23 @@ async fn attempt(
             builder.header(name.as_str(), value.as_str())
         })
         .body(AsyncBody::empty())
-        .map_err(|error| Stop::Failed(format!("请求拼不出来: {error}")))?;
+        .map_err(|error| AttemptStop::Failed { message: format!("请求拼不出来: {error}"), bytes: 0 })?;
 
     let mut response = client
         .send(request)
         .await
-        .map_err(|error| Stop::Failed(format!("请求失败: {error}")))?;
+        .map_err(|error| AttemptStop::Failed { message: format!("请求失败: {error}"), bytes: 0 })?;
     // `Response::status()` 返回的是 `StatusCode` 本身（它 `Copy`），不是引用：
     // 先拿走状态码再看响应体，后面 `body_mut()` 要独占这个响应。
     let status = response.status();
     if !status.is_success() {
-        return Err(Stop::Failed(format!("HTTP {status}")));
+        return Err(AttemptStop::Failed { message: format!("HTTP {status}"), bytes: 0 });
     }
 
-    let file = std::fs::File::create(&track.part_path)
-        .map_err(|error| Stop::Failed(format!("建临时文件失败: {error}")))?;
+    let file = std::fs::File::create(&track.part_path).map_err(|error| AttemptStop::Failed {
+        message: format!("建临时文件失败: {error}"),
+        bytes: 0,
+    })?;
     let mut writer = BufWriter::with_capacity(1024 * 1024, file);
     let mut buffer = vec![0u8; CHUNK_SIZE];
     // `body` 本身是 `&mut AsyncBody`，方法调用时会自己再借用，所以这里不需要 `mut`。
@@ -372,18 +386,24 @@ async fn attempt(
     loop {
         if cancel.load(Ordering::Relaxed) {
             let _ = writer.flush();
-            return Err(Stop::Cancelled);
+            return Err(AttemptStop::Cancelled { bytes: written });
         }
         let read = body
             .read(&mut buffer)
             .await
-            .map_err(|error| Stop::Failed(format!("读流失败: {error}")))?;
+            .map_err(|error| AttemptStop::Failed {
+                message: format!("读流失败: {error}"),
+                bytes: written,
+            })?;
         if read == 0 {
             break;
         }
         writer
             .write_all(&buffer[..read])
-            .map_err(|error| Stop::Failed(format!("写盘失败: {error}")))?;
+            .map_err(|error| AttemptStop::Failed {
+                message: format!("写盘失败: {error}"),
+                bytes: written,
+            })?;
         written += read as u64;
         since_report += read as u64;
         if since_report >= REPORT_STEP {
@@ -396,10 +416,12 @@ async fn attempt(
 
     writer
         .flush()
-        .map_err(|error| Stop::Failed(format!("落盘失败: {error}")))?;
+        .map_err(|error| AttemptStop::Failed { message: format!("落盘失败: {error}"), bytes: written })?;
     // 只有整条轨读完了才改名：这一步之后文件在磁盘上就是"下好的"。
-    std::fs::rename(&track.part_path, &track.path)
-        .map_err(|error| Stop::Failed(format!("改名成成品失败: {error}")))?;
+    std::fs::rename(&track.part_path, &track.path).map_err(|error| AttemptStop::Failed {
+        message: format!("改名成成品失败: {error}"),
+        bytes: written,
+    })?;
     Ok(written)
 }
 

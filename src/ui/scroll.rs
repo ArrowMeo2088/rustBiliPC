@@ -101,15 +101,25 @@ pub fn is_at_bottom(offset: f32, max: f32, margin: f32) -> bool {
     max - offset.abs() <= margin
 }
 
+/// 自动翻页提前量之外，还有一条**总量**闸：列表里已经有这么多条就不再自动接下一页。
+///
+/// 为什么要有这条：gpui 的 div 列表**没有虚拟化**（`List`/`ListState` 才有，我们没用），
+/// 每一张卡片都是要布局与绘制的真元素。自动翻页把列表推到四五百条时，
+/// "拖动滚动"就会从"跟手"变成"糊"——症状看起来像渲染 bug，其实是我们自己堆出来的。
+/// 到顶之后**手动那颗"加载更多/下一页"按钮照样能点**（那是用户明确要更长列表的意思），
+/// 只是不再由滚动自动续。真要给长列表做虚拟化，那是另一次改造（见风险表第 32 条）。
+pub const AUTO_PAGE_MAX_ITEMS: usize = 240;
+
 /// 自动连续翻页的判据（各列表页在自己的 `render` 里问一句，见 `should_auto_page` 的调用点）。
 ///
-/// 四条都得过，缺一条就会出现"看起来在滚但一直在发请求"：
+/// 五条都得过，缺一条就会出现"看起来在滚但一直在发请求"：
 /// 1. `has_more`：接口说还有下一页（历史那种"没拿到新游标就停"也归这条）；
 /// 2. `items > 0`：空列表时的"到底"是**还没加载**，不是滚到底了，翻页只会原地打转；
 /// 3. `!loading`：**没有在途请求**。少了这条，一帧渲染就能连发五个下一页（请求回来又触发下一帧），
 ///    而游标类分页（历史、图文）在途期间游标还没更新，发的其实是同一个请求；
 /// 4. `scroll.scrollable()`：内容比视口短时 [`is_at_bottom`] 按定义给 `true`（零行程），
 ///    可那种列表本来就没必要翻页 —— 这一条也顺手挡住了"打开页面就自动捞三页"。
+/// 5. `items < AUTO_PAGE_MAX_ITEMS`：见上面那条常量的理由（没有虚拟化，长列表会拖垮重绘）。
 ///
 /// `render` 里读到的偏移来自**上一帧**的布局，所以刚加长列表那一帧可能还没反映新行程；
 /// 效果只是"晚一帧才触发"，不会连发，可以接受。
@@ -119,7 +129,16 @@ pub fn should_auto_page(
     items: usize,
     loading: bool,
 ) -> bool {
-    has_more && items > 0 && !loading && scroll.scrollable() && scroll.at_bottom(AUTO_PAGE_MARGIN)
+    auto_page_wanted(has_more, items, loading)
+        && scroll.scrollable()
+        && scroll.at_bottom(AUTO_PAGE_MARGIN)
+}
+
+/// 上面那三条"与滚动位置无关"的判据，单独拆出来是为了能进单测：
+/// `DragScroll` 在没有真实布局时 `max_offset()` 恒为 0，整个 [`should_auto_page`] 在测试里
+/// 永远给 `false`，拆一半出来才能把"多少条之后不再自动翻"这类数字钉住。
+pub fn auto_page_wanted(has_more: bool, items: usize, loading: bool) -> bool {
+    has_more && items > 0 && items < AUTO_PAGE_MAX_ITEMS && !loading
 }
 
 /// 一个滚动容器的拖动状态。**每个容器一个**：详情页主列与右栏是两个字段，互不牵连。

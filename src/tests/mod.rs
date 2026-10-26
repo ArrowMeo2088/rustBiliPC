@@ -1531,7 +1531,7 @@ mod probe_tests {
 
 #[cfg(test)]
 mod auto_page_tests {
-    use crate::ui::scroll::is_at_bottom;
+    use crate::ui::scroll::{auto_page_wanted, is_at_bottom, AUTO_PAGE_MAX_ITEMS};
 
     // `offset` 是滚动句柄给的**负**偏移（0 = 顶部），`max` 是正的可用行程，两者符号不一样，
     // 所以判"到底"要拿 `max - |offset|` 与提前量比。方向写反的症状是"停在半路就翻页"，
@@ -1556,5 +1556,29 @@ mod auto_page_tests {
         assert!(is_at_bottom(0., 0., 240.));
         // 拖过头（偏移比行程还大）仍然算在底部，不会翻不回来。
         assert!(is_at_bottom(-1200., 1000., 240.));
+    }
+
+    #[test]
+    fn the_three_gates_that_do_not_depend_on_scroll_position() {
+        // 有下一页 + 列表非空 + 没在途 = 允许自动翻。
+        assert!(auto_page_wanted(true, 30, false));
+        // 少了"没在途"这一条，一帧渲染就能连发五个下一页；游标类分页（历史、图文）
+        // 在途期间游标还没更新，那五个其实是同一个请求。
+        assert!(!auto_page_wanted(true, 30, true));
+        // 空列表时的"到底"是**还没加载**，不是滚到底，翻页只会原地打转。
+        assert!(!auto_page_wanted(true, 0, false));
+        // 接口说没有下一页就彻底停。
+        assert!(!auto_page_wanted(false, 30, false));
+    }
+
+    #[test]
+    fn auto_paging_stops_at_the_soft_cap_while_the_manual_button_still_works() {
+        // 列表没有虚拟化（gpui 的 `List` 才有），每张卡片都是要布局与绘制的真元素：
+        // 自动翻到几百条会把"按住拖动"拖垮，所以有一条总量闸。
+        assert!(auto_page_wanted(true, AUTO_PAGE_MAX_ITEMS - 1, false));
+        assert!(!auto_page_wanted(true, AUTO_PAGE_MAX_ITEMS, false));
+        assert!(!auto_page_wanted(true, AUTO_PAGE_MAX_ITEMS + 500, false));
+        // 上限也必须**明显大于一屏**，否则刚打开就翻不动了 —— 那是回归不是省资源。
+        assert!(AUTO_PAGE_MAX_ITEMS >= 120, "{AUTO_PAGE_MAX_ITEMS}");
     }
 }

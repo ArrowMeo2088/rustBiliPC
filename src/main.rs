@@ -1,6 +1,8 @@
 //! rustBiliPC 启动入口。
 //!
 //! 启动顺序是有讲究的，别随意调换：
+//! 0. **`logging::install_panic_hook()`** —— `crash.log` 与"调试模式"无关，永远写（GUI 子系统下
+//!    panic 只打 stderr，不装钩子就是"静默消失"）。
 //! 1. 读设置 —— `%APPDATA%\ArrowMeo\rustBiliPC\config.json`，见 [`rustbilipc::store::config`]。
 //! 2. 日志 —— 按设置里的"调试模式"决定要不要写同目录的 `debug.log`（每次启动清空、级别 debug），
 //!    见 [`rustbilipc::logging`]。关掉时连文件都不创建。
@@ -47,6 +49,11 @@ use rustbilipc::theme;
 const HTTP_CLIENT_NAME: &str = "rustbilipc";
 
 fn main() {
+    // **第一件事**是装 panic 钩子：GUI 子系统下 panic 只打 stderr，而那份 stderr 没人看得见，
+    // 症状就是"窗口自己没了、什么痕迹都不留"。`crash.log` 与"调试模式"无关，永远写。
+    // 装在读设置之前，是因为连"读设置"这一步崩掉也要有现场。
+    logging::install_panic_hook();
+
     // 顺序变了（P13）：**先读设置，再装日志**。
     // 因为"要不要写 debug.log"本身就是设置里的一项，日志必须等知道答案的那一步之后才装。
     // 读设置这一步不碰网络、不碰 tokio，所以放在最前面是安全的。
