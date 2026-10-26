@@ -293,8 +293,11 @@ mod player_tests {
     fn path_variable_splits_without_empty_entries() {
         // `path_directories` 会把空段滤掉：空段在 shell 语义里等于"当前目录"，
         // 那会让程序在用户的当前目录里找一个 mpv.exe——最坏的"随机执行"。
-        let joined = std::env::join_paths(["/opt/tools/bin", "", "/usr/bin"]).expect("拼接应当成功");
-        let dirs = crate::player::path_directories(&joined.to_string_lossy());
+        // 手工拼分隔符而不是 `env::join_paths`：后者在 Windows 上遇到空元素**直接返回 Err**，
+        // 而我们要测的恰好就是"字符串里有一个空段"。
+        let separator = if cfg!(windows) { ";" } else { ":" };
+        let joined = ["/opt/tools/bin", "", "/usr/bin"].join(separator);
+        let dirs = crate::player::path_directories(&joined);
         assert_eq!(dirs.len(), 2, "{dirs:?}");
         assert!(dirs.iter().all(|one| !one.as_os_str().is_empty()));
         assert!(crate::player::path_directories("").is_empty());

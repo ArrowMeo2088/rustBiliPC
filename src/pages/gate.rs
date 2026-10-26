@@ -99,7 +99,10 @@ impl LoginGate {
                 log::info!("重登窗：凭据已换新，准备关掉自己并刷新主窗口（mid={mid}）");
                 let shell = relogin::take_shell();
                 cx.spawn(async move |_this, cx| {
-                    let outcome = cx.update(|app| {
+                    // 这一段整体在 `AsyncApp::update` 里做（开/关窗口都不能在实体 update 里，
+                    // 理由见 `pages/windows.rs` 文件头）。里面的失败都各自写了日志，
+                    // 所以这里不再包一层 `Result`——`update` 的返回值是 `()`（第四十四轮的 E0308）。
+                    cx.update(|app| {
                         // 先关窗再刷新：刷新会发一批请求，带着旧登录窗在场也只是多一个遮在上面的小窗。
                         let closed = login_window
                             .update(app, |_view, window, _cx| window.remove_window());
@@ -111,14 +114,13 @@ impl LoginGate {
                             log::warn!("重登：没登记外壳句柄，只能等用户自己切页刷新");
                             return;
                         };
-                        if shell.update(app, |shell, cx| shell.reload_after_relogin(mid, cx)).is_err()
+                        if shell
+                            .update(app, |shell, cx| shell.reload_after_relogin(mid, cx))
+                            .is_err()
                         {
                             log::warn!("重登：主窗口已经不在了，跳过刷新");
                         }
                     });
-                    if let Err(error) = outcome {
-                        log::error!("重登收尾失败: {error}");
-                    }
                 })
                 .detach();
             }

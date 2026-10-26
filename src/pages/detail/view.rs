@@ -573,7 +573,11 @@ impl DetailPage {
     fn start_playback(&mut self, cx: &mut Context<Self>) {
         let Some(plan) = self.plan.clone() else { return };
         let http = cx.http_client();
-        let executor = cx.background_executor();
+        // `.clone()` 不是多余：`background_executor()` 拿到的那个句柄**借的是 `cx`**，
+        // 直接存进局部变量就会一路占着这个不可变借东西（下一行 `cx.notify()` 立刻 E0502，
+        // 而 `cx.spawn` 要求 future 是 `'static`，接着还吃一发 E0521 —— 第四十四轮 CI 三条错都是它）。
+        // 克隆出来那份是 owning 的轻句柄，与 `cx` 的借用就此脱钩。
+        let executor = cx.background_executor().clone();
         let headers = probe::cdn_headers();
         let video_urls = probe::ordered_urls(&plan.video_url, &plan.backup_urls);
         let audio_urls = plan
@@ -632,8 +636,10 @@ impl DetailPage {
         audio: Option<ProbeOutcome>,
     ) {
         let video_url = video.url.clone().unwrap_or_else(|| plan.video_url.clone());
+        // 两条分支都给 `Option<String>`：音频这一路"没有"和"有但退回主地址"是两件事，
+        // 不能在这一行上就把它揉成一个 String（第四十四轮的 E0308 就是这么来的）。
         let audio_url = match (plan.audio_url.clone(), audio.as_ref()) {
-            (Some(primary), Some(outcome)) => outcome.url.clone().unwrap_or(primary),
+            (Some(primary), Some(outcome)) => Some(outcome.url.clone().unwrap_or(primary)),
             (primary, _) => primary,
         };
         let mut notes: Vec<String> = Vec::new();
