@@ -181,12 +181,20 @@ mod auth_tests {
 
     #[test]
     fn broken_auth_text_is_treated_as_not_logged_in() {
-        // 这是"读不到就当没登录"的那条判断，`load` 与旧文件迁移都走它。
-        // 坏文本不能炸，也不能给出一份"看起来已登录"的空凭据。
+        // 这是"读不到就当没登录"的那条判断，`load` 与旧文件迁移都走它：坏文本不能炸。
         assert!(Auth::from_json("not json").is_none());
         assert!(Auth::from_json("").is_none());
-        let partial = Auth::from_json(r#"{"dede_user_id":"1","sessdata":"2"}"#).expect("缺省字段应当容错");
-        assert!(!partial.is_complete());
+        // 四条 cookie 是**必填**字段（没有 `#[serde(default)]`，只有 refresh_token/saved_at_unix 有）：
+        // 少给任何一条就是解析失败，而解析失败一律当"没登录"。这是故意的——
+        // 拿一份缺 buvid3 的半成品去构造 `Account`，只会在第一个接口上撞 `-101`，
+        // 症状比"重新扫一次码"难查得多。（第三十四轮就是这条把我自己的假设打回来了。）
+        assert!(Auth::from_json(r#"{"dede_user_id":"1","sessdata":"2"}"#).is_none());
+        // 四条都在但值是空串：能解析，判不合格是 `is_complete` 的活（迁移那一路用得到）。
+        let blank = Auth::from_json(
+            r#"{"dede_user_id":"","sessdata":"","bili_jct":"","buvid3":""}"#,
+        )
+        .expect("四条键都在就应当能解析");
+        assert!(!blank.is_complete());
     }
 
     #[test]
