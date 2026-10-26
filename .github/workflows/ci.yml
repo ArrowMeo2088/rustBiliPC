@@ -88,6 +88,22 @@ jobs:
         shell: bash
         run: cargo test --release
 
+      # 交付口径是"N passed / **零 Rust warning** / Cargo.lock 零差异"，
+      # 而 `cargo build` 命中缓存时**不会重复报**上一轮已经修掉的 warning。
+      # 所以再用 `cargo check --tests` 强制前端重新过一遍并数出 warning 条数写进日志
+      # （第四十二轮就是这么确认"零 warning"的，第四十六轮沿用）。
+      - name: Count Rust warnings (delivery bar is zero)
+        if: always()
+        shell: bash
+        run: |
+          cargo check --release --all-targets --message-format=json > check-messages.json 2>/dev/null || true
+          count=$(grep -c '"level":"warning"' check-messages.json 2>/dev/null || echo 0)
+          echo "### Rust warning 条数：$count" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$count" -gt 0 ]; then
+            echo "::warning::本轮有 $count 条 Rust warning（交付口径是零）"
+            grep '"level":"warning"' check-messages.json | head -20
+          fi
+
       # 交付用的 exe：**只打包这一个文件**（不带 dll、不带 mpv）。
       # `cd.yml` 那份是"优化 + UPX + Release"，这一份是"这一轮改动的现场产物"，
       # 他日常真机验证取的就是这里。
