@@ -178,6 +178,42 @@ impl Config {
         std::fs::write(&path, json).with_context(|| format!("写入设置失败: {}", path.display()))?;
         Ok(path)
     }
+
+    /// 读配置；读不到就写一份默认的出去再用默认值（结果见 [`LoadOutcome`]）。
+    ///
+    /// 做成关联函数是为了和另外两个落盘点对称（`Auth::load`、`logging::init` 都是各自模块的一个入口）。
+    pub fn load_or_create() -> (Config, LoadOutcome) {
+        let config = Config::default();
+        match std::fs::read_to_string(Config::path()) {
+            Ok(raw) => match Config::from_json(&raw) {
+                Some(loaded) => (loaded, LoadOutcome::Loaded),
+                // 文件在、但读不出来（坏了/权限）：按"重建"处理，并让调用方强制开日志。
+                None => {
+                    let outcome = match config.save() {
+                        Ok(_) => LoadOutcome::RecoveredFromBroken,
+                        Err(error) => {
+                            log::error!("重建 config.json 失败: {error}");
+                            LoadOutcome::RecoveredFromBroken
+                        }
+                    };
+                    (config, outcome)
+                }
+            },
+            Err(_) => {
+                let outcome = match config.save() {
+                    Ok(path) => {
+                        log::info!("没有可用的 config.json，已写入默认设置：{}", path.display());
+                        LoadOutcome::Created
+                    }
+                    Err(error) => {
+                        log::warn!("写入默认设置失败，本次仍用默认值: {error}");
+                        LoadOutcome::Created
+                    }
+                };
+                (config, outcome)
+            }
+        }
+    }
 }
 
 /// 把任意写法收回 `[MIN_QUALITY_ID, MAX_QUALITY_ID]`。单独做成函数是为了进单测。
@@ -196,41 +232,6 @@ pub enum LoadOutcome {
     ///
     /// 这一档**强制开日志**：调试模式就写在那个坏文件里，不开日志他就永远看不到为什么没日志。
     RecoveredFromBroken,
-}
-
-/// 读配置；读不到就写一份默认的出去再用默认值（结果见 [`LoadOutcome`]）。
-pub fn load_or_create() -> (Config, LoadOutcome) {
-    match std::fs::read_to_string(Config::path()) {
-        Ok(raw) => match Config::from_json(&raw) {
-            Some(config) => return (config, LoadOutcome::Loaded),
-            // 文件在但坏了：下面按"重建"处理，并让调用方强制开日志。
-            None => {
-                let config = Config::default();
-                let outcome = match config.save() {
-                    Ok(_) => LoadOutcome::RecoveredFromBroken,
-                    Err(error) => {
-                        log::error!("重建 config.json 失败: {error}");
-                        LoadOutcome::RecoveredFromBroken
-                    }
-                };
-                return (config, outcome);
-            }
-        },
-        Err(_) => {
-            let config = Config::default();
-            let outcome = match config.save() {
-                Ok(path) => {
-                    log::info!("没有 config.json，已写入默认设置：{}", path.display());
-                    LoadOutcome::Created
-                }
-                Err(error) => {
-                    log::warn!("写入默认设置失败，本次仍用默认值: {error}");
-                    LoadOutcome::Created
-                }
-            };
-            return (config, outcome);
-        }
-    }
 }
 
 /// 画质档 → 中文读法。认得出的档用 B 站自己的叫法（`models/stream.rs` 的注释），
