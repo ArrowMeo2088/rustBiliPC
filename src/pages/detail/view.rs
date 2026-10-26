@@ -64,7 +64,9 @@ use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::api::comments::{self, CommentItem, CommentSortKind};
-use crate::api::detail::{self, PageInfo, SubtitleBrief, VideoDetailInfo};
+use crate::api::detail::{
+    self, PageInfo, SeasonSectionBrief, SubtitleBrief, VideoDetailInfo,
+};
 use crate::api::download;
 use crate::api::stream::{self, StreamChoice};
 use crate::pages::download::DownloadQueue;
@@ -139,6 +141,11 @@ pub struct DetailPage {
     scroll: DragScroll,
     /// 右栏（选集与相关推荐）是第二个容器，必须单独一个：共用会让两边互相把对方的偏移抢走。
     side_scroll: DragScroll,
+    /// 分集面板当前展开的是第几个**分段**（`ugc_season.sections` 的下标）。
+    ///
+    /// 只有多分段的合集才用得到它（像"物理er的本科专业合集"那种：电动/猞狸、量力/度规…）。
+    /// 换稿件（重新取主体）时归 0，不然会指着上一份合集的某一段。
+    season_section: usize,
 }
 
 /// 详情页退出时必须带走自己拉起的 mpv：外壳把这一层 pop 掉（或整个窗口关掉）时，
@@ -177,6 +184,7 @@ impl DetailPage {
             player: None,
             planning: None,
             queue,
+            season_section: 0,
             comment: None,
             comment_sort: CommentSortKind::Hot,
             comment_note: "".into(),
@@ -218,6 +226,8 @@ impl DetailPage {
                         let cid = info.first_cid;
                         view.note = "".into();
                         view.selected = 0;
+                        // 分段选择跟着稿件走：换了一份合集还指着上一份的第 3 段是错的。
+                        view.season_section = 0;
                         view.detail = Some(info);
                         cx.notify();
                         Some(cid)
@@ -1137,6 +1147,175 @@ impl DetailPage {
             .into_any_element()
     }
 
+    /// 分集那一节（右栏最上面）。没有 `ugc_season` 时返回空列表，右栏就什么都不摆——
+    /// **不摆一个"本稿件不在合集里"的空标题**，那对单发稿件是噪音。
+    fn season_block(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some(brief) = self.detail.as_ref().and_then(|info| info.season.as_ref()) else {
+            return Vec::new();
+        };
+        let mut out: Vec<AnyElement> = vec![layout::section_title(format!("分集 · {}", brief.title))];
+
+        // 那一行读数：`第 168 / 189 集`。三个数字各有出处，缺一个就少说一段：
+        // `current_index` 是我们在这份列表里找到的位置（0 = 没找到，说明接口没把这一集列进来），
+        // `ep_count` 是接口声明的总集数，`listed` 是本次真正拿到的条数。
+        // 后两个不等时把差额写出来，别让用户以为这合集只有这些。
+        let mut readout: Vec<String> = Vec::new();
+        if brief.current_index > 0 {
+            readout.push(format!("第 {} 集", brief.current_index));
+        } else {
+            readout.push("当前这一集不在列出的名单里".to_string());
+        }
+        if brief.ep_count > 0 {
+            readout.push(format!("共 {} 集", brief.ep_count));
+        }
+        if brief.ep_count as usize != brief.listed {
+            readout.push(format!("本次列出 {} 集", brief.listed));
+        }
+        if brief.skipped > 0 {
+            readout.push(format!("另有 {} 条打不开", brief.skipped));
+        }
+        out.push(
+            div()
+                .w_full()
+                .px(px(palette::LIST_ROW_PADDING_X))
+                .pb(px(palette::CARD_TEXT_ROW_GAP))
+                .text_size(px(palette::FONT_CAPTION))
+                .text_color(palette::text_tertiary())
+                .child(readout.join(" · "))
+                .into_any_element(),
+        );
+
+        // 分段 chips：一个分段时不给（那一排按钮只会占掉 360 宽里的一行，什么也没选）。
+        if brief.has_sections() {
+            let mut chips: Vec<AnyElement> = Vec::new();
+            for (index, section) in brief.sections.iter().enumerate() {
+                let selected = index == self.season_section;
+                let label = if section.title.is_empty() {
+                    format!("分段 {}", index + 1)
+                } else {
+                    section.title.clone()
+                };
+                let button = Button::new(format!("season-section-{index}"))
+                    .label(label)
+                    .on_click(cx.listener(move |this, _event, _window, cx| {
+                        this.season_section = index;
+                        cx.notify();
+                    }));
+                chips.push(if selected { button.primary() } else { button }.into_any_element());
+            }
+            out.push(
+                div()
+                    .flex()
+                    .flex_wrap()
+                    .w_full()
+                    .gap(px(palette::CARD_TEXT_ROW_GAP))
+                    .px(px(palette::LIST_ROW_PADDING_X))
+                    .pb(px(palette::CARD_TEXT_ROW_GAP))
+                    .children(chips)
+                    .into_any_element(),
+            );
+        }
+
+        // 用户可能点了分段后又换了稿件：下标夹在有效范围内再取（`saturating_sub` 防 0 减 1 下溢）。
+        let index = self
+            .season_section
+            .min(brief.sections.len().saturating_sub(1));
+        let Some(section) = brief.sections.get(index) else {
+            return out;
+        };
+        // 行号在整个合集里连续（不是每个分段从 1 重新开始）：这样"第 168 集"这种读数
+        // 与左边那一列数字对得上，用户找下一集不用心算。
+        let offset: usize = brief
+            .sections
+            .iter()
+            .take(index)
+            .map(|one| one.episodes.len())
+            .sum();
+        out.extend(self.season_rows(section, offset, cx));
+        out
+    }
+
+    /// 一个分段里的每一集。点一行 = 请外壳再压一层详情页（与卡片同一条路）。
+    fn season_rows(
+        &self,
+        section: &SeasonSectionBrief,
+        offset: usize,
+        cx: &mut Context<Self>,
+    ) -> Vec<AnyElement> {
+        section
+            .episodes
+            .iter()
+            .enumerate()
+            .map(|(index, episode)| {
+                let current = episode.bvid == self.bvid.as_str();
+                let meta = {
+                    let mut parts: Vec<String> = vec![format!("{:02}", offset + index + 1)];
+                    // `arc.videos > 1` 就是他说的"情况比较复杂"：合集里的一集自己还是个多 P 稿件。
+                    // 这一格必须显出来，否则用户会以为点进去就是整集。
+                    if episode.videos > 1 {
+                        parts.push(format!("{} P", episode.videos));
+                    }
+                    if !episode.duration_text.is_empty() {
+                        parts.push(episode.duration_text.clone());
+                    }
+                    parts.join(" · ")
+                };
+                let bvid = episode.bvid.clone();
+                let base = div()
+                    .flex()
+                    .w_full()
+                    .min_h(px(palette::LIST_ROW_MIN_HEIGHT))
+                    .gap(px(palette::LIST_ROW_PADDING_Y))
+                    .px(px(palette::LIST_ROW_PADDING_X))
+                    .py(px(palette::LIST_ROW_PADDING_Y))
+                    .items_center()
+                    .overflow_hidden()
+                    .rounded(px(palette::RADIUS))
+                    .cursor_pointer()
+                    // 与"选集"那些行同一套选中口径：底色 + 那条常驻 2px 边框换色，不产生位移。
+                    .bg(if current {
+                        palette::card_background_elevated()
+                    } else {
+                        palette::card_background()
+                    })
+                    .border_2()
+                    .border_color(if current {
+                        palette::accent()
+                    } else {
+                        palette::border_none()
+                    })
+                    .text_color(if current {
+                        palette::text_primary()
+                    } else {
+                        palette::text_secondary()
+                    })
+                    .child(
+                        div()
+                            .flex_shrink_0()
+                            .text_size(px(palette::FONT_CAPTION))
+                            .text_color(palette::text_tertiary())
+                            .child(meta),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .text_size(px(palette::FONT_BODY))
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .overflow_hidden()
+                            .child(episode.title.clone()),
+                    );
+                base.id(format!("season-{}", episode.bvid))
+                    .on_click(cx.listener(move |_this, _event, _window, cx| {
+                        cx.emit(OpenVideo { bvid: bvid.clone() });
+                    }))
+                    .hover(|style| style.bg(palette::card_background_hover()))
+                    .into_any_element()
+            })
+            .collect()
+    }
+
     /// 右栏（360）：选集 + 相关推荐。度量来自参考项目信息面板的宽度。
     fn side_column(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
@@ -1156,7 +1335,20 @@ impl DetailPage {
                     .overflow_y_scroll()
                     .track_scroll(self.side_scroll.handle())
                     .on_mouse_down(MouseButton::Left, self.side_scroll.on_press())
-                    .child(layout::section_title("选集"))
+                    // 分集在最上面：这一集"属于哪个合集、上一集下一集是谁"是进详情页第一眼要的答案，
+                    // 而"这一集自己分几个 P"（下面那节"选集"）是第二层信息。
+                    .children(self.season_block(cx))
+                    // 有分集时这一节的标题要说清是"本集的分 P"：上面那节已经叫"分集"了，
+                    // 两节都叫"选集"会让人以为下面是同一份列表的另一半。
+                    .child(layout::section_title(if self
+                        .detail
+                        .as_ref()
+                        .is_some_and(|info| info.season.is_some())
+                    {
+                        "本集的分 P"
+                    } else {
+                        "选集"
+                    }))
                     .child(self.pages_body(cx))
                     .child(layout::section_title("相关推荐"))
                     .child(self.related_cards(cx)),

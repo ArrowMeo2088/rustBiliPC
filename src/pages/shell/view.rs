@@ -52,7 +52,8 @@ use gpui_kit::*;
 
 use crate::api::profile;
 use crate::pages::{
-    OpenFolder, OpenUser, OpenVideo, about::AboutPage, detail::DetailPage,
+    OpenCollection, OpenFolder, OpenUser, OpenVideo, about::AboutPage,
+    collection::CollectionContentPage, detail::DetailPage,
     download::{DownloadPage, DownloadQueue},
     favorites::{FavFolderPage, FavoritesPage},
     history::HistoryPage, home::HomePage, loading, search::SearchPage, space::UserSpacePage,
@@ -67,6 +68,9 @@ enum StackPage {
     Detail(Entity<DetailPage>),
     Space(Entity<UserSpacePage>),
     Folder(Entity<FavFolderPage>),
+    /// 合集/系列内容页（P12）。它和 `Folder` 是同一类下钻，但走的是两条接口、两种 id，
+    /// 所以单独一个变体而不是给 `Folder` 加个"这是哪种格子"的字段。
+    Collection(Entity<CollectionContentPage>),
 }
 
 impl StackPage {
@@ -76,6 +80,7 @@ impl StackPage {
             Self::Detail(page) => page.clone().into_any_element(),
             Self::Space(page) => page.clone().into_any_element(),
             Self::Folder(page) => page.clone().into_any_element(),
+            Self::Collection(page) => page.clone().into_any_element(),
         }
     }
 }
@@ -268,6 +273,57 @@ impl MainShell {
         self._subscriptions.push(subscription);
     }
 
+    /// 只订"点合集/系列 → 内容页"这一种信号的页（P12 起就是空间页）。
+    fn watch_collections<T>(
+        &mut self,
+        page: &Entity<T>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) where
+        T: 'static + Render + EventEmitter<OpenCollection>,
+    {
+        let subscription = cx.subscribe_in(
+            page,
+            window,
+            |this, _page, event: &OpenCollection, window, cx| {
+                this.open_collection(event, window, cx);
+            },
+        );
+        self._subscriptions.push(subscription);
+    }
+
+    /// 压一层合集/系列内容页。`kind` 决定这一页发的是哪一条接口（见 `api/collection.rs`），
+    /// `title` 先占住页头——系列那一路接口不给名字，合集回来后会用 `meta.name` 覆盖。
+    fn open_collection(
+        &mut self,
+        event: &OpenCollection,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        log::debug!(
+            "外壳：打开{}内容 id={} mid={}（{}，栈深 {}）",
+            event.kind.label(),
+            event.id,
+            event.mid,
+            event.title,
+            self.stack.len()
+        );
+        let page = cx.new(|_cx| {
+            CollectionContentPage::new(
+                Arc::clone(&self.client),
+                event.mid,
+                event.kind,
+                event.id,
+                event.title.clone(),
+            )
+        });
+        // 内容页只发"打开视频"这一种信号（点一行就是进那一集的详情页）。
+        self.watch_videos(&page, window, cx);
+        page.update(cx, |page, cx| page.ensure_loaded(cx));
+        self.stack.push(StackPage::Collection(page));
+        cx.notify();
+    }
+
     /// 压一层收藏夹内容页。进来就取第 1 页：这一页是被点进来的，不给一片空白。
     fn open_folder(&mut self, event: &OpenFolder, window: &mut Window, cx: &mut Context<Self>) {
         log::debug!(
@@ -322,6 +378,10 @@ impl MainShell {
             UserSpacePage::new(Arc::clone(&self.client), user.mid, user.name.clone())
         });
         self.watch_page(&page, window, cx);
+        // 空间页还会发"打开合集/内容"这一种信号（P12）。它**只有空间页发**——
+        // 详情页没有 `EventEmitter<OpenCollection>`，所以这条不能塞进 `watch_page`
+        // 那个泛型里（那会让详情页编译不过，同第三十三轮收藏页那条 E0277 的教训）。
+        self.watch_collections(&page, window, cx);
         page.update(cx, |page, cx| page.ensure_loaded(cx));
         self.stack.push(StackPage::Space(page));
         cx.notify();

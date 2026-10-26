@@ -73,7 +73,7 @@ impl VideoOrder {
     }
 }
 
-/// 空间页的三块内容。
+/// 空间页的四块内容。
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SpaceSection {
     /// 投稿视频。
@@ -82,6 +82,8 @@ pub enum SpaceSection {
     Posts,
     /// 收藏夹列表。
     Folders,
+    /// 合集与系列（P12）。**一块接口同时给两类**，所以这一格里是两种行。
+    Collections,
 }
 
 impl SpaceSection {
@@ -90,6 +92,7 @@ impl SpaceSection {
             Self::Videos => "投稿",
             Self::Posts => "图文",
             Self::Folders => "收藏",
+            Self::Collections => "合集",
         }
     }
 }

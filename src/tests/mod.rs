@@ -1031,3 +1031,175 @@ mod download_tests {
         assert_eq!(names, vec!["标题 (2).m4v", "标题 (2).m4a"]);
     }
 }
+
+#[cfg(test)]
+mod collection_tests {
+    use crate::api::collection::{CollectionArchives, CollectionEpisode, date_text};
+
+    fn episode(bvid: &str) -> CollectionEpisode {
+        CollectionEpisode {
+            bvid: bvid.to_string(),
+            title: bvid.to_string(),
+            duration_text: "10:00".to_string(),
+            play_text: "1 播放".to_string(),
+            date_text: String::new(),
+        }
+    }
+
+    #[test]
+    fn date_text_uses_beijing_time_and_refuses_zero() {
+        // 0 一律空串：缺日期不编一个 1970-01-01 出来。
+        assert_eq!(date_text(0), "");
+        // 2024-01-01 00:00 UTC = 北京时间 08:00，两种算法都是 1 月 1 日，不暴露差异。
+        assert_eq!(date_text(1_704_067_200), "2024-01-01");
+        // 2023-12-31 22:00 UTC = 北京时间 2024-01-01 06:00 —— 这一格才是"按北京时间"的证据：
+        // 用 UTC 会显示成 2023-12-31，凌晨发布的稿件会集体少一天。
+        assert_eq!(date_text(1_704_060_000), "2024-01-01");
+        // 闰年边界：2024-02-29 存在，换算不能跳到 3 月。
+        assert_eq!(date_text(1_709_164_800), "2024-02-29");
+        // 跨年：北京时间 2023-01-01 00:30 发布（= UTC 2022-12-31 16:30）。
+        // 按 UTC 算会显示成 2022-12-31——"元旦零点的稿件"会集体归到去年。
+        assert_eq!(date_text(1_672_504_200), "2023-01-01");
+    }
+
+    #[test]
+    fn has_more_prefers_the_authority_it_was_given() {
+        let mut page = CollectionArchives {
+            title: "合集".to_string(),
+            desc: String::new(),
+            total: Some(100),
+            page: 1,
+            items: (0..30).map(|index| episode(&format!("BV{index:06}"))).collect(),
+        };
+        // 有 `total`：按已加载条数比总数。
+        assert!(page.has_more(30));
+        assert!(!page.has_more(100));
+
+        // 接口没给总数（`None`）：只能退回"这一页给满了就还能翻"。
+        page.total = None;
+        assert!(page.has_more(30));
+        page.items = vec![episode("BV1")];
+        assert!(!page.has_more(31));
+        // 空列表且没总数：不翻（否则"再加载一页"会永远点得动）。
+        page.items.clear();
+        assert!(!page.has_more(0));
+
+        // 总数比已加载还小（`page.total` 是"页数"而非"条目数"时的样子）：那个数一律当没给，
+        // 于是退回"本页给满了就还能翻"——宁可多点一次拿到空页，
+        // 也绝不显示"共 7 集 · 已加载 30"这种自相矛盾的一行。
+        page.total = Some(7);
+        page.items = (0..30).map(|index| episode(&format!("BV{index:06}"))).collect();
+        assert_eq!(page.total_known(30), None);
+        assert!(page.has_more(30));
+    }
+}
+
+#[cfg(test)]
+mod season_tests {
+    use crate::api::detail::parse_ugc_season;
+    use serde_json::{Value, json};
+
+    fn episode(bvid: &str, title: &str, videos: u64, duration: u64) -> Value {
+        json!({
+            "bvid": bvid,
+            "cid": 1,
+            "title": title,
+            "arc": { "title": title, "duration": duration, "videos": videos },
+            "pages": [],
+        })
+    }
+
+    fn payload(sections: Value) -> Value {
+        json!({
+            "aid": 1,
+            "ugc_season": {
+                "id": 4294056,
+                "title": "物理er的本科专业合集",
+                "ep_count": 189,
+                "sections": sections,
+            }
+        })
+    }
+
+    #[test]
+    fn a_video_outside_a_season_has_no_panel() {
+        // 没有 `ugc_season`：正常情况（单发稿件），返回 None 而不是"空的一节"。
+        assert!(parse_ugc_season(&json!({ "aid": 1 }), "BV1").is_none());
+        // 有这块但不是对象（接口偶尔给 null）：同样 None。
+        assert!(parse_ugc_season(&json!({ "ugc_season": Value::Null }), "BV1").is_none());
+        // 有合集却一集都列不出来：也不摆空节。
+        let brief = parse_ugc_season(&payload(json!([])), "BV1");
+        assert!(brief.is_none(), "sections 为空应当是 None，拿到 {brief:?}");
+    }
+
+    #[test]
+    fn flat_index_counts_across_sections_and_marks_current() {
+        let data = payload(json!([
+            { "id": 1, "title": "电动/猞狸", "episodes": [episode("BV1a", "第一集", 1, 60), episode("BV1b", "第二集", 4, 90)] },
+            { "id": 2, "title": "量力/度规", "episodes": [episode("BV1c", "第三集", 1, 120)] },
+        ]));
+        let brief = parse_ugc_season(&data, "BV1c").expect("这份载荷应当能解析");
+        assert_eq!(brief.listed, 3);
+        // 行号跨分段连续：第二个分段的第一集是"第 3 集"，不是"第 1 集"。
+        assert_eq!(brief.current_index, 3);
+        // 多分段才给 chips。
+        assert!(brief.has_sections());
+        // `arc.videos > 1` 就是"分集自己还有分 P"那种复杂情况，必须显出来。
+        assert_eq!(brief.sections[0].episodes[1].videos, 4);
+        assert_eq!(brief.sections[0].episodes[1].duration_text, "01:30");
+        assert_eq!(brief.ep_count, 189);
+        // 接口声明 189 集却只给了 3 集：这个差额界面要说，不藏。
+        assert_ne!(brief.ep_count as usize, brief.listed);
+    }
+
+    #[test]
+    fn single_section_seasons_need_no_section_chips() {
+        let data = payload(json!([
+            { "id": 1, "title": "全一辑", "episodes": [episode("BV1a", "只此一集", 1, 45)] },
+        ]));
+        let brief = parse_ugc_season(&data, "BV1a").expect("单分段合集应当能解析");
+        assert!(!brief.has_sections());
+        assert_eq!(brief.current_index, 1);
+    }
+
+    #[test]
+    fn missing_pieces_degrade_one_cell_at_a_time() {
+        // 缺 `arc`：标题退回 `episodes[].title`，时长退空、分 P 数按 1（不编）。
+        let data = payload(json!([
+            { "id": 1, "episodes": [
+                { "bvid": "BV1x", "title": "只有标题的一条" },
+                { "arc": { "title": "只有 arc 标题的一条", "duration": 30 }, "bvid": "BV1y" },
+                { "title": "没有 bvid，点了也打不开" },
+            ] },
+        ]));
+        let brief = parse_ugc_season(&data, "BV1y").expect("缺字段不该让整块失败");
+        assert_eq!(brief.listed, 2, "没有 bvid 的那条应当被跳过");
+        assert_eq!(brief.skipped, 1, "跳过的条数要能说出来");
+        assert_eq!(brief.sections[0].episodes[0].title, "只有标题的一条");
+        assert_eq!(brief.sections[0].episodes[0].duration_text, "");
+        assert_eq!(brief.sections[0].episodes[0].videos, 1);
+        // 标题优先 `episodes[].title`，它是空的才退回 `arc.title`。
+        assert_eq!(brief.sections[0].episodes[1].title, "只有 arc 标题的一条");
+        assert_eq!(brief.sections[0].episodes[1].duration_text, "00:30");
+        // 当前集没在列出的名单里（例如接口只给了前 100 集）：序号给 0，界面那句"当前这一集不在名单里"才成立。
+        assert_eq!(brief.current_index, 2);
+        let absent = parse_ugc_season(&data, "BV1不在这里").expect("同上");
+        assert_eq!(absent.current_index, 0);
+    }
+
+    #[test]
+    fn wrong_typed_numbers_are_treated_as_absent() {
+        // `videos` 给成字符串、`ep_count` 给成小数：一律当"没有"，不猜、也不 panic。
+        let data = json!({
+            "ugc_season": {
+                "id": "4294056",
+                "ep_count": 1.5,
+                "sections": [{ "episodes": [{ "bvid": "BV1z", "arc": { "videos": "4" } }] }],
+            }
+        });
+        let brief = parse_ugc_season(&data, "BV1z").expect("这一份还能列出一集，就该给出面板");
+        assert_eq!(brief.season_id, 0, "id 是字符串时当没有");
+        assert_eq!(brief.ep_count, 0, "总数给成小数时当没有，界面那行就不说总数");
+        assert_eq!(brief.sections[0].episodes[0].videos, 1, "分 P 数给成字符串时按单 P");
+    }
+}

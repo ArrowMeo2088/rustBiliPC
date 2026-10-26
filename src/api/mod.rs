@@ -31,6 +31,7 @@
 //!   一部片子不能这么读，所以 [`download`] 走 gpui 的 `HttpClient`（`App::http_client()`，
 //!   我们在 `main.rs` 里装的那个 reqwest 客户端），把响应体当 `AsyncRead` 一块一块搬到磁盘。
 
+pub mod collection;
 pub mod comments;
 pub mod detail;
 pub mod download;

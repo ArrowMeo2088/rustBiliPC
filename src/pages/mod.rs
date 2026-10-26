@@ -17,6 +17,7 @@
 //! 播放期不在这里——进度、暂停、音量、字幕显示都归外置 mpv 自己的 OSC（第 4.3 节）。
 
 pub mod about;
+pub mod collection;
 pub mod detail;
 pub mod download;
 pub mod favorites;
@@ -65,6 +66,25 @@ pub struct OpenFolder {
     /// 收藏夹 ID（接口那边叫 `media_id`）。
     pub id: u64,
     /// 夹子名（用于首屏占位）。
+    pub title: String,
+}
+
+/// 第四个共用导航事件：点开"合集/系列"→ 压一层内容页（P12）。
+///
+/// 三种下钻信号里只有这一个带 `kind`：**合集与系列是两种 id、两条接口**
+/// （`season_id` 走 `seasons_archives_list`，`series_id` 走 `series_archives`），
+/// 到了内容页才知道该发哪一次请求，所以类型必须一路带着，不能只留一个数字。
+/// `title` 与 [`OpenFolder::title`] 同理——系列那一路接口**不给名字**（见 `api/collection.rs`），
+/// 先拿上一页的名字占住页头，合集回来后用接口的 `meta.name` 覆盖。
+#[derive(Clone, Debug)]
+pub struct OpenCollection {
+    /// 合集还是系列。
+    pub kind: crate::api::collection::CollectionKind,
+    /// 合集的 `season_id` 或系列的 `series_id`。
+    pub id: u64,
+    /// 空间主人的 mid（两条接口都要它）。
+    pub mid: u64,
+    /// 名字（用于首屏占位）。
     pub title: String,
 }
 

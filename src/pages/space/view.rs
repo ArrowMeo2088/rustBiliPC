@@ -35,12 +35,13 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
+use crate::api::collection::{self, CollectionBrief};
 use crate::api::favorites::{self, FavFolder};
 use crate::api::space::{
     self, SpacePost, SpaceProfile, SpaceSection, SpaceVideo, VideoFilter, VideoOrder,
     VIDEO_PAGE_SIZE,
 };
-use crate::pages::{OpenUser, OpenVideo};
+use crate::pages::{OpenCollection, OpenUser, OpenVideo};
 use crate::ui::video_card::{self, VideoCardData};
 use crate::ui::scroll::DragScroll;
 use crate::ui::{layout, palette};
@@ -82,6 +83,14 @@ pub struct UserSpacePage {
     folder_note: SharedString,
     folder_seq: u32,
     folder_loaded: bool,
+
+    /// 合集与系列（P12）。接口一次同时给两类，我们合成一列，所以这里只有"第几页"一个游标。
+    collections: Vec<CollectionBrief>,
+    collection_page: u64,
+    collection_has_more: bool,
+    collection_note: SharedString,
+    collection_seq: u32,
+    collection_loaded: bool,
 }
 
 impl UserSpacePage {
@@ -116,6 +125,12 @@ impl UserSpacePage {
             folder_note: "".into(),
             folder_seq: 0,
             folder_loaded: false,
+            collections: Vec::new(),
+            collection_page: 0,
+            collection_has_more: false,
+            collection_note: "".into(),
+            collection_seq: 0,
+            collection_loaded: false,
         }
     }
 
@@ -146,6 +161,11 @@ impl UserSpacePage {
             SpaceSection::Folders => {
                 if !self.folder_loaded {
                     self.load_folders(cx);
+                }
+            }
+            SpaceSection::Collections => {
+                if !self.collection_loaded {
+                    self.load_collections(1, cx);
                 }
             }
         }
@@ -304,6 +324,56 @@ impl UserSpacePage {
         .detach();
     }
 
+    /// 取"合集与系列"的某一页。`page == 1` 是替换，大于 1 是往后**累加**。
+    ///
+    /// 这一格与投稿/图文不同：**一次请求同时给两类**（`seasons_list` 与 `series_list`），
+    /// 我们合成一列显示，所以只有"第几页"这一个游标。翻页判据见 `api/collection.rs` 文件头第 2 条
+    /// （接口那个 `page.total` 的语义没文档，我们不显示它、也不拿它当"翻完了"的依据）。
+    fn load_collections(&mut self, page: u64, cx: &mut Context<Self>) {
+        self.collection_loaded = true;
+        self.collection_seq += 1;
+        let seq = self.collection_seq;
+        self.collection_note = if page == 1 {
+            "合集加载中…".into()
+        } else {
+            "正在加载下一页…".into()
+        };
+        cx.notify();
+
+        let join = collection::fetch_collections(Arc::clone(&self.client), self.mid, page);
+        crate::pages::loading::spawn_into(
+            cx,
+            seq,
+            "合集与系列",
+            join,
+            |view| view.collection_seq,
+            // `move` 不能省：闭包要跨 `await` 活下来（`'static`），而它要读外面那个栈上的 `page`。
+            move |view, outcome| match outcome {
+                Ok(list) => {
+                    view.collection_page = list.page;
+                    view.collection_has_more = list.has_more;
+                    if list.page <= 1 {
+                        view.collections = list.items;
+                    } else {
+                        view.collections.extend(list.items);
+                    }
+                    view.collection_note = if view.collections.is_empty() {
+                        "TA 没有公开的合集或系列".into()
+                    } else {
+                        "".into()
+                    };
+                }
+                Err(message) => {
+                    // 只有第一页失败才清空：翻下一页失败时把已加载的留着（同收藏夹内容那一页的口径）。
+                    if page == 1 {
+                        view.collections.clear();
+                    }
+                    view.collection_note = format!("取合集与系列失败：{message}").into();
+                }
+            },
+        );
+    }
+
     /// 投稿的三档排序（接口一次只能给一档，所以点了就重取第 1 页）。
     fn select_order(&mut self, order: VideoOrder, cx: &mut Context<Self>) {
         if self.video_order == order {
@@ -412,7 +482,12 @@ impl UserSpacePage {
             .items_center()
             .gap(px(palette::CARD_TEXT_ROW_GAP))
             .px(px(palette::CARD_TEXT_PADDING_X));
-        for section in [SpaceSection::Videos, SpaceSection::Posts, SpaceSection::Folders] {
+        for section in [
+            SpaceSection::Videos,
+            SpaceSection::Posts,
+            SpaceSection::Folders,
+            SpaceSection::Collections,
+        ] {
             let button = Button::new(format!("space-{}", section.label()))
                 .label(section.label())
                 .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -441,6 +516,17 @@ impl UserSpacePage {
                     }
                     SpaceSection::Posts => format!("已加载 {} 条", self.posts.len()),
                     SpaceSection::Folders => format!("{} 个收藏夹", self.folders.len()),
+                    // 这一格的数字是**我们自己数出来的**：接口那个 `page.total` 的语义没文档，
+                    // 不显示它（理由见 `api/collection.rs` 文件头第 2 条）。
+                    SpaceSection::Collections => {
+                        let seasons = self
+                            .collections
+                            .iter()
+                            .filter(|item| item.kind == collection::CollectionKind::Season)
+                            .count();
+                        let series = self.collections.len() - seasons;
+                        format!("已列出 {} 个（合集 {seasons} · 系列 {series}）", self.collections.len())
+                    }
                 }),
         )
         .into_any_element()
@@ -678,6 +764,63 @@ impl UserSpacePage {
                     .children(rows);
                 self.with_note(list, self.folder_note.clone())
             }
+            SpaceSection::Collections => {
+                let rows: Vec<AnyElement> = self
+                    .collections
+                    .iter()
+                    .map(|item| {
+                        // 最近一条稿件的标题当"这一格里大概是什么内容"的线索：
+                        // 接口顺手给了（`SeasonsItem.archives`），不用多发一次请求。
+                        let mut meta =
+                            format!("{} · 共 {} 条", item.kind.label(), item.total);
+                        if let Some(first) = item.samples.first() {
+                            meta.push_str(&format!(" · 最近：{first}"));
+                        }
+                        let event = OpenCollection {
+                            kind: item.kind,
+                            id: item.id,
+                            mid: self.mid,
+                            title: item.title.clone(),
+                        };
+                        layout::clickable_row(
+                            format!("collection-{}-{}", item.kind.label(), item.id),
+                            item.title.clone(),
+                            meta,
+                            cx.listener(move |_this, _event, _window, cx| {
+                                cx.emit(event.clone());
+                            }),
+                        )
+                    })
+                    .collect();
+                let more: Vec<AnyElement> = if self.collection_has_more {
+                    let next = self.collection_page + 1;
+                    vec![div()
+                        .flex()
+                        .w_full()
+                        .justify_center()
+                        .py(px(palette::CARD_TEXT_ROW_GAP))
+                        .child(
+                            Button::new("space-collection-more")
+                                .label("再加载一页")
+                                .on_click(cx.listener(move |this, _event, _window, cx| {
+                                    this.load_collections(next, cx);
+                                })),
+                        )
+                        .into_any_element()]
+                } else {
+                    Vec::new()
+                };
+                let list = div()
+                    .flex()
+                    .flex_col()
+                    .w_full()
+                    .gap(px(palette::LIST_GAP))
+                    .px(px(palette::CARD_TEXT_PADDING_X))
+                    .py(px(palette::BODY_PADDING_Y))
+                    .children(rows)
+                    .children(more);
+                self.with_note(list, self.collection_note.clone())
+            }
         }
     }
 
@@ -708,6 +851,8 @@ impl UserSpacePage {
 impl EventEmitter<OpenVideo> for UserSpacePage {}
 /// 从空间页再点进另一个人的空间（相关推荐这类位置以后会有），也走同一个信号。
 impl EventEmitter<OpenUser> for UserSpacePage {}
+/// 点"合集与系列"那一格 = 请外壳压一层内容页（P12）。
+impl EventEmitter<OpenCollection> for UserSpacePage {}
 
 impl Render for UserSpacePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
@@ -721,7 +866,11 @@ impl Render for UserSpacePage {
                 .child(self.filter_bar(cx))
                 .child(self.video_controls(cx))
                 .into_any_element(),
-            SpaceSection::Posts | SpaceSection::Folders => div().into_any_element(),
+            // 图文/收藏/合集这三格没有排序与筛选可给：接口不提供这些参数，
+            // 摆一颗点了没反应的按钮比不摆更糟（QODER.md"不做显示了但不生效的假开关"）。
+            SpaceSection::Posts | SpaceSection::Folders | SpaceSection::Collections => {
+                div().into_any_element()
+            }
         };
 
         div()
