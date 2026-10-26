@@ -17,8 +17,15 @@
 ## 2. 工具链与编译约束
 
 - **本机没有安装 Rust 工具链，也不要安装**（不装 rustup/cargo，不在本地跑 cargo 命令做验证）。
-- 所有编译只通过 GitHub Actions 的 `Build` workflow（手动触发 `workflow_dispatch`），
-  现阶段仅 **Windows x64 release**。
+- 编译只通过 GitHub Actions，2026-10-26（P13）按用途拆成两条：
+  - **`ci.yml`**：**push / PR 自动跑**，只做 **Windows x64 release** 编译 + `cargo test`。
+    这条是"改动还能不能编过"的证据通道，所以刻意不做多平台、不压 UPX（矩阵一次 20 分钟起，
+    放在 push 上会让人不敢推）。
+  - **`cd.yml`**：**手动触发**（`workflow_dispatch`），win/linux × x64/arm64 四个目标，
+    用 `[profile.release-dist]`（LTO + `codegen-units=1` + `strip`）编，UPX 压，
+    发 GitHub Release。**资产只有 exe 本身**（用户定稿："注意只需要打包 exe，不要打包其他东西"）：
+    不塞 dll、不塞 mpv、不塞 README。
+  - 旧的单文件 `build.yml` 已删除；不要再往"手动一条路什么都干"的方向合回去。
 - **不要改成 debug**：gpui 的 Windows 后端（`gpui-pre-windows 0.3.9`）在 `cfg(debug_assertions)` 下
   于运行时用 `D3DCompileFromFile(env!("CARGO_MANIFEST_DIR")/src/shaders.hlsl)` 编译着色器，
   路径被烧进二进制，CI 产出的 debug exe 在别的机器上无法开窗。`runtime_shaders` 特性只管 macOS。
@@ -48,17 +55,28 @@
 - gpui 源码参照放在 `ref/gpui/`，是**我们依赖的 0.3.9 发布版**（含 `gpui_windows` 与三个 `.hlsl`）；
   `ref/gpui-kit/examples/` 是 kit 本地 main，比已发布版本新，照抄前先在 `ref/gpui` 或
   crates.io 发布包里确认该 API 存在。
-- 画质：HEVC 优先 + **默认封顶 1080P（qn ≤ 116）**，不选 4K/HDR/8K（目标机 i5-6200U 硬解不到）。
+- 画质：**默认**封顶 1080P60（qn=116）+ 同档内 HEVC 优先。2026-10-26（P13）他要求设置页能选到 4K，
+  所以 116 从**硬上限**降为**默认值**，允许的范围是 16…127（接口里最高的那档）。
+  **B 站的 `qn` 没有"2K"这一档**（1440p 的内容在 120=4K 里给，`ref/bpi-rs/src/models/stream.rs:8-38`），
+  所以设置页只给 1080P / 1080P 60帧 / 4K 三个真档，**不许摆一个其实等于 4K 的"2K"按钮**。
+  目标机（i5-6200U，Skylake：无 AV1 硬解、HEVC 只到 8bit）解不动 4K/10bit 的代价写在设置页那行下面。
+  编码偏好同理是**能改的默认值**：偏好那一档在同画质里拿最高优先级，那一档没有才退回
+  HEVC > AV1 > AVC（`api/stream_select::codec_score`）。
 - 播放：**外置 mpv 独立进程 + 独立窗口**，不做 `--wid` 嵌入，不自研解码渲染。
   **起播这一路是"把直链 URL 交给 mpv 在线流式播"**——B 站是 DASH 音视频两条流，
   我们只负责拼参数起进程，读字节/切片/缓存全归 mpv 自己，**起播绝不把整片写到磁盘**。
   **2026-10-26 用户开了唯一的一个口子**："下载功能要做一下，**仅这个能下载到外部文件里**"。
   所以下载是**另一条独立的路**（`src/api/download.rs` 自己读字节写文件），不是让 mpv 代下，
   也不是把播放改成"先下再播"；除它以外仍然不许往运行目录之外写任何文件。
-- mpv 可执行文件的位置：**运行同目录的 `mpv.exe`**（`publish/mpv.exe`，2026-10-23 用户定稿），
-  **不走 PATH**：PATH 先命中 `mpv.com`（PATHEXT 把 `.COM` 排在 `.EXE` 前），它会再派生一个
-  mpv.exe，我们 `kill` 不到真正的播放器；用户装的那份还是 mpv-lazy 懒人包，带自己的
-  `portable_config` 与单实例启动器。`which` 依赖因此已删除。
+- mpv 可执行文件的位置（**2026-10-26 P13 改口**，原话："设置内增加配置『MPV播放器位置』
+  （默认在 PATH，支持打开资源管理器选择 mpv.exe）"）：查找顺序是
+  **设置里指定的文件 → PATH 里的 `mpv.exe` → 运行目录的 `mpv.exe`**（纯函数
+  `src/player/mod.rs::resolve_mpv`，三条都有单测）。
+  当年那条坑**没消失，是用两条规则绕开的**：PATH 里 `PATHEXT` 把 `.COM` 排在 `.EXE` 前，
+  按 shell 语义（`which`/`where`）解析会先命中 `mpv.com`——它会再派生一个真正的 mpv.exe，
+  我们 `kill` 不到。所以这里自己拼 `目录/mpv.exe` 再 `is_file()`，**永远不问 `.com`**；
+  设置里写死的那条路径必须"真是个读得到的文件"才算数，否则继续往下找并在设置页说明原因。
+  （`which` 依赖仍然不要加回来。）
 - **不接 mpv 的文本输出**（用户定稿，2026-10-23）：`launch()` 把 stdout/stderr 都设 `null()`。
   别"顺手"改成 `piped()`：接了没人抽水，缓冲区写满会把 mpv 的写阻塞住。要查 mpv 为什么不动，
   就在本机把同一套参数复跑一遍看它自己说什么。
@@ -66,7 +84,8 @@
   进度条、播放时间、暂停、音量、全屏、字幕显示都由 mpv 自带的 OSC 负责，
   **不要**在 `pages/` 里加播放控制按钮或进度行。rustBiliPC 的清单是：主页（首页推荐）、搜索、
   收藏（**P9 起可以点进去看内容，也能搜索**）、历史、待看、下载（**P11 起是真功能**：详情页发起、
-  每次弹框选目录、双文件 `.m4v`+`.m4a`、只下当前那一 P、有进度可取消）、设置（这一版只是关于页）、视频详情、评论区、
+  每次弹框选目录、双文件 `.m4v`+`.m4a`、只下当前那一 P、有进度可取消）、设置（**P13 起是真设置页**：
+  MPV 位置 / 默认画质 / 默认编码 / 调试模式四项都能改并立刻落盘）、视频详情、评论区、
   分集/分P 的呈现（**P12：合集与系列 + 分集面板 + 分段 + 一集自己的多 P**）、清晰度档位（**列表按 `config.json` 的封顶过滤**，P11 修的缺陷）、用户空间（投稿/图文/收藏/**合集**）、拉起 mpv、
   **详情页与评论区的文字可选中复制**（P11）。
   **2026-10-26 用户把"个人中心"拆平了**：不要"我的"这一格，收藏/历史/待看/下载/设置直接做侧栏入口
@@ -120,11 +139,17 @@
   写在 `docs/architecture.md` 第 4.19 节与 `src/pages/windows.rs` 文件头，改之前先读那两处。
   图标名写错**不会报错也不会 panic**，只会画出一片空白，所以加图标前先确认
   `ref/gpui-kit/crates/assets/assets/icons/<名字>.svg` 存在。
-- **落盘位置（2026-10-26 用户定稿，取代旧的 `data/cookies.json`）**：凭据 =
-  `<exe 同目录>/auth.json`（`src/store/auth.rs`），设置 = `<exe 同目录>/config.json`
-  （`src/store/config.rs`）。**别再往 `data/` 里写任何东西**；旧文件只允许在 `auth.json`
-  读不到时作一次性迁移来源（迁移后保留、不删）。都是明文 JSON（用户知情选择），
-  要改加密只动 `save`/`load`。
+- **落盘位置（2026-10-26 P13 用户改口，取代"exe 同目录"那一版）**：`auth.json`、`config.json`、
+  `debug.log` 三样都在**用户数据目录**
+  （Windows `%APPDATA%\ArrowMeo\rustBiliPC`，Linux `$XDG_CONFIG_HOME`/`~/.config` 下的同名子目录；
+  拿不到环境变量才退回 exe 目录下的 `ArrowMeo/rustBiliPC`），入口是 `src/app.rs::settings_dir()`。
+  他的原话："config.json/auth.json/debug.json改为存储到 %APPDATA%/ArrowMeo/rustBiliPC 里，
+  **不要保留任何支持旧位置的json文件的代码**"——所以
+  **`data/cookies.json` 与 `<exe 同目录>/*.json` 的读取、迁移、兼容分支全部删干净了**，
+  以后也别"顺手加个旧位置回退"：那等于把这条定稿擦掉。
+  都是明文 JSON（用户知情选择），要改加密只动 `save`/`load`。
+  这条换目录顺带消掉了一条要靠人记的红线：**取 CI 产物不再可能碰到用户数据**
+  （以前 `debug.log`/`auth.json` 就躺在 `publish/` 里，清空目录等于删掉他的登录态）。
 - **唯一能写到运行目录之外的是下载**（2026-10-26 用户定稿），三条细则一起定了：
   ① **每次下载都弹系统对话框选目录**（`App::prompt_for_paths` + `directories: true`，
   Windows 后端真有实现：`FOS_PICKFOLDERS`，`ref/gpui/gpui_windows/src/platform.rs:1531`），
@@ -140,8 +165,12 @@
   复制剪贴板只有 `App::write_to_clipboard(ClipboardItem::new_string(String))` 一条路（没有 arboard）。
   **和 P10 拖动滚动的冲突要认**：手指/鼠标都是同一条 `WM_MOUSEMOVE`，分不开来源，
   所以按下时用 `TextSelection::is_selectable_at(落点)` 让位——**按在可选中文字上的那一下只选字，不滚页**。
-- **`config.json` 里只允许放"真的有代码在读"的项**。目前只有 `max_quality`（起播的封顶档，
-  被 `api::stream::request_qn` 读走）；设置页这一版是**只读关于页**，不做显示了但不生效的假开关。
+- **`config.json` 里只允许放"真的有代码在读"的项**。P13 起一共四项，每一项都有读取方：
+  `max_quality`（`api::stream::request_qn` + 选流封顶）、`codec`（`api::stream_select::codec_score`）、
+  `mpv_path`（`player::resolve_mpv`）、`debug_log`（`logging::init`，只在启动时读一次）。
+  设置页**能改而且立刻写盘**（`app::update_config`：先改内存快照再写文件，写失败要把原因显示出来），
+  所以不存在"显示了但不生效"的假开关；要加新项必须先有读取方。
+  唯一一处"改了不是马上生效"是调试模式（日志器装上没有二次安装/撤销的口子），界面上明说"下次启动生效"。
 - **每个 `cx.spawn` 返回的 `gpui::Task` 必须持有或 `.detach()`**：Task 被 drop 即取消任务
   （`gpui-pre-scheduler/src/executor.rs:396-402`），裸写 `cx.spawn(...);` 会让"等结果并写回界面"
   那一段永远不执行，症状是请求在 tokio 侧正常返回、界面却卡在加载态、日志里连闭包第一行都没有。
@@ -193,15 +222,23 @@
   "懒加载"，那轮的 exe 就不能当作最终交付物，得再编一轮（2026-10-23）。
 - 取产物一律解到临时目录，再**只**覆盖 `publish/rustbilipc.exe`：`gh run download -D publish`
   遇到同名文件会整体失败（第十轮就是这么静默没换掉的），而 `publish/debug.log`、
-  `publish/auth.json`（以及历史遗留的 `publish/data/cookies.json`）是用户的现场与凭据，
-  **绝不能被清理动作带走**。
+  `publish/auth.json`（以及历史遗留的 `publish/data/cookies.json`）是**上一版留在现场的**用户凭据与日志，
+  **绝不能被清理动作带走**。（P13 之后新数据写在 `%APPDATA%`，但 `publish/` 里那份旧文件仍然不要删——
+  那是他某一次登录的现场，删除不可逆。）
 
 ## 6. 输出与文档
 
 - 中文必须可读：UTF-8，禁止 `\uXXXX` 转义与 GBK 乱码；`.bat` 文件内容保持 ASCII（cmd 按 OEM 代码页解析）。
 - 从 `ref/` 得出的结论要抄进 `docs/`，因为 `ref/` 不入库。
 - **调试靠 `debug.log`，不靠猜测**：GUI 程序没有控制台，日志由 `src/logging.rs` 写到
-  **exe 同目录**的 `debug.log`（与 `auth.json`、`config.json` 同一层，每次启动清空、Debug 级）。
-  从 GitHub 取产物时**只搬 exe**（解到临时目录再 copy），不要清空 `publish/`——日志就在那里。
+  **用户数据目录**的 `debug.log`（与 `auth.json`、`config.json` 同一层，每次启动清空、Debug 级）。
+  **P13 起它默认不产生**：设置页"调试模式"关着时 `logging::init(false)` 不建目录、不开文件、
+  不装 logger、级别 `Off`（`main.rs` 因此必须先读设置再装日志，顺序在 `main.rs` 文件头）。
+  两个例外要知道：① exe 现在是 `#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]`，
+  **是链接期决定的**，所以两种模式下都不弹控制台——"调试模式开着也不弹窗口"不是 bug，
+  要真控制台得另做 `AttachConsole`（没做）；② `config.json` 坏了的那一轮**强制开日志**
+  （调试模式就写在那个坏文件里，不然他既看不到错误也没法打开它）。
+  从 GitHub 取产物时**只搬 exe**（解到临时目录再 copy），不要清空 `publish/`——
+  现在用户数据已经不在那里了，但 `publish/` 里可能还有他自己放的 `mpv.exe` 与旧日志。
   新增任何异步链路时，必须在"提交任务 / 任务内请求前后 / 回到 gpui / 写入状态"四类位置各留日志，
-  否则真机问题无法定位。排查用户问题时先要这个文件。
+  否则真机问题无法定位。排查用户问题时先要这个文件（设置页那一格显示它的路径与"有没有在写"）。

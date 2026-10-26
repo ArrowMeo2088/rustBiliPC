@@ -23,7 +23,7 @@ Bilibili 桌面客户端（Windows x64），功能顺序 **搜索 → 个人 →
 | 放弃 | `ref/gpui-component`（0.2.2）与 Ely 作依赖 | 分别因为：拉 tree-sitter + `lb-wry`（WebView2）且与 0.3.9 类型不兼容；`publish=false` 只能 git 依赖 + Rust 1.95 |
 | API | `bpi-rs = "0.3.1"`，`default-features = false` + 8 个 feature | 关掉 `full` 的 27 个模块，只开 login/search/video/user/fav/historytoview/misc/comment（最后一个是 P6b 评论区；它在 bpi-rs 里写作 `comment = []`，纯 cfg 开关、不引入新 crate） |
 | 异步 | 自建 tokio runtime（`src/app.rs`） | gpui 执行器不是 tokio，reqwest 需要 reactor |
-| 编译配置 | **release**，`lto = "off"`、`strip = false`、`debug = true` | 见下节 |
+| 编译配置 | 日常（`ci.yml`）用 **release**：`lto = "off"`、`strip = false`、`debug = true`；发布（`cd.yml`）用 **`release-dist`**：`lto = "fat"`、`codegen-units = 1`、`strip = "symbols"`、`debug = false` + UPX | 见下节；两份配置的分工在第 4.28 节第 ④ 条 |
 | 依赖锁定 | **提交 `Cargo.lock`** 作为版本种子，CI **不加** `--locked` | 挡住 gpui-pre 每周快照的破坏性变更；本机无 cargo，加 `--locked` 会让任何新增依赖直接卡死 CI |
 
 ### 为什么必须 release
@@ -69,10 +69,10 @@ release 分支（`build.rs` 里 `#[cfg(not(debug_assertions))] compile_shaders()
 
 ```
 src/
-├── main.rs            启动序列：logger → runtime → with_assets → init → theme → set_http_client → 开窗
+├── main.rs            启动序列：**读设置 → 按"调试模式"装日志** → runtime → with_assets → init → theme → set_http_client → 读凭据 → 开窗（GUI 子系统：`#![windows_subsystem]`，双击不弹控制台）
 ├── lib.rs             模块树 + VERSION
-├── app.rs             tokio runtime（OnceLock）、install_tls_provider()、describe_join_error()、exe_dir()/data_dir()
-├── logging.rs         debug.log 文件日志（写 exe 同目录，每次启动清空、Debug 级、零依赖、同时写 stderr）
+├── app.rs             tokio runtime（OnceLock）、install_tls_provider()、describe_join_error()、exe_dir()/**settings_dir()**、**进程级 CONFIG（RwLock）：config()/update_config()**
+├── logging.rs         debug.log 文件日志（写**用户数据目录**，每次启动清空、Debug 级、零依赖、同时写 stderr）；`init(enabled)` **可整个关掉**，`log_path()` 返回 `Option`
 ├── theme.rs           全局主题覆盖：accent = #FB7299，accent_foreground = #1F1F1F
 ├── api/
 │   ├── mod.rs         spawn_on_api_runtime()：gpui ↔ tokio 的调用桥
@@ -89,36 +89,38 @@ src/
 │   ├── toview.rs      待看：historytoview().toview_list()（零参数、没有分页、要登录、不签 WBI）
 │   ├── stream.rs      播控：video().play_url() 取地址 + 选流成 StreamChoice（DASH 双流 / durl 单文件、两轨大小与备用域名、落盘后缀）；请求 qn 与封顶档都取自 `app::config()`，**清晰度列表也按它过滤**
 │   ├── download.rs    **下载（P11）**：StreamChoice → DownloadRequest，用 `App::http_client()` 分块读流写盘（`.part` + 改名、备用域名、标志取消、durl 拒绝）；文件名清洗与进度读数都是纯函数
-│   └── stream_select.rs  DASH 选择纯函数（HEVC 优先；封顶值由调用方给，默认与硬上限 116）
+│   ├── probe.rs       **起播前的地址探测（P13）**：`Range: bytes=0-0` 问一句"这个地址通吗"，主地址不通就按顺序换 `backupUrl`；`ordered_urls`/`cdn_headers` 与下载共用，`choose`/`describe`/`host_of` 是纯函数
+│   └── stream_select.rs  DASH 选择纯函数（画质档优先，同档内**先按设置里的编码偏好**、再按 HEVC > AV1 > AVC；封顶值由调用方给）
 ├── store/
-│   ├── auth.rs        明文 JSON 凭据落盘（<exe>/auth.json）+ cookie_header() 给 mpv；旧 data/cookies.json 只作一次性迁移来源
-│   └── config.rs      明文 JSON 设置落盘（<exe>/config.json，只有 max_quality 一个字段，越界由 clamp_quality 收回）
+│   ├── auth.rs        明文 JSON 凭据落盘（`<用户数据目录>/auth.json`）+ cookie_header() 给 mpv；**旧位置（exe 同目录 / data/cookies.json）的读取与迁移代码已全部删除**
+│   └── config.rs      明文 JSON 设置落盘（`<用户数据目录>/config.json`）：**四项**（`max_quality`/`codec`/`mpv_path`/`debug_log`）都有读取方；`clamp_quality` 收边界、`LoadOutcome` 让"配置坏了"那一轮强制开日志
 ├── player/
-│   └── mod.rs         mpv 参数构造（一律 `--opt=value`）+ launch() 拉起进程 + Referer/UA 常量 + 运行目录定位
+│   └── mod.rs         mpv 参数构造（一律 `--opt=value`）+ launch() 拉起进程 + Referer/UA 常量 + **resolve_mpv()：设置指定 → PATH → 运行目录（只拼 mpv.exe，绝不问 .com）**
                       **不做播放期 UI，也不接它的命名管道/文本输出**（范围定稿见第 4.3 节）
 ├── pages/
 │   ├── mod.rs         页面层出口 + 四个共用导航事件 `OpenVideo` / `OpenUser` / `OpenFolder` / `OpenCollection` + 本地关键词过滤 `matches_keyword`
 │   ├── windows.rs     窗口这一层：主窗 1120×760 与登录窗 320×420；**先开主窗再关登录窗**（Windows 默认 QuitMode 会在最后一个窗口关闭时退进程）
-│   ├── gate.rs        登录窗根视图：摆登录页 + 收到 LoginSucceeded 后在**任务里**换窗口（root.rs 已删除，不再原地换视图）
-│   ├── loading.rs     各入口页共用的"投请求 → 序号判定 → 写回实体"样板（Task 必 detach）
+│   ├── gate.rs        登录窗根视图：摆登录页 + 收到 LoginSucceeded 后在**任务里**收尾；`GateMode::{Startup, Relogin}`（P13）——启动是"开主窗再关自己"，重登是"只关自己再刷新外壳"，走错会出现两个主窗口
+│   ├── loading.rs     各入口页共用的"投请求 → 序号判定 → 写回实体"样板（Task 必 detach）；P13 起顺手记 `-101` 并在实体更新之外那层调 `relogin::flush`
+│   ├── relogin.rs     **凭据过期的统一处置（P13）**：进程级协调器（客户端 / 外壳弱句柄 / 登录窗句柄），判定用库里的 `requires_login()`，删凭据 + 去重开小窗
 │   ├── shell/         外壳：**80 宽窄侧栏**（左上是账号头像、只显示不可点；Lucide 图标 + 两字的七入口 主页/搜索/收藏/历史/待看/下载/设置；栈非空时第一项是"返回"，点入口**先清栈再换页**）+ **下钻栈**（`StackPage::{Detail, Space, Folder}`）+ **创建下载队列实体并注入两页**
 │   ├── home/          主页（P6 第一步，默认页）：首页推荐流网格 + "换一批"
 │   ├── login/         扫码登录页（二维码 + 1.5s 轮询 + 过期自动重载），住在自己的小窗里
-│   ├── favorites/     收藏页两层：列表（本地筛选 + 点进去发 `OpenFolder`）与内容页 `folder.rs`（卡片网格 + 服务端 keyword + 加载更多）
-│   ├── history/       历史页：最近观看卡片网格（本地筛选 + 游标"再加载 30 条"把范围手动扩出去）
+│   ├── favorites/     收藏页两层：列表（本地筛选 + 点进去发 `OpenFolder`）与内容页 `folder.rs`（卡片网格 + 服务端 keyword + 加载更多；**P13：滚到底自动接下一页**）
 │   ├── toview/        待看页：稍后再看列表（接口一次给全，所以没有分页控件；本地筛选）
 │   ├── download/      下载：**`queue.rs` = 任务队列实体**（重名编号、进度事件回传、按标志取消、只清已结束的记录）+ **`view.rs` = 任务列表**（进度、取消、打开所在目录、用 mpv 打开并管好子进程、移除记录）
-│   ├── about/         设置页（这一版是关于）：版本 / 账户 / auth.json 与 config.json 路径 / 画质上限 / mpv / 日志
-│   ├── detail/        详情页（主列信息 + 播放块【播放 / **下载这一 P**】+ 字幕 + 评论区；右栏 360 = **分集（分段 chips + 一集一行 + `N P` 角标）** + 选集/本集的分 P + 相关推荐；持 mpv 子进程并在 Drop 时收掉；**标题/简介/评论可选中复制**）
-│   ├── space/         用户空间页（P7：资料卡 + 投稿/图文/收藏三块，投稿带分区筛选 chips；**P12 加第四格"合集"**：一次请求同时列合集与系列，点一行发 `OpenCollection`）；
-│   ├── collection/    **合集/系列内容页（P12）**：一列分集（跨页累加 + "再加载一页"），接口没有 `keyword` 所以**不放搜索框**；
-│   └── search/        阶段一页面（view.rs 为根视图）
+│   ├── about/         **设置页（P13 起是真设置页）**：账户 + 本机路径，加**四个能改的块**（默认播放画质 / 默认播放编码 / MPV 播放器位置（含"选择…"系统对话框）/ 调试模式），改一项就 `update_config` 落盘一次、失败原因写在页面上
+│   ├── history/       历史页：最近观看卡片网格（本地筛选 + 游标"再加载 30 条"；**P13：滚到底自动接下一页**）
+│   ├── detail/        详情页（主列信息 + 播放块【播放（**P13：起播前先探地址、不通就换 `backupUrl`**）/ **下载这一 P**】+ 字幕 + 评论区；右栏 360 = **分集（分段 chips + 一集一行 + `N P` 角标）** + 选集/本集的分 P + 相关推荐；持 mpv 子进程并在 Drop 时收掉；**标题/简介/评论可选中复制**）
+│   ├── space/         用户空间页（P7：资料卡 + 投稿/图文/收藏三块，投稿带分区筛选 chips；**P12 加第四格"合集"**：一次请求同时列合集与系列，点一行发 `OpenCollection`；**P13：图文与合集两格滚到底自动接下一页**——投稿那一格是整屏换页，不自动）；
+│   ├── collection/    **合集/系列内容页（P12）**：一列分集（跨页累加 + "再加载一页"；**P13：滚到底自动接下一页**），接口没有 `keyword` 所以**不放搜索框**；
+│   └── search/        阶段一页面（view.rs 为根视图；**P13：滚到底把下一页"接到"列表尾巴**，手动上/下页仍整屏换）
 ├── ui/
 │   ├── palette.rs     **颜色与度量的唯一出处**：把 Bili.Copilot 的 WinUI 主题键与 xaml 数字翻译成 gpui 的值
 │   ├── layout.rs      页头/分隔线/区块标题/侧栏项/圆头像/统计行/卡片容器
 │   ├── qr.rs          二维码：qrcode-generator 出布尔矩阵，div 网格绘制
 │   ├── cover.rs       封面显示前必过：补协议 + hdslb 图床 `@{w}w_{h}h.jpg` 缩略图后缀
-│   ├── scroll.rs      滚动容器的"按住拖动滚动"（Windows 上 gpui 没有触摸管线，靠注入的鼠标消息；见第 4.23 节）；**P11 起按下时先问 `TextSelection::is_selectable_at`，落在可选中文字上就让位给选字**（第 4.25 节）
+│   ├── scroll.rs      滚动容器的"按住拖动滚动"（Windows 上 gpui 没有触摸管线，靠注入的鼠标消息；见第 4.23 节）；**P11 起按下时先问 `TextSelection::is_selectable_at`，落在可选中文字上就让位给选字**（第 4.25 节）；**P13 加自动翻页判据**：`is_at_bottom`/`should_auto_page`/`DragScroll::scrollable`
 │   └── video_card.rs  竖卡 232×238 与侧栏横卡 104（flex_wrap 当 UniformGrid 用、时长角标、hover、可点击）
 └── tests/             单元测试集中地（纯逻辑）
 ```
@@ -210,8 +212,9 @@ cx.spawn(async move |this, cx| {
 
 ### 4.4 凭据
 
-`<exe 同目录>/auth.json`，明文（定稿选择，风险已在 `store/auth.rs` 顶部写明；
-2026-10-26 从 `data/cookies.json` 搬过来，旧文件只作一次性迁移来源、不删）。
+`<用户数据目录>/auth.json`（Windows `%APPDATA%\ArrowMeo\rustBiliPC`，见第 4.27 节），明文
+（定稿选择，风险已在 `store/auth.rs` 顶部写明）。位置换过两次：`data/cookies.json` →
+exe 同目录（2026-10-26 上午）→ `%APPDATA%`（2026-10-26 下午 P13，**旧位置的读取与迁移代码已全部删除**）。
 `bpi_rs::session::Account` 只 derive `Deserialize`，所以用 `Auth` 做可序列化镜像，
 读回时构造 `Account` 交给 `BpiClient::set_account`。四字段（DedeUserID/SESSDATA/bili_jct/buvid3）
 必须齐全，缺 `buvid3` 会被判定不完整。
@@ -954,6 +957,145 @@ div().text_size(..).text_color(..)                       // 样式仍留在父 d
 `collection/info.rs:26-55`）。想知道只有两条路：点进去看它自己的 `view`，或在详情页那节分集里看
 `arc.videos`。这是两条接口给料能力的真实差别，界面上不抹平。
 
+### 4.27 落盘目录搬到 `%APPDATA%` + 设置页四项真能改（P13，2026-10-26）
+
+**这一节改的是 4.21 的落盘结论**（那份"exe 同目录"只活了半天）。用户原话：
+"`config.json`/`auth.json`/`debug.json` 改为存储到 `%APPDATA%/ArrowMeo/rustBiliPC` 里，
+**不要保留任何支持旧位置的 json 文件的代码**"。
+
+- 唯一入口是 `src/app.rs::settings_dir()`：Windows 取 `APPDATA`，非 Windows 取
+  `XDG_CONFIG_HOME`/`~/.config`，两个环境变量都拿不到才退回 `<exe 目录>/ArrowMeo/rustBiliPC`
+  （服务/计划任务那种启动方式会走到这一支；不 panic，设置页那行照旧把真实路径写出来）。
+  三个写盘点（凭据、设置、日志）都先 `ensure_settings_dir()` 再落。
+- **旧位置一行代码都不剩**：`Auth::legacy_path()`、`load()` 里"读不到就去看一眼
+  `data/cookies.json` 并迁移"那一整块、`app::data_dir()` 全部删除。
+  **磁盘上那些旧文件没删**（`publish/auth.json`、`publish/data/cookies.json`）：那是他某一次登录的现场，
+  删掉不可逆，而现在代码根本不会再读它们，留着不影响任何东西。
+- 附带收益：以前"取 CI 产物只许覆盖 exe、绝不整目录清空 `publish/`"这条要靠人记的红线，
+  现在结构上安全了——用户数据不在产物目录里。规矩本身仍留在 QODER.md 第 5 节
+  （`publish/` 里还有他自己放的 `mpv.exe` 和旧日志）。
+- 启动顺序因此变了：**先读设置，再装日志**（"要不要写 `debug.log`"本身就是设置里的一项）。
+  `main.rs` 文件头那 1–5 步就是这份顺序的权威说明，改启动流程先改那里。
+
+设置页从"只读关于页"变成四项能改（`src/pages/about/view.rs`）。四项与它们的读取方：
+
+| 设置项 | 落在 `config.json` | 真的读它的代码 | 生效时机 |
+| --- | --- | --- | --- |
+| 默认播放画质 | `max_quality` | `api::stream::request_qn()` + `stream_select::pick_video` 的封顶 + `quality_options` 过滤 | 下一次起播/下载 |
+| 默认播放编码 | `codec` | `api::stream::preferred_codec()` → `stream_select::codec_score` | 下一次起播/下载 |
+| MPV 播放器位置 | `mpv_path`（空串=自动） | `player::resolve_mpv` → `find_mpv` → `launch` | 下一次起播 |
+| 调试模式 | `debug_log` | `logging::init(enabled)`（`main.rs` 只在启动时调一次） | **下一次启动** |
+
+三处**照字面做会做错**的地方：
+
+1. **没有"2K"这一档**。他要的清单里写了 2K，但 B 站的 `qn` 是固定档位代码
+   （`ref/bpi-rs/src/models/stream.rs:8-38`：80/112/116/120/125/126/127），
+   **1440p 的内容是在 120(4K) 这一档给的**。摆一个"2K"按钮实际发的就是 4K 的请求，
+   属于 QODER.md 禁的"界面说的和发出去的不是一回事"。所以按钮是 1080P / 1080P 60帧 / 4K，
+   这句话写在下面一行说明里。
+2. **116 从硬上限降为默认值**。以前 `stream_select::MAX_QUALITY_ID = 116` 同时是"默认"和"天花板"，
+   现在拆开：`DEFAULT_QUALITY_CAP = 116`（默认，注释说明它为什么对目标机是好选择）
+   与 `config::MAX_QUALITY_ID = 127`（允许写到的最高档）。`.fourk(want_qn >= 120)` 跟着设置走，
+   所以没选 4K 时请求里那位仍然是 0。**代价没有藏**：4K 要大会员、目标机大概率软解丢帧，写在按钮下面。
+3. **编码偏好必须真的压过默认优先级**。`codec_score(codecs, preferred)`：命中偏好给 3，
+   否则按"省带宽"排 HEVC 2 > AV1 1 > AVC 0。他选 AV1 时不该在同档里被偷偷换成 HEVC
+   ——那界面就成了假话。那一档 B 站没给时才退回默认顺序（`Avc` 偏好下遇到只有 HEVC/AV1 的流
+   会选 HEVC，单测 `explicit_codec_preference_beats_the_default_order` 钉住这两半）。
+   画质档仍永远排在编码之前（`quality_still_outranks_codec_preference`）：不会为了 HEVC 放弃更高档。
+
+**mpv 位置这一项推翻了他自己 2026-10-23 那条"只认运行目录、不走 PATH"**（新原话："默认在 PATH，
+支持打开资源管理器选择 mpv.exe"）。当年那个坑没消失，是用两条规则绕开的：
+查找顺序"设置指定 → PATH → 运行目录"，但每一步都自己拼 `目录/mpv.exe` 再 `is_file()`，
+**不经过 `PATHEXT`/shell 的 `where` 语义**（那会先命中 `mpv.com`，而它会再派生一个真正的 mpv.exe，
+我们 `kill` 的只是外层启动器 —— 第十八轮真机实测），设置里写死的路径必须是真实文件，
+否则跳过它继续找并把原因显示在设置页那一行。"选择…"用 `App::prompt_for_paths{ files: true, .. }`
+（`PathPromptOptions` **没有扩展名过滤**这一项，能给的只有 `prompt` 那句文案）；
+"恢复自动"只在真指定过才出现（否则是一颗什么都不做的按钮）。
+`resolve_mpv`/`path_directories` 是纯函数、注入 `exists` 判定，三条顺序都有单测。
+
+**调试模式**：`logging::init(enabled)`，关着时不建目录、不开文件、不装 logger、`set_max_level(Off)`，
+全项目那些 `log!` 都是空转。`log_path()` 改成 `Option<PathBuf>` 并且**只在真开出文件时**记路径
+（以前它会造一个"看起来有"的路径，关掉调试模式后那就是假信息）。
+两条连带事实要记住：① 控制台的有无是**链接期**子系统（`main.rs` 的
+`#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]`），所以两种模式下都不弹窗口，
+"调试模式开着也不弹控制台"不是 bug，真要做要另写 `AttachConsole`（没做）；
+② 配置**坏了**的那一轮强制开日志（`LoadOutcome::RecoveredFromBroken`）——
+调试模式就写在那个坏文件里，不开日志他就既看不到错误也没法打开它。
+`CONFIG` 从 `OnceLock` 换成 `RwLock`（`OnceLock` 装一次就换不掉，"能改"就成了假设置），
+写盘走 `app::update_config(闭包)`：**先改内存快照、再写文件**，失败把原因显示在页面上
+（顺序反过来会出现"界面显示旧值、实际按新值跑"这种更难受的分裂）。
+
+### 4.28 起播换备用域名、`-101` 自动重登、自动连续翻页（P13，2026-10-26）
+
+他点的三件，都落在"客户端能真正控制的那一层"，没有一件是靠换技术栈绕开的。
+
+**① 播放的 `backupUrl` 只能在"交给 mpv 之前"用**（`src/api/probe.rs`）。
+下载是我们自己读字节，失败可以当场换下一个地址（4.24）；播放是 `launch()` 把 URL 交给 mpv，
+**它内部用的地址我们既看不到也换不了**。所以起播前给每条候选地址发一个 `Range: bytes=0-0`
+的 GET，第一个"能用的"才交给 mpv。四条口径：
+- 请求头与交给 mpv / 交给下载的是**同一组**：`probe::cdn_headers()`（凭据 Cookie）+
+  `player::BILIBILI_REFERER` + `MPV_USER_AGENT`，`ordered_urls()`（主地址在前、去空去重）也是两边共用，
+  `download.rs` 里那两份私有副本删掉了。头不一致就会出现"我们探到 403、mpv 却能播"这种假结论。
+- 200/206/3xx 都算通（有的 CDN 不认 Range 直接回 200；我们不读体、立刻丢弃），
+  403/404/416/5xx 不算。**403 也换域名**：B 站某个边缘节点抽风是常见现象。
+- 超时用 `BackgroundExecutor::timer()` + `futures::future::select`（6 秒）夹在外面。
+  这一段跑在 gpui 前台任务里、用 gpui 的 `HttpClient`（与封面图、下载同一条 HTTP 路），
+  **不引第二套 HTTP 栈**，也不用 tokio 定时器（那是 bpi-rs 那一侧的事）。
+- **全探不通时仍然把主地址交给 mpv**，界面写"每个地址都探不通（…），仍按主地址交给 mpv 试一次"：
+  探测可能被代理/防火墙/CDN 对 Range 的怪脾气误判，而 mpv 自己还有一次机会。
+  换址成功时那句"视频轨主地址不通，已换 <主机名>（a：HTTP 403）"写在提示最前面。
+  只给**主机名**：完整直链里是签名令牌（`deadline`/`gen`），不该显示到界面上。
+- 探测期间用户又点播放/换 P：`probe_seq` 一变，旧结果丢（4.9 那条老规矩）。
+  happy path 只多两个小请求（视频、音频各一），探到通就不再问它的备用域名。
+
+**② 凭据过期自动重登**（`src/pages/relogin.rs`）。判定只用库里的 `BpiError::requires_login()`
+（`code ∈ {-101, -401, 800501007}` 或 HTTP 401），**不在我们这边再抄一遍错误码**。
+处置 = 删掉 `auth.json` + 开一个扫码登录小窗。四条规矩：
+- **判断与处置分两步**：`relogin::message(&error)` 翻文案并记一个进程级原子布尔，
+  真正开窗在 `relogin::flush(&mut AsyncApp)` 里做——`App::open_window` 会强制画一帧，
+  不能塞进某个实体的 `update`（4.11/4.19 那条）。走 `loading::spawn_into` 的页面自动有这两步；
+  detail/space/search/home 那 12 处手写 `cx.spawn` 是同一对调用。
+- **去重记的是窗口句柄而不是布尔**：协调器存 `Option<AnyWindowHandle>`，
+  "还在不在"用 `handle.update(..).is_ok()` 问一句。用户直接关掉小窗（不扫了）时那句会失败，
+  登记自动清掉，下一次 `-101` 就还能再开一次。这样就不需要 `on_window_closed` 观察者
+  （它要 `WindowId`，还得有人长期持有 `Subscription`）。
+- **没登记客户端就不动**：启动时本机就没凭据的那一窗由 `main.rs` 开，它同时把句柄登记进来，
+  所以跑起来后的第一次 `-101` 不会在同一个现场再开第二个窗。
+- **重登成功不等于再开一个主窗口**：登录窗现在有两种收尾（`pages::gate::GateMode`）——
+  `Startup` 仍是"先开主窗、再关自己"，`Relogin` **只关自己**，然后叫外壳
+  `reload_after_relogin(mid)` 重取当前那一格（顺带把收藏/设置两页记住的 mid 换掉）。
+  走错模式的症状很具体：桌面上出现两个一模一样的主窗口。
+  下钻栈**不动**：清栈会 drop 详情页实体，`DetailPage::Drop` 会 kill 我们在放的 mpv
+  （"子进程必须有归宿"），那等于"重登把视频掐了"。
+  其余格子仍按各自 `ensure_loaded`（它们此刻的状态是"失败"，`ensure_loaded` 认为加载过就不再取）——
+  **这是这一版的取舍**：只保证用户看得见的那一格是新数据。
+
+**③ 自动连续翻页**。判据集中成一个纯函数 + 两个小方法：
+`ui::scroll::should_auto_page(scroll, has_more, items, loading)`，四条都必要——
+有下一页、列表非空（空列表的"到底"是还没加载，不是滚到底）、**没有在途请求**
+（少了这条，游标类分页会在同一个游标上连发同一个请求）、这一帧真的有可滚的行程
+（`is_at_bottom` 在"零行程"时按定义给 `true`，一屏装得下的列表不该"打开页面就自动捞三页"）。
+提前量 `AUTO_PAGE_MARGIN = 240.`（约两行卡片），把等待藏在滚动里。
+`render` 里读到的偏移来自**上一帧**布局，所以刚加长列表那一帧可能读到旧行程——
+效果只是"晚一帧触发"，不会连发。接上的页面：**观看历史**（游标）、**收藏夹内容**（页码+`has_more`）、
+**合集与系列内容**（页码，`has_more` 是我们按已加载条数算的那份）、**搜索**（页码 + `num_pages`）、
+**空间页的图文与合集**两格。原来那排"加载更多/下一页"按钮全部留着——
+判据万一没命中（窗口很高、一屏装完），手点还能走。
+
+两处**故意没做**，都写在代码注释里：搜索的自动翻页是**接到列表尾巴**（`append = true`），
+而点"上一页/下一页"仍然整屏换成那一页（人在看第 2 页时列表突然变成第 3 页是最难受的；
+追加失败也**不清列表**，与历史/收藏内容页同一条口径）；
+空间页**投稿**那一格是"整屏换一页"（还有分区筛选与上下页），自动续页要先改成追加模式，
+那是另一件事；**评论区**不自动翻——一页 20 条、翻页是随机访问，自动全捞会把"看看评论"变成几十次请求。
+
+**④ CI/CD 拆开**（`.github/workflows/`，`build.yml` 删除）：
+`ci.yml` = push/PR 自动跑、只 win x64 release + `cargo test`（本机没工具链，这一条是编译证据通道，
+矩阵会让人不敢推）；`cd.yml` = 手动、win/linux × x64/arm64 四个目标、
+`[profile.release-dist]`（LTO + `codegen-units=1` + `strip`）+ UPX（`-9 --lzma`，压失败就发未压缩那份）
++ `gh release create`，**资产只有可执行文件**。`release-dist` 不写 `panic = "abort"`：
+`app::describe_join_error` 靠 tokio 把任务 panic 变成 `JoinError` 才能把崩溃原因说给人看。
+四个目标里 win-x64 是长期验证过的，另三个是这一版**新配上、还没跑过**的（风险表第 31 条）。
+
 ## 5. 阶段进度
 
 
@@ -978,6 +1120,7 @@ div().text_size(..).text_color(..)                       // 样式仍留在父 d
 | P11 | 详情页与评论区文字**可选中可复制**（第 4.25 节）+ **下载**（第 4.24 节：双文件 `.m4v`+`.m4a`、每次弹框选目录、只下当前 P、进度与取消、备用域名、打开所在目录/用 mpv 打开）+ 顺手修掉 roadmap R0 的两条（清晰度按钮按封顶过滤、`src/README.md` 里那条已经不存在的 `--input-ipc-server` 说法） | **编译与测试已绿**（第四十二轮 75 passed、零 Rust warning，产物 `4338445`，md5 `dd020f45…`；第四十轮红一次、第四十一轮绿但剩两条 warning，见第 8 节）；待真机看：选字与拖动滚动的分界（风险第 24 条）、弹框能不能正常选到目录、403/时效表现（风险第 25 条） |
 
 | P12 | 空间页第四格**合集与系列** + 点进去的**内容页**（分页）+ 详情页右栏**分集**那一节（分段 chips、跨段连续行号、`N P` 角标、"本集的分 P"）（第 4.26 节） | **编译与测试已绿**（第四十三轮一次过：82 passed、零 Rust warning、Cargo.lock 零差异，产物 `858d275`，md5 `a591abdf…`）；待真机看：他那两个合集（含 189 集那个）能不能列全、分段切换、点一集进去还能不能正常播/下 |
+| P13 | 设置页**四项真能改**（MPV 位置 / 默认画质 / 默认编码 / 调试模式，第 4.27 节）+ 三件补齐（起播前探地址换 `backupUrl`、`-101` 自动开重登小窗、滚到底自动翻页，第 4.28 节）+ 落盘搬到 `%APPDATA%/ArrowMeo/rustBiliPC`（旧位置代码清零）+ CI/CD 拆成 `ci.yml`/`cd.yml`（多平台 + LTO/strip + UPX + Release，资产只有 exe） | **编译中**（第四十四轮红 5 条、第四十五轮 `f71490a` 修完正在跑，见第 8 节）；待真机看：设置页四项改完是不是真的生效（尤其编码偏好与 4K 档）、`-101` 那一路会不会自己弹出小窗、滚到底翻页顺不顺、`%APPDATA%` 里三个文件长得对不对 |
 
 ## 6. 已知风险与待验证
 
@@ -1011,6 +1154,10 @@ div().text_size(..).text_color(..)                       // 样式仍留在父 d
 | 26 | **没有队列上限**：点五个稿件就是五个任务同时在跑（每个任务内部两条轨是顺序写的），带宽与文件句柄都归 tokio 的多线程 runtime | 真机觉得太满就加"同时在跑不超过 N"的排队；现在先把取消做确实 |
 | 27 | **合集/系列那三条接口的结构是严格的**：`Archive` 一个 `#[serde(default)]` 都没有（`collection/info.rs:25-55`），`SeasonsMeta`/`SeriesMeta` 同理，B 站少给任一字段就整次解析失败（与待看第 21 条、收藏夹内容第 23 条同一类） | 错误只写进本页提示位（空间页那一格 / 内容页那一页），别处照常；日志有原文。真机若稳定复现，照第 4.16 节主页那条同法改成自己读 `Value` |
 | 28 | **分集那一路是我们自己发的第二个 `view` 请求**（第 4.26 节）：它比库里那次多一倍请求量，而且 B 站若把 `ugc_season` 改名/挪走，我们只会"少一节面板"，不会报错 | 宽容解析 + 失败只写进 `notes` 那一行（"分集信息没取到：…"），主体照常；日志里 `分集：标题（N 集，本次列出 M 集）` 一行能判断是"没给"还是"没解析出来"。真要合并成一次请求，就得整块换成自己读 `view`——那是架构决定，得他点头 |
+| 29 | **起播前的地址探测是我们替 mpv 做的一次判断**（第 4.28 节）：`Range: bytes=0-0` 在个别 CDN/代理上可能被拒（416/403），那样会"明明能播却写成换了备用域名"；探测也带来每次起播 2 个小请求与最长 6 秒/条的等待 | ① **200 也算通**，不把"不认 Range"当失败；② 全探不通时**仍然把主地址交给 mpv**（误判不会变成"彻底播不了"）；③ 换址与失败原因都写在提示里（只写主机名，不写带签名令牌的完整 URL），真机若发现"每次都说不通"，看日志里 `CDN 探测完成 视频=N` 那一行就能判断是探测的问题还是 CDN 的问题；④ 探测期间换 P/再点一次播放由 `probe_seq` 作废，不会串台 |
+| 30 | **`-101` 自动重登会删掉 `auth.json`**（第 4.28 节）：如果哪条接口在**没登录也会成功**的场景里回了 `-101`（或库里 `requires_login` 的口径将来变宽），就是"好端端把凭据删了"；另外重登只刷新当前那一格，其余页面此刻仍是失败态 | 删之前先 `log::info!` 写清是哪一路判定的（真机出问题看 `debug.log` 第一行就有）；`Auth::clear()` 失败只 warn、不挡住开窗（拿不到新凭据时旧文件留着反而有用）；同一进程里靠"登录窗句柄还在不在"去重，不会开出一排小窗；其余格子的"重新加载"按钮都还在 |
+| 31 | **`cd.yml` 的四个目标里只有 win-x64 是长期编过的**：win-arm64 要 runner 镜像里有 MSVC ARM64 工具，两个 Linux 目标要 gpui 的一串系统库（X11/wayland/fontconfig/ALSA/vulkan），`ubuntu-24.04-arm` 这个 runner 标签是否存在也没验过；UPX 压过的 Rust/GUI exe 还有被杀软误报或压坏的先例风险 | 矩阵是 `fail-fast: false`，一个目标红不影响其余出产物；UPX 那一步**失败就发未压缩那份**（不为了压尺寸把发布卡死）；Linux 依赖那一步只装公共包，没有额外源。**第一次真跑完必须把结论回填本节与 QODER.md 第 2 节**（哪个目标真绿、报什么错），别把"配上了"当"能用了" |
+| 32 | **自动连续翻页在 `render` 里判断**（第 4.28 节）：`ScrollHandle::max_offset()` 反映的是**上一帧**布局，所以刚加长列表那一帧读到的是旧行程；另外窗口很高、一屏装得下时 `is_at_bottom` 恒为真 | 四条判据里 `scrollable()` 与 `loading` 就是为这两条准备的（前者挡"零行程也触发"，后者挡"同一游标连发"）；每页的"加载更多/下一页"按钮全部保留，自动那一路没命中还能手点。若真机发现"翻两页就停住"，先看日志里那句"滚到底，自动取第 N 页"有没有出现 |
 
 ## 7. 维护规则
 
@@ -1728,3 +1875,47 @@ error[E0277]: the trait bound `CommentSortKind: std::default::Default` is not sa
 ③ 内容页"再加载一页"到底能不能翻到底（`提交 合集内容 …` 那行的"总数"与"本页"对不对得上）。
 库里那份类型没带 `ugc_season`，所以 ① 走的是我们自己发的第二个 `view`——
 它失败时日志里是 `取分集信息失败（详情页照常显示）: …`，界面上是"部分信息缺失：分集信息没取到…"。
+
+### 第四十四轮（P13 全量一次提交）：红，5 条错
+
+| 项 | 结果 |
+| --- | --- |
+| 触发 | **push 自动**（新 `ci.yml` 第一次跑，SHA `3b0bcf2`，run 40334131522） |
+| 结果 | **failure**，红在 `Build (release)`；`Test` 没跑到 |
+| 错误 | `E0308`×2（detail 的 `audio_url` 两个分支一个给 `String` 一个给 `Option<String>`；gate 把 `AsyncApp::update` 的返回值当 `Result` 判）、`E0502`+`E0521`×2（`cx.background_executor()` 那份句柄**借的是 `cx`**，于是 `cx.notify()` 与 `cx.spawn` 一起炸） |
+
+**这一轮值得记的是三条新事实**（都是"文档里没写、只能实测"的那类）：
+
+1. **`AsyncApp::update` 返回闭包的 `R` 本身，不是 `Result`**（`open_window` 那条老路之所以
+   `if let Err` 成立，是因为闭包自己返回 `anyhow::Result`）。上一版 gate 的 Startup 分支照抄了那个
+   写法，Relogin 分支的闭包返回 `()`，于是 `if let Err(error) = outcome` 当场类型错。
+2. **`Context::background_executor()` 拿到的句柄借的是 `cx`**：第四十四轮那三条错其实是同一条——
+   存进局部变量就一路占着不可变借用（`cx.notify()` E0502），把它搬进 `cx.spawn` 的 `'static` future
+   更是直接 E0521。**`.clone()` 一下才是 owning 的那份**，这行不是多余的 clone（注释里写了原因）。
+   `pages/login/view.rs` 里早就有 `cx.background_executor().timer(..)` 的现成写法，
+   但那是"当场用掉"、不存变量，所以照抄时看不出差别 —— **看到例子要先看它有没有把值留下来**。
+3. **`ci.yml` 按 push 自动跑起来了**：从推送到红只用 5 分钟（缓存全命中），
+   比原来"手动 dispatch + 等排队"快得多，这就是把它拆开的收益，当场拿到证据。
+
+### 第四十五轮：红 1 条
+
+`Config::load_or_create` 不存在（E0599）—— 上一版把它留成了模块级自由函数 `config::load_or_create()`，
+而 `main.rs` 按 `Config::load_or_create()` 调。**改法不是把调用点改掉，而是把它做成关联函数**：
+三个落盘点各自一个入口（`Auth::load`、`Config::load_or_create`、`logging::init`）读起来才对称。
+改的过程中差点把 `load_or_create` 塞进 `LoadOutcome` 枚举里 —— 我用来定位的那个 `}`
+其实是枚举的闭合括号。**教训：跨结构体/枚举边界的替换要连上面的 `impl`/`enum` 一起读一遍再动手。**
+
+### 第四十六轮（P13 绿）：102 passed、零 Rust warning
+
+| 项 | 结果 |
+| --- | --- |
+| SHA | `85ef8ff`（run 40336309511） |
+| Build | success，`cargo build --release` 58.33s（缓存命中） |
+| Test | **102 passed / 0 failed**（上一版 82，本轮 +20：选流偏好 5、设置 5、mpv 定位 4、探测 6 里挑纯函数部分、自动翻页 2…… 全在 `src/tests/`） |
+| Rust warning | **0 条**（日志里只剩 runner 自己的 `save-always` 弃用提示与 node 的 `--trace-deprecation` 行，那不是我们的 warning） |
+| Cargo.lock | 本轮**没加任何依赖**：`futures`/`tokio` 都是原有的（探测用 `futures::future::select` + gpui 的 `timer`），要拿 diff 再核一次 |
+
+**本轮交付之后 `ci.yml` 补了一个步骤**：原来那份只上传 `Cargo.lock`，没有 exe 的 artifact ——
+按"日常真机验证取 ci 产物、`cd.yml` 才是发布"的分工，这是漏的。补上
+`Upload Windows x64 release artifact`（`path: target/release/rustbilipc.exe`，
+**只有 exe、`if-no-files-found: error`**），产物从第四十七轮起才有。

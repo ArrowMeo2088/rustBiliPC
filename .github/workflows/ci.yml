@@ -88,6 +88,16 @@ jobs:
         shell: bash
         run: cargo test --release
 
+      # 交付用的 exe：**只打包这一个文件**（不带 dll、不带 mpv）。
+      # `cd.yml` 那份是"优化 + UPX + Release"，这一份是"这一轮改动的现场产物"，
+      # 他日常真机验证取的就是这里。
+      - name: Upload Windows x64 release artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rustbilipc-win-x64-release
+          path: target/release/rustbilipc.exe
+          if-no-files-found: error
+
       - name: Upload Cargo.lock
         if: always()
         uses: actions/upload-artifact@v4
