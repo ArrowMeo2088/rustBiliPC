@@ -179,14 +179,15 @@ impl MainShell {
         // 直接写 `shell.watch_videos(&shell.home.clone(), ..)` 会同时借到 `shell` 的可变与不可变引用。
         // 五个句柄类型各不相同（`Entity<HomePage>` / `Entity<SearchPage>`…），也不能塞进同一个数组，
         // 所以这里是一行一次调用——`watch_videos` 是泛型的，加新入口页只要多一行。
+        // 只有"会发卡片点击"的页要订：收藏页这一版只列收藏夹、点不动（用户定稿"不下钻"），
+        // 下载页是占位，设置页没有列表卡片——它们压根没实现 EventEmitter<OpenVideo>，
+        // 第三十三轮的 CI 就是在替这一点把关：给收藏页多订一次直接 E0277。
         let home = shell.home.clone();
         let search = shell.search.clone();
-        let favorites = shell.favorites.clone();
         let history = shell.history.clone();
         let toview = shell.toview.clone();
         shell.watch_videos(&home, window, cx);
         shell.watch_videos(&search, window, cx);
-        shell.watch_videos(&favorites, window, cx);
         shell.watch_videos(&history, window, cx);
         shell.watch_videos(&toview, window, cx);
 
