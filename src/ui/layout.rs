@@ -352,14 +352,16 @@ pub fn clickable_row(
                 .whitespace_nowrap()
                 .text_ellipsis()
                 .overflow_hidden()
-                .child(label),
+                // `.into()` 不能省：`label` 这个泛型参数本身不满足 `IntoElement`
+                // （第三十六轮的两条 E0277 就在这个位置），先转成 `SharedString` 才当得了子元素。
+                .child(label.into()),
         )
         .child(
             div()
                 .flex_shrink_0()
                 .text_size(px(palette::FONT_CAPTION))
                 .text_color(palette::text_tertiary())
-                .child(meta),
+                .child(meta.into()),
         );
     base.id(id)
         .on_click(on_click)
