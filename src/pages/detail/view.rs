@@ -23,6 +23,22 @@
 //! [`OpenVideo`](crate::pages::OpenVideo) 事件——外壳收到就往栈里再压一层详情页，
 //! 所以"相关推荐 → 进去 → 返回"是连续的，页面自己不做导航决定。
 //!
+//! ## P11 加的两件事：文字可选中、这一 P 能下载
+//!
+//! **选中与复制**用 kit 的 `SelectableText`（gpui 0.3.9 自己没有文本选择，
+//! `ref/gpui/gpui/src` 里搜不到 `Selectable`/`text_selection`）：标题、简介、评论昵称与正文
+//! 换成这个叶子元素，拖动就能选中，`Ctrl+C` 由 `base::Root` 装的复制动作直接送进剪贴板。
+//! 触摸屏没有 Ctrl+C，所以页头右侧给了一颗「复制选中」，读的是同一个窗口级选区
+//! （`TextSelection::selected_text`）。
+//! 代价写在 [`DragScroll`](crate::ui::scroll::DragScroll) 里：**按在可选中文字上的那一下
+//! 不再用来拖滚动**，否则手指划一段文字会同时"选中 + 翻页"。要滚就在卡片、空白处拖。
+//!
+//! **下载**只加一颗按钮，其余都在 [`DownloadQueue`](crate::pages::download::DownloadQueue) 与
+//! [`api::download`](crate::api::download) 里：先按当前选中的 P 取一次播控地址
+//! （和播放同一条路，档位仍然吃 `config.json` 的封顶），再弹系统对话框选目录。
+//! 取地址的**目的**要记下来（`PlanPurpose`）：同一份地址，播放是拉起 mpv，下载是入队，
+//! 结果回来时如果用户已经改了主意（换了 P、或又点了播放），这份计划就丢掉。
+//!
 //! ## 排版照的是 Bili.Copilot 的"信息栏"，不是"上播放器下双栏"
 //!
 //! 参考项目的详情其实是一个播放器窗口 + 贴在左侧的 **360 宽信息面板**
@@ -42,22 +58,51 @@
 
 use std::sync::Arc;
 
+use gpui_kit::base::{SelectableText, TextSelection};
 use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::api::comments::{self, CommentItem, CommentSortKind};
 use crate::api::detail::{self, PageInfo, SubtitleBrief, VideoDetailInfo};
+use crate::api::download;
 use crate::api::stream::{self, StreamChoice};
+use crate::pages::download::DownloadQueue;
 use crate::pages::{OpenUser, OpenVideo};
 use crate::store::auth::Auth;
 use crate::ui::scroll::DragScroll;
-use crate::ui::{cover, layout, palette};
 use crate::ui::video_card::{self, VideoCardData};
+use crate::ui::{cover, layout, palette};
 
 /// 详情页大图向图床要的尺寸（逻辑上宽自适应，按 16:9 裁，先要一张 640×360 的缩略）。
 const HERO_DEVICE_WIDTH: u32 = 640;
 const HERO_DEVICE_HEIGHT: u32 = 360;
+
+/// 取播控地址是为了干什么。同一份地址，播放与下载的下一步完全不同，
+/// 所以这个"意图"必须跟着请求一起走，结果回来时才知道该往哪条路交。
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PlanPurpose {
+    Play,
+    Download,
+}
+
+/// 一段会换行、又允许选中复制的正文（简介那一块）。
+///
+/// 为什么不直接给 [`layout::note`](crate::ui::layout::note) 加个"可选"参数：
+/// `layout::note` 收的是 `impl Into<SharedString>`，而 `SelectableText` 是**元素**不是文本，
+/// 塞进去会让复用件的签名变成两种形状。度量（16 内边距 / 14 字 / 次要灰）在这里抄一遍，
+/// 只有"要不要能选中"这一处不同。
+fn selectable_note(text: String) -> AnyElement {
+    div()
+        .w_full()
+        .px(px(palette::CARD_TEXT_PADDING_X))
+        .py(px(palette::CARD_TEXT_ROW_GAP))
+        .text_size(px(palette::FONT_BODY))
+        .text_color(palette::text_secondary())
+        .line_height(px(palette::LINE_HEIGHT_BODY))
+        .child(SelectableText::new("detail-desc", text))
+        .into_any_element()
+}
 
 /// 详情页根视图。
 pub struct DetailPage {
@@ -73,13 +118,15 @@ pub struct DetailPage {
     seq: u32,
     /// 播放那一块：已取到的流地址（None = 还没取或取失败）。
     plan: Option<StreamChoice>,
-    /// 播放块的提示：取地址中 / 失败原因 / 已拉起 mpv。
+    /// 播放块的提示：取地址中 / 失败原因 / 已拉起 mpv / 已开始下载。
     player_note: SharedString,
     /// 我们为这个详情页拉起的 mpv。留着它是为了：再次起播时收掉上一个实例、
     /// 以及本实体被弹出详情页栈时把子进程一起收掉（见下面的 `Drop`）。
     player: Option<std::process::Child>,
-    /// 正在为哪个 cid 取地址；取回来时不是它就丢掉（用户可能又点了别的 P）。
-    planning_cid: Option<u64>,
+    /// 正在为哪个 cid、为了什么取地址；取回来时不是它就丢掉（用户可能又点了别的 P）。
+    planning: Option<(u64, PlanPurpose)>,
+    /// 外壳注入的下载队列：这一页只负责"把一次下载排进去"，列表在下载页看。
+    queue: Entity<DownloadQueue>,
     /// 评论区当前这一页（None = 还没取到）。总数与页码都在里面，"还有下一页"由它自己算。
     comment: Option<comments::CommentPage>,
     /// 评论区的排序口径（决定"最热/最新"哪颗按钮亮着）。
@@ -107,8 +154,13 @@ impl Drop for DetailPage {
 }
 
 impl DetailPage {
-    /// 建页并发起主体请求。
-    pub fn new(client: Arc<bpi_rs::BpiClient>, bvid: String, cx: &mut Context<Self>) -> Self {
+    /// 建页并发起主体请求。`queue` 是外壳那份下载队列（点"下载这一 P"时往里排任务）。
+    pub fn new(
+        client: Arc<bpi_rs::BpiClient>,
+        bvid: String,
+        queue: Entity<DownloadQueue>,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let mut this = Self {
             scroll: DragScroll::default(),
             side_scroll: DragScroll::default(),
@@ -123,7 +175,8 @@ impl DetailPage {
             plan: None,
             player_note: "".into(),
             player: None,
-            planning_cid: None,
+            planning: None,
+            queue,
             comment: None,
             comment_sort: CommentSortKind::Hot,
             comment_note: "".into(),
@@ -301,7 +354,97 @@ impl DetailPage {
             cx.notify();
             return;
         };
-        self.request_plan(page.cid, stream::request_qn(), cx);
+        self.request_plan(page.cid, stream::request_qn(), PlanPurpose::Play, cx);
+    }
+
+    /// 下载选中的那一 P：**每次都要重新取一次地址**，不复用手里那份 `plan`。
+    ///
+    /// 为什么不省这一次请求：B 站的 m4s 直链是**有时效**的（库里那条注释写的是 120 分钟，
+    /// `ref/bpi-rs/src/models/stream.rs:202-215`），而"先播一会儿、想起要下载"完全可能隔更久。
+    /// 拿一份过期的地址去下，症状是下到一半变 403/404，比多等 200 ms 难查得多
+    /// （取址与播放同一条路：同一个 `request_qn()`、同一条选流规则，
+    /// 所以"下到的画质"与"刚才播的画质"仍然同一口径）。
+    /// `durl`（分段直链）由 [`download::request_for`] 拒绝，这里不重复判断。
+    fn download_selected(&mut self, cx: &mut Context<Self>) {
+        let Some(page) = self.selected_page() else {
+            self.player_note = "这条稿件没有可下载的分 P".into();
+            cx.notify();
+            return;
+        };
+        self.request_plan(page.cid, stream::request_qn(), PlanPurpose::Download, cx);
+    }
+
+    /// 弹系统对话框问一次目录，然后把这一对文件排进队列。
+    ///
+    /// `prompt_for_paths` 返回一个 oneshot 的 `Receiver`，所以这里必须 `cx.spawn` 去等它
+    /// （gpui 的文档要求：这类平台提示在异步上下文里要放在 `cx.update`/任务里，
+    /// 不要塞进别的实体的 `update`）。用户按"取消"拿到的是 `None`——那不是错误，
+    /// 界面上只写"没有选目录"。
+    fn ask_destination(&mut self, plan: StreamChoice, page: &PageInfo, cx: &mut Context<Self>) {
+        let Some(info) = self.detail.clone() else {
+            return;
+        };
+        // 只有多 P 稿件才在文件名里带页码：单 P 的标题本身就是完整的名字。
+        let part = if info.pages.len() > 1 {
+            Some((page.page, page.part.as_str()))
+        } else {
+            None
+        };
+        let request = match download::request_for(
+            &plan,
+            format!("{} · {}", info.title, plan.quality_label),
+            download::file_stem(&info.title, &info.bvid, part),
+        ) {
+            Ok(request) => request,
+            Err(message) => {
+                self.player_note = message.into();
+                cx.notify();
+                return;
+            }
+        };
+        let http = cx.http_client();
+        let receiver = cx.prompt_for_paths(PathPromptOptions {
+            files: false,
+            // 只要目录：文件名的形态（`标题 P2.m4v` + `.m4a`）是我们定的，
+            // 让用户在保存对话框里改扩展名反而会写出对不上号的文件。
+            directories: true,
+            multiple: false,
+            prompt: Some("存到这里".into()),
+        });
+
+        let queue = self.queue.clone();
+        self.player_note = format!("等待选目录…（{}）", request.file_stem).into();
+        cx.spawn(async move |this, cx| {
+            let picked = receiver
+                .await
+                .ok()
+                .flatten()
+                .and_then(|paths| paths.and_then(|mut paths| paths.pop()));
+            let Some(dir) = picked else {
+                let Some(view) = this.upgrade() else { return };
+                view.update(cx, |view, cx| {
+                    view.player_note = "没有选目录，这次下载没开始".into();
+                    cx.notify();
+                });
+                return;
+            };
+
+            let Some(view) = this.upgrade() else { return };
+            // `enqueue` 里会做重名检查并 spawn 任务，所以要在主线程这次 update 里完成；
+            // 失败原因（比如清洗后名字为空）直接写回播放那一行。
+            let outcome = view.update(cx, |_view, cx| {
+                queue.update(cx, |queue, cx| queue.enqueue(request, dir, http, cx))
+            });
+            let Some(view) = this.upgrade() else { return };
+            view.update(cx, |view, cx| {
+                view.player_note = match outcome {
+                    Ok(name) => format!("已开始下载：{name}（进度在左侧「下载」那一页）").into(),
+                    Err(message) => message.into(),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// 换清晰度。
@@ -310,22 +453,33 @@ impl DetailPage {
     /// `audio-add` 换流才能保住窗口与进度，那是 P6 的事（管道机制已核实并留档在
     /// `docs/architecture.md` 第 4.14 节）。先把按钮做出来是有意义的：
     /// 它能立刻暴露"哪个档位其实拿不到流"这类问题。
+    ///
+    /// 这一排按钮里的档位**已经过 `config.json` 的封顶过滤**（见
+    /// [`quality_options`](crate::api::stream::quality_options)）：以前能给 4K/HDR 的按钮，
+    /// 点下去就把我们自己的 1080P 上限顶穿了。
     fn play_with_quality(&mut self, qn: u64, cx: &mut Context<Self>) {
         let Some(page) = self.selected_page() else {
             self.player_note = "这条稿件没有可播的分 P".into();
             cx.notify();
             return;
         };
-        self.request_plan(page.cid, qn, cx);
+        self.request_plan(page.cid, qn, PlanPurpose::Play, cx);
     }
 
-    /// 为一个 cid 取播控地址。结果回来时如果用户已经改点了别的 P，这份结果就丢掉。
-    fn request_plan(&mut self, cid: u64, qn: u64, cx: &mut Context<Self>) {
+    /// 为一个 cid 取播控地址。结果回来时如果用户已经改点了别的 P（或改了目的），这份结果就丢掉。
+    fn request_plan(&mut self, cid: u64, qn: u64, purpose: PlanPurpose, cx: &mut Context<Self>) {
         let Some(bvid) = self.detail.as_ref().map(|info| info.bvid.clone()) else {
             return;
         };
-        self.planning_cid = Some(cid);
-        self.player_note = format!("取播控地址…（想要 qn={qn}）").into();
+        self.planning = Some((cid, purpose));
+        self.player_note = format!(
+            "取播控地址…（想要 qn={qn}，{}）",
+            match purpose {
+                PlanPurpose::Play => "为了播",
+                PlanPurpose::Download => "为了下载",
+            }
+        )
+        .into();
         cx.notify();
 
         let join = stream::fetch_streams(Arc::clone(&self.client), bvid, cid, qn);
@@ -338,14 +492,27 @@ impl DetailPage {
 
             let Some(view) = this.upgrade() else { return };
             view.update(cx, |view, cx| {
-                if view.planning_cid != Some(cid) {
-                    log::debug!("详情页：cid={cid} 的地址已过时，丢弃");
+                if view.planning != Some((cid, purpose)) {
+                    log::debug!("详情页：cid={cid} 的地址已过时或目的已改变，丢弃");
                     return;
                 }
+                view.planning = None;
                 match outcome {
                     Ok(plan) => {
+                        let page = view.pages_of(plan.cid);
                         view.plan = Some(plan);
-                        view.start_playback();
+                        match purpose {
+                            PlanPurpose::Play => view.start_playback(),
+                            PlanPurpose::Download => {
+                                if let Some(page) = page {
+                                    // `ask_destination` 会自己 spawn 等对话框，
+                                    // 所以这里可以在这一次 update 里调它。
+                                    view.download_with_plan(&page, cx);
+                                } else {
+                                    view.player_note = "这个分 P 已经不在列表里了".into();
+                                }
+                            }
+                        }
                     }
                     Err(message) => {
                         view.plan = None;
@@ -356,6 +523,20 @@ impl DetailPage {
             });
         })
         .detach();
+    }
+
+    /// 按 cid 找回那一 P（下载要用它的页码与标题拼文件名）。
+    fn pages_of(&self, cid: u64) -> Option<PageInfo> {
+        let info = self.detail.as_ref()?;
+        info.pages.iter().find(|page| page.cid == cid).cloned()
+    }
+
+    /// 地址已经在手上了，直接进"问目录"那一步。
+    fn download_with_plan(&mut self, page: &PageInfo, cx: &mut Context<Self>) {
+        let Some(plan) = self.plan.clone() else {
+            return;
+        };
+        self.ask_destination(plan, page, cx);
     }
 
     /// 用已取到的地址拉起 mpv（独立窗口）。不 notify，调用方负责。
@@ -414,6 +595,13 @@ impl DetailPage {
                         .label("播放这一 P")
                         .primary()
                         .on_click(cx.listener(|this, _, _window, cx| this.play_selected(cx))),
+                )
+                .child(
+                    // 下载走的是同一条取址路，只是下一步不同（见 `download_selected`）。
+                    // 这一颗按钮是**全客户端唯一会往用户磁盘写文件**的入口。
+                    Button::new("detail-download")
+                        .label("下载这一 P")
+                        .on_click(cx.listener(|this, _, _window, cx| this.download_selected(cx))),
                 )
                 .child(
                     div()
@@ -628,6 +816,10 @@ impl DetailPage {
         } else {
             format!("{} 赞", item.like)
         };
+        // 元素 id 用 `rpid`：它在一次列表里唯一，翻页/换排序也不会让两行共用一个选中区
+        // （用行号的话，翻页后第 1 行会继承上一页第 1 行的选区状态）。
+        let author_id = format!("detail-comment-author-{}", item.rpid);
+        let message_id = format!("detail-comment-{}", item.rpid);
         div()
             .flex()
             .w_full()
@@ -657,7 +849,7 @@ impl DetailPage {
                                     .text_size(px(palette::FONT_BODY))
                                     .font_weight(FontWeight::SEMIBOLD)
                                     .text_color(palette::text_primary())
-                                    .child(item.author.clone()),
+                                    .child(SelectableText::new(author_id, item.author.clone())),
                             )
                             // 昵称与时间分居两端：中间这一档把宽度吃掉。
                             .child(div().flex_1())
@@ -670,12 +862,14 @@ impl DetailPage {
                             ),
                     )
                     // 正文不折限行数：评论就是给人读完的，砍掉尾巴比整块难看。
+                    // 做成可选中的（P11）：要复制一段评论时，"选中它"比"整条评论进剪贴板"更符合直觉。
                     .child(
                         div()
                             .w_full()
                             .text_size(px(palette::FONT_BODY))
                             .text_color(palette::text_primary())
-                            .child(item.message.clone()),
+                            .line_height(px(palette::LINE_HEIGHT_BODY))
+                            .child(SelectableText::new(message_id, item.message.clone())),
                     )
                     .child(
                         div()
@@ -855,11 +1049,12 @@ impl DetailPage {
             .py(px(palette::CARD_TEXT_PADDING_TOP))
             .child(hero)
             .child(
+                // 标题也做成可选中：读详情页的人第一个想复制的就是它。
                 div()
                     .w_full()
                     .text_size(px(palette::FONT_TITLE))
                     .text_color(palette::text_primary())
-                    .child(info.title.clone()),
+                    .child(SelectableText::new("detail-title", info.title.clone())),
             )
             .child(
                 // UP 主那一行：44 的圆头像 + 名字 + 稿件号（`UpSectionControl.xaml:21-33`）。
@@ -924,7 +1119,7 @@ impl DetailPage {
             .child(if info.desc.is_empty() {
                 layout::note("（没有简介）")
             } else {
-                layout::note(info.desc.clone())
+                selectable_note(info.desc.clone())
             })
             // 降级说明：主体成功但某一块失败时，原因显示在主体下面，那一块自己留空位。
             .when(!notes.is_empty(), |this| {
@@ -1008,11 +1203,26 @@ impl Render for DetailPage {
             ),
         };
 
+        // 复制：键盘用户按 Ctrl+C（`base::Root` 装了那个动作），触摸屏没有键盘，
+        // 所以页头右侧给一颗读同一个窗口选区的按钮。选区是**窗口级**的，
+        // 于是它复制的是这一段里任何一处选中的文字，不需要页面自己再存一份。
+        let copy_button = Button::new("detail-copy-selection")
+            .label("复制选中")
+            .on_click(|_event, window, cx| {
+                let text = TextSelection::selected_text(window, cx);
+                if text.is_empty() {
+                    log::debug!("复制选中：当前窗口没有选区（先用手指或鼠标选中一段文字）");
+                    return;
+                }
+                cx.write_to_clipboard(ClipboardItem::new_string(text));
+            })
+            .into_any_element();
+
         div()
             .flex()
             .flex_col()
             .size_full()
-            .child(layout::header("视频详情", head_subtitle, None))
+            .child(layout::header("视频详情", head_subtitle, Some(copy_button)))
             .child(div().flex_1().w_full().min_h(px(0.)).child(body))
     }
 }

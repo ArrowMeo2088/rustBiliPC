@@ -612,9 +612,39 @@ mod playback_tests {
     fn support_formats_without_description_fall_back_to_display_desc() {
         let formats = vec![support(64, "", "720P 准高清")];
         assert_eq!(quality_label(&formats, &[], &[], 64), "720P 准高清");
-        let options = quality_options(&formats, &[], &[]);
+        let options = quality_options(&formats, &[], &[], 116);
         assert_eq!(options.len(), 1);
         assert_eq!(options[0].label, "720P 准高清");
+    }
+
+    /// 封顶档以外的一律不给按钮（P11 修的缺陷）。
+    ///
+    /// 以前这里给的是 B 站 `support_formats` 的**全集**：界面能点出 4K/HDR/杜比，
+    /// 点下去 `pick_video` 就按那个档选流——我们自己写的 1080P 上限被自己的按钮顶穿，
+    /// 而"高画质下载"下的也会是超限的那一路。
+    #[test]
+    fn quality_options_hide_the_tiers_over_our_cap() {
+        let formats = vec![
+            support(126, " Dolby", "杜比视界"),
+            support(120, "4K 超清", "4K"),
+            support(116, "1080P60 高帧率", "1080P60"),
+            support(80, "1080P 高清", "1080P"),
+            support(32, "480P", "480P"),
+        ];
+        let options = quality_options(&formats, &[], &[], 116);
+        let qn: Vec<u64> = options.iter().map(|option| option.qn).collect();
+        assert_eq!(qn, vec![116, 80, 32]);
+
+        // 封顶更小时跟着再收一档，顺序仍是 B 站给的顺序。
+        let options = quality_options(&formats, &[], &[], 64);
+        let qn: Vec<u64> = options.iter().map(|option| option.qn).collect();
+        assert_eq!(qn, vec![32]);
+
+        // 全是超限档时退回原样：宁可给一个超限的选项，也不要一排点不动的按钮。
+        let only_ultra = vec![support(120, "4K 超清", "4K")];
+        let options = quality_options(&only_ultra, &[], &[], 116);
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].qn, 120);
     }
 
     #[test]
@@ -845,5 +875,159 @@ mod scaffold_tests {
     fn version_matches_manifest() {
         assert!(!VERSION.is_empty());
         assert!(VERSION.starts_with(|c: char| c.is_ascii_digit()));
+    }
+}
+
+#[cfg(test)]
+mod download_tests {
+    use std::path::Path;
+
+    use crate::api::download::{
+        self, format_bytes, numbered_stem, percent, sanitize_file_stem,
+    };
+    use crate::api::stream::{QualityOption, StreamChoice};
+
+    /// 造一份"选定了一条流"的结果。`is_dash=false` 就是 durl 回退那一路。
+    fn choice(is_dash: bool) -> StreamChoice {
+        StreamChoice {
+            cid: 777,
+            video_url: "https://v.example/video.m4s".to_string(),
+            audio_url: is_dash.then(|| "https://v.example/audio.m4s".to_string()),
+            backup_urls: vec!["https://b.example/video.m4s".to_string()],
+            audio_backup_urls: if is_dash {
+                vec!["https://b.example/audio.m4s".to_string()]
+            } else {
+                Vec::new()
+            },
+            video_size: if is_dash { Some(100) } else { None },
+            audio_size: if is_dash { Some(30) } else { None },
+            video_ext: if is_dash { "m4v" } else { "mp4" },
+            audio_ext: "m4a",
+            quality: 80,
+            quality_label: "1080P 高清".to_string(),
+            codecs: "hev1.1.6.L150.90".to_string(),
+            available: vec![QualityOption {
+                qn: 80,
+                label: "1080P 高清".to_string(),
+            }],
+            is_dash,
+            timelength_ms: 60_000,
+        }
+    }
+
+    #[test]
+    fn illegal_characters_become_spaces_and_blanks_collapse() {
+        // Windows 禁的九个字符全命中：一律换空格，再把连续空白折成一个。
+        assert_eq!(
+            sanitize_file_stem("预告:第3集 *?<>|\"/\\ 收尾"),
+            "预告 第3集 收尾"
+        );
+        // 换行与控制字符也是空格（标题里真的会带 \n）。
+        assert_eq!(sanitize_file_stem("标题\n  第二行"), "标题 第二行");
+        // 结尾的空格与点都要去掉：Windows 不允许文件名以它们收尾。
+        assert_eq!(sanitize_file_stem("  名字...  "), "名字");
+        // 全是非法字符 → 空串，由调用方（file_stem）退回稿件号。
+        assert_eq!(sanitize_file_stem("***"), "");
+        assert_eq!(download::file_stem("***", "BV1xx", None), "BV1xx");
+    }
+
+    #[test]
+    fn stem_is_counted_in_characters_not_bytes() {
+        // 60 个中文字符：按字节截会切在多字节中间，按字符截不会。
+        let long = "测".repeat(80);
+        let stem = sanitize_file_stem(&long);
+        assert_eq!(stem.chars().count(), 60);
+        assert!(stem.chars().all(|ch| ch == '测'));
+    }
+
+    #[test]
+    fn multi_part_titles_carry_the_page_number() {
+        let stem = download::file_stem("总集篇", "BV1yy", Some((3, "下集")));
+        assert_eq!(stem, "总集篇 P3 下集");
+        // 单 P 的稿件不加多余的字。
+        assert_eq!(download::file_stem("一支pv", "BV1zz", None), "一支pv");
+    }
+
+    #[test]
+    fn second_copy_gets_a_numbered_suffix() {
+        assert_eq!(numbered_stem("名字", 0), "名字");
+        assert_eq!(numbered_stem("名字", 1), "名字 (2)");
+        assert_eq!(numbered_stem("名字", 4), "名字 (5)");
+    }
+
+    #[test]
+    fn byte_readings_are_human_sized() {
+        assert_eq!(format_bytes(512), "512 B");
+        assert_eq!(format_bytes(2048), "2.0 KB");
+        assert_eq!(format_bytes(100 * 1024 * 1024), "100.0 MB");
+        assert_eq!(format_bytes(3 * 1024 * 1024 * 1024 + 512 * 1024 * 1024), "3.50 GB");
+    }
+
+    #[test]
+    fn percent_refuses_to_claim_done() {
+        assert_eq!(percent(50, Some(100)), Some(50.));
+        // 没有分母就不给百分比（界面改用不定进度，不猜总数）。
+        assert_eq!(percent(50, None), None);
+        assert_eq!(percent(50, Some(0)), None);
+        // 已经写得比分母还多（B 站的 size 偶尔偏小）也不能显示 100%：
+        // "100%" 在这套界面里只属于 Finished。
+        let value = percent(1_000, Some(100)).unwrap_or_default();
+        assert!(value <= 99.9, "超量时应当夹住，实际 {value}");
+    }
+
+    #[test]
+    fn request_only_counts_total_when_every_track_is_known() {
+        let request = download::request_for(&choice(true), "标题 · 1080P".to_string(), "标题".to_string())
+            .expect("DASH 计划应当能拼出下载请求");
+        assert_eq!(request.total_bytes(), Some(130));
+        assert_eq!(request.extensions(), vec!["m4v", "m4a"]);
+        let targets = request.targets(Path::new("D:\\片"));
+        assert_eq!(targets.len(), 2);
+        assert_eq!(
+            targets[0].file_name().map(|name| name.to_string_lossy().to_string()),
+            Some("标题.m4v".to_string())
+        );
+        assert_eq!(
+            targets[1].file_name().map(|name| name.to_string_lossy().to_string()),
+            Some("标题.m4a".to_string())
+        );
+
+        // 只给了一条轨（音频接口没给流）：总数就是视频那一轨，且不该有第二个文件。
+        let mut only_video = choice(true);
+        only_video.audio_url = None;
+        let request = download::request_for(&only_video, "标题".to_string(), "标题".to_string())
+            .expect("单轨计划应当能拼出下载请求");
+        assert_eq!(request.total_bytes(), Some(100));
+        assert_eq!(request.extensions(), vec!["m4v"]);
+        assert_eq!(request.targets(Path::new(".")).len(), 1);
+
+        // 音频有轨但大小缺失：这时候**不给**总数，别画一个假的分母。
+        let mut no_audio_size = choice(true);
+        no_audio_size.audio_size = None;
+        let request = download::request_for(&no_audio_size, "标题".to_string(), "标题".to_string())
+            .expect("计划应当能拼出下载请求");
+        assert_eq!(request.total_bytes(), None);
+    }
+
+    /// durl 是多段文件，要按 `order` 拼接才是完整一片。这一版不实现拼接，
+    /// 所以这里必须**明确拒绝**，而不是"看起来能下、下出来只有第一段"。
+    #[test]
+    fn single_file_direct_links_are_refused_with_a_reason() {
+        let message = download::request_for(&choice(false), "标题".to_string(), "标题".to_string())
+            .expect_err("durl 计划不该被接受");
+        assert!(message.contains("分段直链"), "要说清楚拒的是什么：{message}");
+    }
+
+    #[test]
+    fn with_stem_renames_both_targets() {
+        let request = download::request_for(&choice(true), "标题".to_string(), "标题".to_string())
+            .expect("计划应当能拼出下载请求")
+            .with_stem("标题 (2)".to_string());
+        let names: Vec<String> = request
+            .targets(Path::new("."))
+            .iter()
+            .filter_map(|path| path.file_name().map(|name| name.to_string_lossy().to_string()))
+            .collect();
+        assert_eq!(names, vec!["标题 (2).m4v", "标题 (2).m4a"]);
     }
 }

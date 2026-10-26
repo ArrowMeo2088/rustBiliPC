@@ -5997,6 +5997,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bpi-rs",
+ "futures",
  "gpui-kit",
  "gpui-pre-reqwest-client",
  "log",

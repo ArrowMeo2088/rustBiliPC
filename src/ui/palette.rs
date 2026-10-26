@@ -169,6 +169,13 @@ pub const RADIUS: f32 = 4.;
 /// 分隔线厚度（`PopularPage.xaml:30-33` 那条 Border 就是 1px）。
 pub const DIVIDER_HEIGHT: f32 = 1.;
 
+/// 下载任务那条进度线的厚度。
+///
+/// **不是抄来的数字**：参考项目的下载进度用的是 WinUI `ProgressBar`（默认 3px 高、
+/// 带圆角与动画），我们没有等价物，而 3px 在暗底上几乎看不出来。6px 是"能看清线里有没有颜色"
+/// 的最小档，同时不抢标题那一行的注意力。
+pub const PROGRESS_BAR_HEIGHT: f32 = 6.;
+
 /// 标题这类多行文本的行高。
 ///
 /// 参考项目没写行高（它用 WinUI 的默认），gpui 的默认行距对 14px 中文偏紧、两行标题会挤在一起，

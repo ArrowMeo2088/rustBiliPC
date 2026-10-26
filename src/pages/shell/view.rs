@@ -53,7 +53,7 @@ use gpui_kit::*;
 use crate::api::profile;
 use crate::pages::{
     OpenFolder, OpenUser, OpenVideo, about::AboutPage, detail::DetailPage,
-    download::DownloadPage,
+    download::{DownloadPage, DownloadQueue},
     favorites::{FavFolderPage, FavoritesPage},
     history::HistoryPage, home::HomePage, loading, search::SearchPage, space::UserSpacePage,
     toview::ToViewPage,
@@ -134,6 +134,11 @@ impl ShellTab {
 /// 主界面外壳视图。
 pub struct MainShell {
     client: Arc<bpi_rs::BpiClient>,
+    /// 下载队列（外壳创建，注入详情页与下载页共用）。
+    ///
+    /// 为什么不在下载页里自己建：任务是从**详情页**点出来的。放进任何一页都得让另一页认识它，
+    /// 而外壳本来就是唯一知道全部页面的那一层（导航决定也在它这里）。
+    queue: Entity<DownloadQueue>,
     home: Entity<HomePage>,
     search: Entity<SearchPage>,
     favorites: Entity<FavoritesPage>,
@@ -166,11 +171,14 @@ impl MainShell {
             cx.new(|cx| FavoritesPage::new(window, cx, Arc::clone(&client), mid_raw.clone()));
         let history = cx.new(|cx| HistoryPage::new(window, cx, Arc::clone(&client)));
         let toview = cx.new(|cx| ToViewPage::new(window, cx, Arc::clone(&client)));
-        let download = cx.new(|_cx| DownloadPage::new());
+        // 队列先建：它要同时交给下载页（看结果）与详情页（发任务），两边都不认识对方。
+        let queue = cx.new(|_cx| DownloadQueue::new());
+        let download = cx.new(|cx| DownloadPage::new(window, cx, queue.clone()));
         let about = cx.new(|_cx| AboutPage::new(Arc::clone(&client), mid_raw.clone()));
 
         let mut shell = Self {
             client,
+            queue,
             home,
             search,
             favorites,
@@ -288,7 +296,14 @@ impl MainShell {
     /// "点 UP 主进空间、空间里再点卡片"都是连续的。
     fn open_detail(&mut self, bvid: &str, window: &mut Window, cx: &mut Context<Self>) {
         log::debug!("外壳：打开详情页 {bvid}（当前栈深 {}）", self.stack.len());
-        let page = cx.new(|cx| DetailPage::new(Arc::clone(&self.client), bvid.to_string(), cx));
+        let page = cx.new(|cx| {
+            DetailPage::new(
+                Arc::clone(&self.client),
+                bvid.to_string(),
+                self.queue.clone(),
+                cx,
+            )
+        });
         self.watch_page(&page, window, cx);
         self.stack.push(StackPage::Detail(page));
         cx.notify();

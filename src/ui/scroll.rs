@@ -40,10 +40,25 @@
 //! 反过来，从一张卡片起步拖到别处，抬起时那张卡片**不会**被点着——gpui 的点击要求同一个元素
 //! 自己的 `pending_mouse_down`（`elements/div.rs:3609-3622`）配得上，起点终点不是同一元素就不配对，
 //! 这正好是"拖完不误触"。
-
+//!
+//! ## P11：按在可选中文字上的那一下让给文本选择
+//!
+//! 详情页与评论区的正文换成了 `gpui_kit::base::SelectableText`（gpui 自己没有选择机制，
+//! 这一层在 kit 的 `base` 里，由 `base::Root` 挂的 `TextSelectionLayer` 接管指针）。
+//! 于是同一个"按住左键拖"出现了两种想要的结果：拖列表 vs 划一段文字。
+//! 分界按**按下时落点**定，用 `TextSelection::is_selectable_at(position, window, cx)` 问一句
+//! （它读的是上一帧 paint 登记的 `text_bounds`，所以必须在按下时问、不能事后问）：
+//! - 落在可选中的文字上 → 不记拖动起点（并把已有起点清空），这一路拖动就只是选字；
+//! - 落在卡片、封面、空白处 → 照旧拖着走。
+//!
+//! 为什么不做"手指=滚、鼠标=选"这种区分：gpui 的 Windows 后端**没有触摸管线**（文件头那一节），
+//! 手指与鼠标到这一层是同一条 `WM_MOUSEMOVE`，没有可辨的来源。
+//! 也正因为这样，`cx.stop_propagation()` 那句仍然留着——它现在只会在"落点不是文字"的拖动里发出，
+//! 不会再打断选择。副作用要知道：**长段落区域只能选字，要滚就得在卡片之间或空白处拖**。
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use gpui_kit::base::TextSelection;
 use gpui_kit::*;
 
 /// 按下时的起点：指针 y 与当时的偏移。都用 `Pixels` 做加减与比较，不拆它的内部字段
@@ -100,10 +115,16 @@ impl DragScroll {
     ///
     /// 只记起点，不 `stop_propagation`、不吞事件：按下要照常落到里面的卡片与按钮上，
     /// 真正的"滚"只在下一步移动里发生（没移动就是点击，一切照旧）。
+    /// 例外是 P11 加的那条：**按在可选中的文字上就不记起点**（见文件头），
+    /// 顺带把已有的起点清掉，免得上一段拖动的起点在这一次移动里被复用。
     pub fn on_press(&self) -> impl Fn(&MouseDownEvent, &mut Window, &mut App) + 'static {
         let handle = self.handle.clone();
         let drag = self.drag.clone();
-        move |event: &MouseDownEvent, _window: &mut Window, _cx: &mut App| {
+        move |event: &MouseDownEvent, window: &mut Window, cx: &mut App| {
+            if TextSelection::is_selectable_at(event.position, window, cx) {
+                *drag.borrow_mut() = None;
+                return;
+            }
             *drag.borrow_mut() = Some(DragStart {
                 pointer_y: event.position.y,
                 offset_y: handle.offset().y,
