@@ -79,14 +79,15 @@ src/
 │   ├── login.rs       扫码登录：取码/轮询 + 码值翻译 + cookie→凭据 + 缺 buvid3 时补取（纯函数可测）
 │   ├── profile.rs     个人中心头部：user().space_info()（自动 WBI）+ login().stat()（关注/粉丝）
 │   ├── detail.rs      视频详情：view() 主体 + desc()/tags()/related_videos() 三块各自容错 + 字幕列表
-│   ├── favorites.rs   收藏夹：fav().created_list() + collected_list()，合并成一个 DTO
+│   ├── favorites.rs   收藏夹：fav().created_list() + collected_list()，合并成一个 DTO；P9 起还有 list_detail 内容页（页码 + 服务端 keyword + 挑 bvid）
 │   ├── history.rs     观看历史：historytoview().history_list()（游标分页）+ 秒数格式化纯函数
 │   ├── comments.rs    评论区：comment().list()（type=1、oid=aid、ps≤20）+ 相对时间与翻页判断纯函数
 │   ├── home.rs        主页：video().homepage_recommendations()（WBI 由库里签）+ **按 goto 过滤**
 │   ├── space.rs       用户空间：card()（不签 WBI）+ uploaded_videos()（签 WBI、带分区筛选）+ opus 图文（游标）
 │   ├── search.rs      搜索封装：DTO（SearchHit/PageInfo/SearchSort）+ 标签清洗 + 播放量格式化
 │   ├── toview.rs      待看：historytoview().toview_list()（零参数、没有分页、要登录、不签 WBI）
-│   ├── stream.rs      播控：video().play_url() 取地址 + 选流成 StreamChoice（DASH 双流 / durl 单文件）；请求 qn 与封顶档都取自 `app::config()`
+│   ├── stream.rs      播控：video().play_url() 取地址 + 选流成 StreamChoice（DASH 双流 / durl 单文件、两轨大小与备用域名、落盘后缀）；请求 qn 与封顶档都取自 `app::config()`，**清晰度列表也按它过滤**
+│   ├── download.rs    **下载（P11）**：StreamChoice → DownloadRequest，用 `App::http_client()` 分块读流写盘（`.part` + 改名、备用域名、标志取消、durl 拒绝）；文件名清洗与进度读数都是纯函数
 │   └── stream_select.rs  DASH 选择纯函数（HEVC 优先；封顶值由调用方给，默认与硬上限 116）
 ├── store/
 │   ├── auth.rs        明文 JSON 凭据落盘（<exe>/auth.json）+ cookie_header() 给 mpv；旧 data/cookies.json 只作一次性迁移来源
@@ -95,19 +96,19 @@ src/
 │   └── mod.rs         mpv 参数构造（一律 `--opt=value`）+ launch() 拉起进程 + Referer/UA 常量 + 运行目录定位
                       **不做播放期 UI，也不接它的命名管道/文本输出**（范围定稿见第 4.3 节）
 ├── pages/
-│   ├── mod.rs         页面层出口 + 两个共用导航事件 `OpenVideo` / `OpenUser`
+│   ├── mod.rs         页面层出口 + 三个共用导航事件 `OpenVideo` / `OpenUser` / `OpenFolder` + 本地关键词过滤 `matches_keyword`
 │   ├── windows.rs     窗口这一层：主窗 1120×760 与登录窗 320×420；**先开主窗再关登录窗**（Windows 默认 QuitMode 会在最后一个窗口关闭时退进程）
 │   ├── gate.rs        登录窗根视图：摆登录页 + 收到 LoginSucceeded 后在**任务里**换窗口（root.rs 已删除，不再原地换视图）
 │   ├── loading.rs     各入口页共用的"投请求 → 序号判定 → 写回实体"样板（Task 必 detach）
-│   ├── shell/         外壳：**80 宽窄侧栏**（左上是账号头像、只显示不可点；Lucide 图标 + 两字的七入口 主页/搜索/收藏/历史/待看/下载/设置；栈非空时第一项是"返回"）+ **下钻栈**（详情页或空间页）
+│   ├── shell/         外壳：**80 宽窄侧栏**（左上是账号头像、只显示不可点；Lucide 图标 + 两字的七入口 主页/搜索/收藏/历史/待看/下载/设置；栈非空时第一项是"返回"，点入口**先清栈再换页**）+ **下钻栈**（`StackPage::{Detail, Space, Folder}`）+ **创建下载队列实体并注入两页**
 │   ├── home/          主页（P6 第一步，默认页）：首页推荐流网格 + "换一批"
 │   ├── login/         扫码登录页（二维码 + 1.5s 轮询 + 过期自动重载），住在自己的小窗里
-│   ├── favorites/     收藏页：收藏夹列表（明确**不下钻**）
-│   ├── history/       历史页：最近观看卡片网格，取一页（连续翻页要游标，这一版不做）
-│   ├── toview/        待看页：稍后再看列表（接口一次给全，所以没有分页控件）
-│   ├── download/      下载页：**占位**，写清开工前要先定的三件事
+│   ├── favorites/     收藏页两层：列表（本地筛选 + 点进去发 `OpenFolder`）与内容页 `folder.rs`（卡片网格 + 服务端 keyword + 加载更多）
+│   ├── history/       历史页：最近观看卡片网格（本地筛选 + 游标"再加载 30 条"把范围手动扩出去）
+│   ├── toview/        待看页：稍后再看列表（接口一次给全，所以没有分页控件；本地筛选）
+│   ├── download/      下载：**`queue.rs` = 任务队列实体**（重名编号、进度事件回传、按标志取消、只清已结束的记录）+ **`view.rs` = 任务列表**（进度、取消、打开所在目录、用 mpv 打开并管好子进程、移除记录）
 │   ├── about/         设置页（这一版是关于）：版本 / 账户 / auth.json 与 config.json 路径 / 画质上限 / mpv / 日志
-│   ├── detail/        详情页（主列信息 + 播放块 + 字幕 + 评论区；右栏 360 选集与相关推荐；持 mpv 子进程并在 Drop 时收掉）
+│   ├── detail/        详情页（主列信息 + 播放块【播放 / **下载这一 P**】+ 字幕 + 评论区；右栏 360 选集与相关推荐；持 mpv 子进程并在 Drop 时收掉；**标题/简介/评论可选中复制**）
 │   ├── space/         用户空间页（P7：资料卡 + 投稿/图文/收藏三块，投稿带分区筛选 chips）
 │   └── search/        阶段一页面（view.rs 为根视图）
 ├── ui/
@@ -115,7 +116,7 @@ src/
 │   ├── layout.rs      页头/分隔线/区块标题/侧栏项/圆头像/统计行/卡片容器
 │   ├── qr.rs          二维码：qrcode-generator 出布尔矩阵，div 网格绘制
 │   ├── cover.rs       封面显示前必过：补协议 + hdslb 图床 `@{w}w_{h}h.jpg` 缩略图后缀
-│   ├── scroll.rs      滚动容器的"按住拖动滚动"（Windows 上 gpui 没有触摸管线，靠注入的鼠标消息；见第 4.23 节）
+│   ├── scroll.rs      滚动容器的"按住拖动滚动"（Windows 上 gpui 没有触摸管线，靠注入的鼠标消息；见第 4.23 节）；**P11 起按下时先问 `TextSelection::is_selectable_at`，落在可选中文字上就让位给选字**（第 4.25 节）
 │   └── video_card.rs  竖卡 232×238 与侧栏横卡 104（flex_wrap 当 UniformGrid 用、时长角标、hover、可点击）
 └── tests/             单元测试集中地（纯逻辑）
 ```
@@ -124,6 +125,11 @@ src/
 
 - `pages/*` 只做装配与渲染，网络调用一律经 `api/`，不直接 `use bpi_rs`。
 - `api/`、`store/`、`player/` 是**无 UI 依赖**的层，必须能在 `cargo test` 里独立跑。
+  **一条已定稿的例外**（P11）：`api/download.rs` 收 `Arc<dyn gpui::http_client::HttpClient>`。
+  它是**传输抽象**而不是界面类型（`App::http_client()`，与封面图共用那份 reqwest 客户端），
+  而 bpi-rs 每个接口都把响应整个读进内存——一部片子不能这么读，只能用它把响应体当 `AsyncRead` 分块搬。
+  代价：这一段没法在 `src/tests/` 里跑，所以那里只测命名/大小/状态这些纯逻辑，
+  搬运与写盘靠真机验。
 - `ui/` 只放跨页面复用组件；页面私有的视图留在该页面目录内。
 - gpui 的类型统一从 `gpui_kit::*` 取，不单独 `use gpui::...`（kit 已把 gpui 放在根上）。
 
@@ -795,6 +801,113 @@ Windows 上这条管线**永久闲置**（`PlatformGestures` 的默认实现是 
 清栈会 drop 详情页，而它在 `Drop` 里 kill 自己拉起的 mpv，所以**看着视频点侧栏换页会关掉那个实例**
 （与一路点"返回"退到空是同一行为，要不要改成"换页不动播放"是另一个决定）。
 
+### 4.24 下载：双文件、每次弹框选目录、可取消（P11，2026-10-26）
+
+**用户的口子只开了一个**："下载功能要做一下，**仅这个能下载到外部文件里**"。
+其余落盘口径（`debug.log`/`auth.json`/`config.json` 在 exe 同目录）一个字没动。
+
+**四条已定稿的形态**（AskUserQuestion 当场选的）：文件形态=**双文件 + 高画质**、
+保存位置=**每次弹框选目录**、多分 P=**只下当前 P**。第三条推论是"没有默认目录、
+没有 `config.json.download_dir`、运行目录里也不开 `downloads/`"——目录只来自那一次弹框。
+
+**弹框是真的**（不是自绘列表）：`App::prompt_for_paths(PathPromptOptions{directories:true,
+files:false, multiple:false, prompt:Some("存到这里")})` → Windows 后端用 `IFileOpenDialog`
++ `FOS_PICKFOLDERS`（`ref/gpui/gpui_windows/src/platform.rs:804` 与 `:1531`）。
+`files` 与 `directories` **不能同时为真**：`can_select_mixed_files_and_dirs()` 在 Windows 返回
+`false`（`:833`）。返回的是 futures oneshot 的 `Receiver`，所以要在 `cx.spawn` 里等
+（`kit/crates/story/src/stories/data_table_story.rs:1210` 是这个用法的现场样本）；
+用户按取消拿到 `None`，界面写"没有选目录，这次下载没开始"，不当错误处理。
+
+**取址复用播放那条路**：详情页 `PlanPurpose::{Play, Download}` 跟着请求走，
+结果回来时 `planning != Some((cid, purpose))` 就丢弃——"换了 P 又点下载"不会用到上一个 P 的地址。
+但**下载每次都重新取一次地址**，不复用手里那份 `plan`：直链有时效（库里那条注释是 120 分钟，
+`ref/bpi-rs/src/models/stream.rs:202-215`），"播了一会儿再想起下载"完全可能已经过期，
+而过期的症状是下到一半变 403/404，比多等 200 ms 难查得多。
+下载与播放共用 `stream::request_qn()`（= `config.json` 的封顶），所以"下到的画质"与"刚才播的画质"
+同一口径。前提是先修掉那条缺陷：**清晰度按钮以前给的是 `support_formats` 全集**，
+点 4K 会把我们自己的 1080P 上限顶穿（现在 `quality_options(.., cap)` 过滤，见第 8 节该轮记录）。
+
+**字节是谁读的**：bpi-rs 每个接口都是 `response.bytes().await`（整个响应进内存），
+一部片子不能这么读；库里的 `stream` feature 也没把流暴露出来。所以这一条走 gpui 的传输抽象：
+`App::http_client()`（我们在 `main.rs` 装的 `reqwest_client::ReqwestClient`，与封面图共用一份）
+→ `HttpClient::send(http::Request<AsyncBody>)` → `Response<AsyncBody>`，
+`AsyncBody` 实现 `futures::AsyncRead`（`gpui-pre-http-client 0.3.9` 的 `async_body.rs:113`），
+于是可以 256 KiB 一块地 `read` 进 `BufWriter<File>`。**`http` 不用加进 `Cargo.toml`**：
+`gpui::http_client` 自己 `pub use http::{self, ...}`；`futures` 只多一条依赖边（crate 本来就在图里）。
+这是 `api/` 层第一次碰 gpui 的类型，理由与代价写在 `src/README.md` 的分层规则里。
+
+**四条实现上的硬规矩**（都在 `src/api/download.rs`）：
+1. **先写 `成品名.part`，整条轨读完才 `rename`**。好处：中断留下的东西不会长得像成品。
+2. **取消是 `AtomicBool` 标志，不是 `JoinHandle::abort()`**。`abort` 在下一个 await 点把任务丢掉，
+   任务手里的 `File`/`BufWriter` 还没 flush 就析构，而主线程同时在删同一个文件——
+   Windows 上"文件还开着就删"会失败。现在由任务自己收尾（flush → 删 `.part` → 发 `Cancelled`）。
+   顺带一条：tokio 的 `JoinHandle` 被 drop **不**取消任务（那是 gpui `Task` 的语义），
+   所以队列丢掉它是安全的，与第 4.9 节那条"必须持有或 detach"不冲突。
+3. **主地址失败按顺序换 `backupUrl`**（roadmap 里 R0 第 3 条：接口给了 `backup_url` 但我们从没用过）。
+   这正是只有下载能做的事——mpv 内部的地址我们替换不了。换地址时那一次写的字节**不计入总数**，
+   所以进度偶尔会退一点，那不是画错。
+4. **一对文件要么都留、要么都不留**。音频轨失败时把已改名的视频也删掉：
+   留下一个没声音的 `xxx.m4v` 比全删更容易被当成可用文件用。
+
+**大小与进度**：`dash.*[].size` 是 `Option`（`videostream_url.rs:63`），
+所以 `total_bytes()` **只在全部要下的轨都知道大小时才给分母**；拿不到就走
+`Progress::loading(true)` 的不定进度 + 已下字节数。`percent()` 把读数夹在 99.9 以内——
+"100%" 在这个界面里只属于 `Finished`。回报按 1 MiB 节流（一个 1 GB 的文件不该往界面通道塞四千条消息）。
+
+**durl 明确拒绝**：分段直链要按 `order` 拼接才是完整一片，这一版不实现拼接，
+`request_for()` 直接返回一句实话而不是"看起来能下、下出来只有第一段"。
+**断点续传也不做**（没有 Range 逻辑），取消就是删掉重来。
+
+**状态只有一个出处**：`DownloadQueue` 是外壳创建的实体，注入详情页（发起）与下载页（查看），
+页面之间因此互不认识。tokio 任务只往 `mpsc::UnboundedReceiver<DownloadEvent>` 里塞进度与终态，
+**不共享任何可变状态**（没有 `Arc<Mutex<Vec<..>>>`，也没有给界面读的原子计数）：
+所有字段都在主线程的 `DownloadTask` 里，改它们的路径只有 `apply()` 一处。
+下载页用 `TaskRow` 快照再建按钮，是因为 `cx.listener` 要 `&mut Context` 而 `queue.read(cx)` 还借着同一个 `cx`。
+
+**成品怎么听**：下载页那颗「用 mpv 打开」把两个本地路径交给同一个 `player::launch`
+（`--audio-file=` 对本地文件与远程 URL 是同一条代码路，参数表一个字不用改），
+子进程句柄照旧**持有并在 `Drop` 里 kill**——多开一条就收掉上一条，否则就是"声音还在、没人能关"。
+「打开所在目录」用 `App::reveal_path`（Windows 后端有实现，不自己拼 `explorer.exe /select,`）。
+
+**已知做不到/没做**：没有下载队列上限（点五个就是五个在跑）；没有并发混流成一个 mp4（要引 ffmpeg）；
+任务记录不持久化（关程序就没了，磁盘成品不动）；退出时还在写的任务会被硬杀，留下 `.part`（这一层不管）。
+
+### 4.25 详情页与评论区的文字可选中、可复制（P11，2026-10-26）
+
+**gpui 0.3.9 本体没有文本选择**：`ref/gpui/gpui/src` 全文搜不到 `Selectable`/`text_selectable`/
+`SelectedText`/`text_selection.rs`，`elements/div.rs` 与 `elements/text.rs` 里连 "selection" 这个词都没有，
+所以 `div().child("中文")` **默认不可选中**，也没有 `.text_selectable()` 这种开关。
+机制在 kit 的 base 层：`gpui_kit::base::{SelectableText, TextSelection}`
+（`ref/gpui-kit/crates/base/src/selectable_text.rs:19`、`text_selection.rs`）。
+
+**接线几乎不用写**：`gpui_kit::open_window` 把内容包进 `base::Root`（`crates/kit/src/lib.rs:181-194`），
+Root 已经挂了 `TextSelectionLayer`（`base/root.rs:254`）、装了 `Ctrl+C`/`cmd+C` → `Copy` 动作并把
+选区写进剪贴板（`root.rs:225-234`）。所以我们现有的 `gpui_kit::init(cx)` + `open_window` 这条路
+**天然带选中与复制**，只需要把要复制的那段文字换成叶子元素：
+
+```rust
+div().text_size(..).text_color(..)                       // 样式仍留在父 div 上
+   .child(SelectableText::new("detail-title", info.title.clone()))
+```
+
+`SelectableText::new` 自己用 `window.with_element_state` 保留一个 handle（`:157-166`），
+页面不必存字段；`with_handle(..) + .document_order(n)` 是给"多段拼成一个连续文档"用的，
+这一版每段各管各的（划一段选中一段，不做跨段连选）。元素 id 要稳定：
+评论用 `rpid` 而不是行号，翻页后第 1 行不会继承上一页第 1 行的选区。
+
+**触摸屏那条**：没有键盘就没有 Ctrl+C，所以页头右侧加了一颗「复制选中」，
+读的是同一个窗口级选区（`TextSelection::selected_text(window, cx)`），
+空选区就什么都不做（只在日志里留一句）。剪贴板只有 `App::write_to_clipboard(ClipboardItem::new_string(String))`
+一条路，没有 `arboard`。
+
+**与 P10 拖动滚动的冲突必须选一边**：手指与鼠标到这一层是同一条 `WM_MOUSEMOVE`（第 4.23 节），
+**没有来源可辨**。同一个"按住左键拖"既是"划文字"又是"拖内容"，所以按下时问一句
+`TextSelection::is_selectable_at(event.position, window, cx)`（它读上一帧 paint 登记的 `text_bounds`，
+所以只能在按下时问）：落在可选中文字上就不记拖动起点，这一路拖动只是选字；落在卡片、封面、空白处照旧拖着走。
+`DragScroll` 的 `stop_propagation()` 因此只在"落点不是文字"时发出，不会再打断选择。
+**副作用要知道**：详情页那几大段文字区域只能选字，要滚就得在卡片之间或空白处拖——
+真机如果觉得这条不划算，改的是这个判据，不是选择功能本身（这是风险表第 24 条）。
+
 ## 5. 阶段进度
 
 
@@ -815,6 +928,8 @@ Windows 上这条管线**永久闲置**（`PlatformGestures` 的默认实现是 
 | P8 | 外壳重构（2026-10-26 用户定稿）：登录改独立小窗 + 侧栏 80 宽七入口（收藏/历史/待看/下载/设置）+ 左上角账号头像 + 落盘改 `auth.json`/`config.json` + 待看接口（第 4.19、4.20、4.21 节） | **编译与测试已绿**（第三十五轮 60 passed、零 Rust warning，产物 `0d659a8`，md5 `b2687551…`）；待真机看：第 4.19–4.21 节 + 该轮记录里那 5 条 |
 | P9 | 收藏夹下钻 + 三种搜索（第 4.22 节）：收藏列表可展开成内容页、卡片进详情页；内容页服务端关键词搜索 + 加载更多；历史本地过滤 + 游标"再加载 30 条"；待看本地过滤 | **编译与测试已绿**（第三十八轮 62 passed、零 Rust warning，产物 `22c2f87`，md5 `b7aeeaa1…`）；待真机看：第 4.22 节那三条搜索口径 + 该轮记录 |
 | P10 | 触摸屏优化（单指上下滚动 = 按住拖动平移内容，11 个滚动容器全接）+ 侧栏入口点击直接换页（先清下钻栈）（第 4.23 节） | **完成**（第三十九轮 65 passed、零 Rust warning，产物 `014b71c`，md5 `4c813442…`；他真机确认拖动滚动"这个好了"，侧栏换页同轮通过） |
+
+| P11 | 详情页与评论区文字**可选中可复制**（第 4.25 节）+ **下载**（第 4.24 节：双文件 `.m4v`+`.m4a`、每次弹框选目录、只下当前 P、进度与取消、备用域名、打开所在目录/用 mpv 打开）+ 顺手修掉 roadmap R0 的两条（清晰度按钮按封顶过滤、`src/README.md` 里那条已经不存在的 `--input-ipc-server` 说法） | **代码已写完，第四十轮 CI 编译中**；绿了之后再真机看：选字与拖动滚动的分界（风险第 24 条）、弹框能不能正常选到目录、403/时效表现（风险第 25 条） |
 
 ## 6. 已知风险与待验证
 
@@ -843,6 +958,9 @@ Windows 上这条管线**永久闲置**（`PlatformGestures` 的默认实现是 
 | 21 | **待看这一路是全有或全无**：`ToViewVideoItem` 与嵌套的 `ToViewRights/Owner/Stat/Dimension` 一个 `#[serde(default)]` 都没有（`ref/bpi-rs/src/historytoview/toview.rs:16-144`），B 站少给任一字段就整次 `BpiError::Decode`；这条接口还没有分页（零参数），所以失败时不是少几条而是整块没有 | 错误只写进待看那一页的提示位，别处照常（第 4.20 节）；日志里有原始文本。真机若稳定复现，照主页那条同法改成自己读 `Value` |
 | 22 | **换窗口的顺序**：登录成功后如果先关登录窗再开主窗，Windows 的默认 `QuitMode` 会在最后一个窗口关闭时直接退进程（`gpui/src/app.rs:458` + `:3180-3188`），症状是扫完码程序闪退 | 顺序钉死在 `open_main_and_close_login`（先开主窗、开成功才关登录窗），且整段跑在 `Context::spawn` 的任务里而不是事件回调里（`app.rs:1520` 会强制画一帧）；改窗口代码前先读第 4.19 节 |
 | 23 | **收藏夹内容这一层是严格结构 + 页码分页**：`FavListDetailData.info/has_more/ttl` 与 `FavListMedia` 十几个字段都没有 `#[serde(default)]`（整个 fav 模块只有 `medias` 有，`ref/bpi-rs/src/fav/list.rs:89`），B 站少给任一字段就整次解析失败 | 失败只显示在收藏夹内容那一页的提示位，收藏列表与别处照常；日志有原文。真机若稳定复现，照第 4.16 节主页那条同法改成自己读 `Value` |
+| 24 | **选中与拖动的分界没在真机上验过**：`TextSelection::is_selectable_at` 读的是"当前作用域"里登记的 `text_bounds`（`base/src/text_selection.rs:2484`），而 `push/pop_text_selection_scope` 只在部分回调路径里包住作用域。如果我们那个按下回调跑在没有作用域的时刻，它会**恒返回 false**，症状是"在文字上拖动时既选字又滚页" | 判据集中在 `ui/scroll.rs::on_press` 一处，真机觉得不划算就改这一处（可以换成"只在详情页让位"或"移动超过 N px 才决定归谁"），**别关掉选择功能**。已定稿的口径：文字区域优先给选字，要滚就在卡片与空白处拖 |
+| 25 | **下载写盘是长事务**：一次任务里 B 站给的 `size` 可能与实际不符（进度退一步）、`rename` 可能被占用文件的程序或杀毒软件挡下、主线程退出时还在写的任务会被硬杀留下 `.part` | 每种失败都原话进那一行的 `note`（不静默）；`.part` 不是成品名，看得见就能删；重试的口径是"再点一次下载"，重取一次地址（直链本身有时效，见 `bpi-rs` 那条 `120 分钟有效` 的注释），这一版**不做续传** |
+| 26 | **没有队列上限**：点五个稿件就是五个任务同时在跑（每个任务内部两条轨是顺序写的），带宽与文件句柄都归 tokio 的多线程 runtime | 真机觉得太满就加"同时在跑不超过 N"的排队；现在先把取消做确实 |
 
 ## 7. 维护规则
 

@@ -442,3 +442,33 @@ bpi-rs 自己请求时会加 `User-Agent` + `Referer: https://www.bilibili.com/`
   自带测试里那个 `"type": 2`（`fav/list.rs:437`）是**夹子 info** 的字段、不是条目。
   所以我们不猜"2=视频"，改成看**拿不拿得到稿件号**（`bvid` 或 `bv_id`，两个键都空就是点不开的行），
   跳过的行数在页头如实写成"另有 M 条打不开"，不假装知道它是什么类型。
+
+## 15. 下载要用的那几个字段（P11，已核对到行号）
+
+下载不是新接口，是把 `play_url` 的那份响应**多读几个字段**再自己搬字节：
+
+| 项 | 事实 | 出处 |
+| --- | --- | --- |
+| 轨的大小 | `DashStream.size: Option<u64>`（`size` 是可选的！），视频与音频各一条 | `ref/bpi-rs/src/video/videostream_url.rs:63` |
+| 备用域名 | `DashStream.backup_url: Vec<String>`、`DurlInfo.backup_url: Vec<String>` | `:50`、`:80` |
+| 单文件回退 | `DurlInfo { order, length(毫秒), size(字节), url, backup_url }`，**多段要按 `order` 拼接**才是完整一片 | `:72-82` |
+| 时效 | `models::stream::Durl.url` 那条注释写的是"120 分钟有效"；库里没有 `timelimit`/`deadline` 字段可读 | `ref/bpi-rs/src/models/stream.rs:202-215` |
+| 容器 | `DashStream.mime_type`（`video/mp4` / `audio/mp4`），`PlayUrlResponseData.format`（durl 那条路的 `mp4`/`flv`…） | `:53`、`:109` |
+| 长度 | `timelength: u64` 是**毫秒**（别与 `DashInfo.duration` 的秒混） | `:110`、`:18` |
+
+搬运字节这件事库里帮不上：bpi-rs 每一条请求都是 `response.bytes().await`（整个响应进内存），
+`reqwest` 的 `stream` feature 虽然开着（`ref/bpi-rs/Cargo.toml:87-93`）但没往外暴露。
+所以走 gpui 的传输抽象：
+
+| 项 | 事实 | 出处 |
+| --- | --- | --- |
+| 客户端 | `App::http_client() -> Arc<dyn HttpClient>`（我们在 `main.rs` 装的 `reqwest_client::ReqwestClient`，封面图共用） | `ref/gpui/gpui/src/app.rs:1944` |
+| 发送 | `HttpClient::send(&self, http::Request<AsyncBody>) -> BoxFuture<'static, Result<Response<AsyncBody>>>` | `gpui-pre-http-client 0.3.9` `http_client.rs:127` |
+| 便捷法 | `get(uri, body: AsyncBody, follow_redirects: bool)` 的第二个参数是 **body 不是 headers**（`().into()` 就是空体），要带 Referer/Cookie 只能自己 `Builder` | 同 `:132-146` |
+| 读体 | `AsyncBody` 实现 `futures::AsyncRead`（`Inner::AsyncReader(Pin<Box<dyn AsyncRead + Send + Sync>>)`），配合 `futures::AsyncReadExt::read` 分块读 | `async_body.rs:14-30`、`:113`；gpui 自己也是这么读图的（`ref/gpui/gpui/src/elements/img.rs:637-645`） |
+| 重定向 | `RedirectPolicy::{NoFollow, FollowLimit, FollowAll}` 是请求扩展，`follow_redirects()` 由 `HttpRequestExt` 提供 | `http_client.rs:23-29`、`:56-60` |
+| 依赖 | `http` **不用**加进 `Cargo.toml`：`http_client` 自己 `pub use http::{self, Request, Response, Builder, ...}`；`futures` 要加（只为 `AsyncReadExt`），依赖图里本来就有那一个 0.3.34 | `http_client.rs:8` |
+| 目录选择 | `App::prompt_for_paths(PathPromptOptions{..})` → oneshot `Receiver<Result<Option<Vec<PathBuf>>>>`；Windows 用 `IFileOpenDialog` + `FOS_PICKFOLDERS`；`files` 与 `directories` **不能同时为真**（`can_select_mixed_files_and_dirs()` 返回 false） | `app.rs:1891`、`ref/gpui/gpui_windows/src/platform.rs:804`/`:1531`/`:833` |
+| 打开目录 | `App::reveal_path(&Path)`（不自己拼 `explorer.exe /select,`） | `app.rs:1913` |
+| 文本选区 | `gpui_kit::base::TextSelection::{selected_text, has_selection, clear, is_selectable_at}`；复制只有 `App::write_to_clipboard(ClipboardItem::new_string(String))` | `ref/gpui-kit/crates/base/src/text_selection.rs:2484-2520`、`ref/gpui/gpui/src/app.rs:1750` |
+
