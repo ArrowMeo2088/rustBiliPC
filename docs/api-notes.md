@@ -472,3 +472,27 @@ bpi-rs 自己请求时会加 `User-Agent` + `Referer: https://www.bilibili.com/`
 | 打开目录 | `App::reveal_path(&Path)`（不自己拼 `explorer.exe /select,`） | `app.rs:1913` |
 | 文本选区 | `gpui_kit::base::TextSelection::{selected_text, has_selection, clear, is_selectable_at}`；复制只有 `App::write_to_clipboard(ClipboardItem::new_string(String))` | `ref/gpui-kit/crates/base/src/text_selection.rs:2484-2520`、`ref/gpui/gpui/src/app.rs:1750` |
 
+## 16. 合集、系列与分集（P12，已核对到行号）
+
+| 项 | 事实 | 出处 |
+| --- | --- | --- |
+| 合集+系列列表 | `video().seasons_series_list(VideoCollectionSeasonsSeriesParams::new(Mid).with_page_num().with_page_size())` → `GetSeasonsSeriesData.items_lists{page, seasons_list[], series_list[]}`，**一次同时给两类** | `ref/bpi-rs/src/video/client.rs:142-153`、`collection/info.rs:165-180` |
+| 签名 | 三条里 `seasons_series_list` 与 `seasons_archives_list` **库里自动签 WBI**（`get_wbi_sign2`，`:117`/`:146`）；`series_archives` **不签**（只 `query`，`:172-176`） | 同上 |
+| 合集内容 | `seasons_archives_list(mid, season_id, page_num, page_size, sort_reverse?)` → `{aids, archives[], meta{name, cover, description, total, season_id}, page{page_num, page_size, total}}`；**`meta.total` 是权威总数** | `collection/params.rs:24-76`、`info.rs:71-102` |
+| 系列内容 | `series_archives(mid, series_id, only_normal?, sort?, pn?, ps?)` → `{aids, page{num→page_num, size→page_size, total}, archives[]}`；**响应里没有系列名与简介**，名字得从上一页带 | `params.rs:182-249`、`info.rs:193-200` |
+| 一集有什么 | `Archive{aid, bvid, ctime, duration(秒), interactive_video, pic, playback_position, pubdate, stat{view, vt?}, state, title, ugc_pay, vt_display, is_lesson_video?}` —— **没有 `videos`（分 P 数）**，所以内容页那一行不标"这一集几个 P" | `info.rs:25-55` |
+| 严格性 | `Archive`/`SeasonsMeta`/`SeriesMeta` 一个 `#[serde(default)]` 都没有 → B 站少给任一字段就整次失败（风险表第 27 条） | 同上 |
+| 分页语义 | `items_lists.page.total` 到底是"条目数"还是"页数"**没有文档**（库里与 fixture 都得不出结论）→ 界面不显示它 | `info.rs:166-173` |
+| 分集从哪来 | `x/web-interface/view` 的 `data.ugc_season{id, title, ep_count, sections[{id, title, episodes[{bvid, cid, title, arc{title, duration, videos}, page, pages[]}]}]}`；**库里的 `VideoView` 没带这块**（`video/model.rs:6-27`），带它的 `VideoData`/`UgcSeason`（`video/info/view.rs:206-264`）**没有任何方法返回**，是死代码 | 见 QODER.md"库里没给 typing 的字段"那条 |
+| 原始读法 | `BpiClient::get(url) -> reqwest::RequestBuilder` 是**公开的**（`src/client.rs:367`，自带 Referer/UA/cookie），所以我们能自己发同一个端点读 `Value`，不必引第二套 HTTP 栈 | `ref/bpi-rs/src/client.rs:367` |
+| 空间页那条 | 投稿那一格的分区筛选数据源 `list.tlist` 是 `Value`（第 12 节）；合集这一格不需要额外接口，`seasons_series_list` 一次给全 | — |
+
+## 17. 时间戳与日期（P12 补）
+
+`Archive.pubdate` / `EpisodeArc.pubdate` 都是 **Unix 秒**，B 站的语义是**北京时间**。
+我们**不引 chrono**（为一个日期格式加时区库不值当），`api/collection.rs::date_text` 用
+Howard Hinnant 的 `civil_from_days` 先把 `+8h` 再换算，边界进单测：
+`0 → 空串`（缺日期不编一个 1970-01-01）、`1704060000 → 2024-01-01`（UTC 会算成 12-31，
+"凌晨发布的稿件集体少一天"就是这条偏移存在的理由）、`1709164800 → 2024-02-29`（闰日）、
+`1672504200 → 2023-01-01`（跨年）。相对时间那一套（评论区）另有口径，见第 11 节。
+
