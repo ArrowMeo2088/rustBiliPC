@@ -22,7 +22,7 @@
 //! ## 已知需要自己补的空白
 //!
 //! - `bpi_rs::session::Account` 只 derive 了 `Deserialize`，没有 `Serialize`，库也不落盘
-//!   → 落盘由 [`crate::store::credentials`] 负责。
+//!   → 落盘由 [`crate::store::auth`] 负责（运行同目录的 `auth.json`）。
 //! - 视频链路的 `DashInfo` 上**没有** `best_video()`（那个助手在 `models::stream::VideoStreamData`
 //!   上，属于番剧/课程响应），所以码流选择见 [`stream_select`]。
 //! - bpi-rs 不外发它自己用的请求头 → mpv 需要的 Referer/UA 常量在 [`crate::player`]。
@@ -38,6 +38,7 @@ pub mod search;
 pub mod space;
 pub mod stream;
 pub mod stream_select;
+pub mod toview;
 
 use std::future::Future;
 
@@ -54,8 +55,8 @@ where
 
 /// 秒数 → `mm:ss`，超过一小时变 `h:mm:ss`。
 ///
-/// 放在 api 层是因为**两处以上要用而且单位口径不一样**：历史/详情/收藏给的是数字秒，
-/// 而搜索接口直接给 `"mm:ss"` 字符串（那个不需要格式化）。边界（0、正好一小时）容易写错，
+/// 放在 api 层是因为**两处以上要用而且单位口径不一样**：历史/待看/详情给的是数字秒，
+/// 而搜索与空间投稿直接给 `"mm:ss"` 字符串（那些不需要格式化）。边界（0、正好一小时）容易写错，
 /// 所以是纯函数并进单测。
 pub fn format_seconds(seconds: u32) -> String {
     let hours = seconds / 3600;
@@ -67,6 +68,18 @@ pub fn format_seconds(seconds: u32) -> String {
     } else {
         format!("{minutes:02}:{secs:02}")
     }
+}
+
+/// 观看进度（接口给的秒）→ 界面文案；没看过就是空串。
+///
+/// 历史和待看两处要给同一句话（`看到 12:34`），口径必须一致：
+/// `0` 是"没看过"，`-1` 是 B 站偶尔给的"未知"，两者都**不许**显示成"看到 00:00"——
+/// 那是"看了但一秒没看"的误导。纯函数，进单测。
+pub fn progress_text(progress: i32) -> String {
+    if progress <= 0 {
+        return String::new();
+    }
+    format!("看到 {}", format_seconds(progress as u32))
 }
 
 /// 把接口里常见的"数字秒可能是 u64"收窄成 `format_seconds` 要的 u32。

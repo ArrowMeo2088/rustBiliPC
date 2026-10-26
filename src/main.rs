@@ -5,18 +5,31 @@
 //! 2. tokio runtime + rustls 默认 provider —— 见 [`rustbilipc::app`] 的说明：API 调用依赖前者，
 //!    没有后者任何 HTTPS 请求都会在握手处 panic（表现是界面一直停在加载态）。
 //! 3. `with_assets` —— kit 的图标/字体资源，必须在 `init` 之前挂上。
-//! 4. `gpui_kit::init` → 主题覆盖 → **装 HttpClient** → 开窗。
+//! 4. `gpui_kit::init` → 主题覆盖 → **装 HttpClient** → 装进程级设置 → 读凭据 → 开窗。
 //!
 //! 第 4 步里的 HttpClient 不能省：gpui 默认装的是 `NullHttpClient`（`gpui` 的 `app.rs` 里
 //! 直接构造），任何网络图片请求都会失败；封面图靠 `ImageAssetLoader` 走
 //! `App::http_client()`，所以必须换成真的 reqwest 客户端。
+//!
+//! ## 开窗这一步现在有两种结局（2026-10-26 用户定稿）
+//!
+//! 运行同目录有可用的 `auth.json` → 只开主窗口；没有 → 只开一个小的扫码登录窗，
+//! 登录成功后由 [`LoginGate`](rustbilipc::pages::gate::LoginGate) 换窗口。
+//! 尺寸与"先开主窗再关登录窗"的理由都写在 [`windows`](rustbilipc::pages::windows) 里。
+//!
+//! ## 设置为什么要在开窗之前装
+//!
+//! 起播那条路读的封顶档来自 `config.json`（见 [`stream::request_qn`](rustbilipc::api::stream::request_qn)）。
+//! 装晚了不会崩，但"第一帧就起播"的路径上会读到默认值，界面上说的话和实际请求的参数可能对不上。
 
 use std::sync::Arc;
 
 use gpui_kit::*;
 use rustbilipc::app;
 use rustbilipc::logging;
-use rustbilipc::pages::RootView;
+use rustbilipc::pages::windows;
+use rustbilipc::store::auth::Auth;
+use rustbilipc::store::config::Config;
 use rustbilipc::theme;
 
 /// 我们对外 HTTP 客户端自报的家门名（User-Agent 的一部分）。
@@ -44,9 +57,11 @@ fn main() {
     );
     log::info!("BpiClient 就绪");
 
-    // Assets 是 gpui-kit 自带的 rust-embed 资源（Lucide 图标等）。
-    // 将来要加载我们自己的图片/字体时，改成 `Assets::before(Assets)` 的组合形式。
-    let application = gpui_kit::application().with_assets(gpui_kit::assets::Assets);
+    // Assets 用 kit 的**完整** Lucide 集（1830 个 svg 全嵌进 exe）。
+    // 默认那份 `Assets` 只嵌 106 个，侧栏要的 House/Clock/Bookmark/Download 都不在里面；
+    // 名字找不到不会报错，只会画出一片空白（见 `ui::layout::side_item` 的说明）。
+    // 将来要加载我们自己的图片/字体时，改成组合形式而不是退回 `Assets`。
+    let application = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
 
     application.run(move |cx| {
         // 使用任何 kit 组件前必须调用。
@@ -57,19 +72,44 @@ fn main() {
             .expect("初始化 HttpClient 失败");
         cx.set_http_client(Arc::new(http_client));
 
-        let window_options = WindowOptions {
-            window_bounds: Some(WindowBounds::centered(size(px(1120.), px(760.)), cx)),
-            ..Default::default()
+        // 进程级设置：读运行目录的 config.json，没有就写一份默认的出来。
+        let config = Config::load_or_create();
+        log::info!(
+            "设置就绪：max_quality={}（{:?}）",
+            config.max_quality,
+            Config::path()
+        );
+        app::init_config(config);
+
+        // 凭据：读 auth.json；只有它不合格时才去看一次旧的 data/cookies.json（迁移，见 store::auth）。
+        let auth = Auth::load();
+        log::info!(
+            "启动判定：凭据文件 {:?}（可读={}，字段完整={:?}）",
+            Auth::path(),
+            auth.is_some(),
+            auth.as_ref().map(|auth| auth.is_complete())
+        );
+
+        let opened = match auth.filter(|auth| auth.is_complete()) {
+            Some(auth) => {
+                log::info!("本机已有凭据，直接开主窗口 mid={}", auth.dede_user_id);
+                if let Err(error) = client.set_account(auth.to_account()) {
+                    // 凭据可能已失效；不致命，接口会用错误码提示，用户也能从设置页看到账户栏的空态。
+                    log::warn!("复用已保存的登录态失败: {error}");
+                }
+                windows::open_main_window(Arc::clone(&client), auth.dede_user_id, cx)
+            }
+            None => {
+                log::info!("本机没有可用凭据，开扫码登录小窗");
+                windows::open_login_window(Arc::clone(&client), cx)
+            }
         };
 
-        // open_window 会把视图包进 kit 的 Root，弹层/对话框/菜单才有宿主。
-        // 客户端在闭包外 clone 一次：open_window 的构造闭包是 FnMut，会被多次调用。
-        // 根视图内部再决定进登录页还是主界面（见 docs/architecture.md 第 4.6 节）。
-        let client_for_window = Arc::clone(&client);
-        gpui_kit::open_window(window_options, cx, move |window, cx| {
-            let client = Arc::clone(&client_for_window);
-            cx.new(|cx| RootView::new(window, cx, client))
-        })
-        .expect("打开主窗口失败");
+        // 一个窗口都没开成功就没有可看的界面，也没有任何东西能再触发退出：
+        // 直接把原因写进日志并结束进程，比留一个隐形的主线程挂在循环里有用。
+        if let Err(error) = opened {
+            log::error!("开窗口失败，退出: {error}");
+            cx.quit();
+        }
     });
 }

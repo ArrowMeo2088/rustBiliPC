@@ -118,8 +118,18 @@ pub const TITLE_BAR_HEIGHT: f32 = 48.;
 /// 页头高度（`PopularPage.xaml:18` 是 `RowDefinition Height="56"`，`:30-33` 那条 Border 是 1px 分隔线）。
 pub const HEADER_HEIGHT: f32 = 56.;
 
-/// 左侧列表栏宽度（`LayoutPageViewModelBase.cs:41` = 240）。
-pub const SIDE_COLUMN_WIDTH: f32 = 240.;
+/// 侧栏宽度。**2026-10-26 用户定稿收到原来的 1/3**（"左边的菜单的长度也收小到原来的1/3"）：
+/// 240 → 80。这一栏不再写长标签，只放"图标 + 两字"，所以宽度由内容决定：
+/// 80 = 48 的导航项（见 `TITLE_BAR_HEIGHT`）左右各留 8（`LIST_ROW_PADDING_Y`）+ 4 的描边余量，
+/// 头像块 48 + 两侧 16 也刚好放得下。参考项目在同样位置用的是 240 的 `NavigationView`
+/// 展开态（`LayoutPageViewModelBase.cs:41`），它自己也有紧凑态，我们没有那套系统控件，
+/// 所以这个数是按我们的内容反推的，**不是抄来的**。
+pub const SIDE_COLUMN_WIDTH: f32 = 80.;
+
+/// 侧栏导航项里的图标边长。不新造数字：16 等于最大那档字号 `FONT_TITLE`，
+/// 也与参考项目里 `SymbolIcon` 常用尺寸同档；导航项总高直接复用 `TITLE_BAR_HEIGHT`（48）：
+/// 上下各 8（`LIST_ROW_PADDING_Y`）+ 图标 16 + 图标与文字间距 4（`CARD_LINE_GAP`）+ 12 号字（`FONT_CAPTION`）。
+pub const SIDEBAR_ICON_SIZE: f32 = 16.;
 
 /// 详情页右侧信息栏宽度（`VideoPlayerPanel.xaml:11` 的 `<Grid Width="360">`）。
 pub const DETAIL_SIDE_WIDTH: f32 = 360.;

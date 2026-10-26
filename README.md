@@ -10,12 +10,12 @@ Direct3D11 + DirectComposition + DirectWrite 原生绘制；视频播放交给�
 | --- | --- |
 | 界面 | `gpui-kit 0.8.0`（umbrella，内含 gpui-component 0.8.0 组件层），实际 gpui 快照 `gpui-pre =0.3.9` |
 | 接口 | `bpi-rs 0.3.1`，关闭默认 `full`，只开 login/search/video/user/fav/historytoview/misc/comment |
-| 登录 | 扫码登录为主，凭据明文存 `<exe 同目录>/data/cookies.json`，下次启动自动复用 |
+| 登录 | 扫码登录为主：启动时若 `<exe 同目录>/auth.json` 没有可用凭据，**先弹一个 320×420 的小登录窗**，扫完码才开主窗口（2026-10-26 定稿）。凭据与设置都是明文 JSON 平铺在运行目录（`auth.json` / `config.json`，不再写 `data/`） |
 | 播放 | 把 DASH 直链 URL 交给外部 mpv **在线流式播**（不下整片），独立窗口。**播放期的一切（进度条/时间/暂停/音量/全屏/字幕显示）都归 mpv 自带的 OSC，本项目不做**；我们只做播放之外（见下一行） |
 | 范围 | rustBiliPC 负责：主页（首页推荐）、搜索、个人中心、视频详情、评论区、分集分P 的呈现、清晰度档位、**用户空间（投稿/图文/收藏）**、拉起 mpv。不负责：播放器界面本身；**字幕投递与同实例换清晰度也不做**（用户 2026-10-25 判定"两个都没必要"） |
 | 画质 | HEVC 优先 + 默认封顶 1080P（`id <= 116`），无 1080P 时自动取最高可用档 |
 | 编译 | 本机**不装** Rust 工具链，全部由 GitHub Actions 手动触发编译，仅 Windows x64 **release** |
-| 阶段 | 登录 → 搜索 → 个人 → 详情 → 起播 均已真机通过；P5 视觉照 `ref/Bili.Copilot` 重做并已把全局主题切成暗色（kit 默认亮色是"搜索框白底黑字"的根因）；P6a 主页与 P6b 评论区已编译交付（第二十七、二十九轮，48 passed、零 Rust warning）。P7 用户空间（资料卡 + 投稿带分区筛选 + 图文 + 收藏）已编译交付（第三十二轮 54 passed、零 Rust warning，产物 md5 `86297ed0…`），等真机看第 4.18 节那 6 条 |
+| 阶段 | P0–P7 均已编译交付（P0–P5 真机通过：登录、搜索、个人、详情、起播、照 `ref/Bili.Copilot` 重做的暗色视觉；P6a 主页 + P6b 评论区 + P7 用户空间是第三十二轮 54 passed、零 Rust warning 的产物，等真机看）；当前 **P8 外壳重构**：登录改独立小窗、侧栏收到 80 宽并列出 收藏/历史/待看/下载/设置 五个新入口、左上角换成账号头像、落盘改 `auth.json`/`config.json`（`docs/architecture.md` 第 4.19–4.21 节） |
 
 ## 大概的文件结构
 
@@ -27,7 +27,7 @@ rustBiliPC/
 │   ├── api/             bpi-rs 封装 + DASH 码流选择 + 播控取地址 + 首页推荐
 │   ├── store/           凭据落盘
 │   ├── player/          外置 mpv 参数与拉起（一个文件，不做遥控）
-│   ├── pages/           主页 / 登录 / 搜索 / 个人中心 / 详情页（外壳持有详情页栈）
+│   ├── pages/           主页 / 搜索 / 收藏 / 历史 / 待看 / 下载(占位) / 设置(关于) / 登录(独立小窗) / 详情页 / 空间页
 │   └── ui/              色板与尺寸常量、复用布局件、视频卡片、封面 URL 规整、二维码
 ├── publish/             编译产物（不入库）
 ├── test/                单元测试布局说明（代码在 src/tests/）
@@ -61,5 +61,5 @@ rustBiliPC/
 - 需要播放时：把**官方原版 `mpv.exe` 放到程序同目录**（即 `publish/mpv.exe`）。程序只认这个位置，
   不查 PATH（PATH 上会先命中 `mpv.com` 那个"再派生一个 mpv.exe"的启动器，我们的 kill 管不到真正播放的进程）。
   缺它只是不能播，其余功能照常；搜索页底部状态行会显示它找的是哪个路径。
-- 首次登录后会在 exe 同目录创建 `data/cookies.json`（明文，含 `SESSDATA`）——
+- 首次登录后会在 exe 同目录创建 `auth.json`（明文，含 `SESSDATA`）；`config.json` 第一次启动也会写出一份默认的（只放真的有代码在读的 `max_quality`）。旧的 `data/cookies.json` 会被读一次做迁移，**迁移后保留不删**——
   不要把带凭据的目录提交或分享出去。

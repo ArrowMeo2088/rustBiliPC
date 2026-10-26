@@ -1,26 +1,43 @@
-//! 页面层：按功能阶段划分，一个阶段一个目录；`root.rs` 是窗口根视图。
+//! 页面层：按功能划分，一个功能一个目录。
 //!
-//! 层次是 `root.rs`（登录 vs 主界面）→ `shell/`（主页 / 搜索 / 我的，外加详情页栈）→ 具体页面，
-//! 两层各管各的切换，互不污染。页面顺序按用户定的清单走：
-//! **主页、搜索、个人、视频详情**（评论与清晰度呈现继续在 P6 补）。
+//! ## 2026-10-26 之后这一层的形状
+//!
+//! `root.rs`（"同一窗口里换登录/主界面"）退役了，改成 [`windows`]：**没凭据就只开一个
+//! 小登录窗（[`gate`] 装 [`login`]），有凭据就直接开主窗口（[`shell`] 是它的根视图）**。
+//! 于是这一层的职责变成三件事：
+//! - [`windows`]：窗口尺寸、开关顺序（先开主窗再关登录窗，反了进程会自己退出）；
+//! - [`gate`]：登录窗的根视图，只负责"显示二维码 + 成功后换窗口"；
+//! - [`shell`]：主窗内的七个入口（主页 / 搜索 / 收藏 / 历史 / 待看 / 下载 / 设置）
+//!   与下钻栈（详情页 / 空间页）。
+//! 原来的 `mine/`（个人中心一页装三块）拆成了 `favorites/`、`history/`，新增 `toview/`、
+//! `download/`、`about/`。
+//!
+//! [`loading`] 是各入口页共用的"一次请求回到实体"样板（序号 + upgrade + update）。
+//!
 //! 播放期不在这里——进度、暂停、音量、字幕显示都归外置 mpv 自己的 OSC（第 4.3 节）。
 
+pub mod about;
 pub mod detail;
+pub mod download;
+pub mod favorites;
+pub mod gate;
+pub mod history;
 pub mod home;
+pub mod loading;
 pub mod login;
-pub mod mine;
-pub mod root;
 pub mod search;
 pub mod shell;
 pub mod space;
-
-pub use root::RootView;
+pub mod toview;
+pub mod windows;
 
 /// 页面之间共用的导航事件：卡片被点开 → 打开该稿件的详情页。
 ///
-/// 定义在这一层（而不是各页面各自一个）是因为四个地方发同一个信号：
-/// 主页的推荐卡片、搜索结果的卡片、个人中心的"最近观看"、详情页的"相关推荐"。
-/// 外壳只需订阅这一种事件。
+/// 定义在这一层（而不是各页面各自一个）是因为五个地方发同一个信号：
+/// 主页的推荐卡片、搜索结果的卡片、历史与待看的卡片、详情页的"相关推荐"，
+/// 以及空间页的投稿卡片。只发这一种事件的入口页由外壳的 `watch_videos` 订阅，
+/// 两种都发的（详情页 / 空间页）用 `watch_page`——两个都是
+/// [`MainShell`](crate::pages::shell::MainShell) 的私有方法，见那个文件的说明。
 #[derive(Clone, Debug)]
 pub struct OpenVideo {
     /// 稿件号。

@@ -11,8 +11,9 @@ mod stream_select_tests {
     #[test]
     fn quality_up_to_full_hd_is_allowed() {
         // 16/32/64/80 = 360P/480P/720P/1080P，112/116 = 1080P+ / 1080P60。
+        // 封顶值现在由调用方给（它来自 config.json 的 max_quality），测试里给默认的 116。
         for id in [16u64, 32, 64, 80, 112, 116] {
-            assert!(is_quality_allowed(id), "{id} 应当在封顶范围内");
+            assert!(is_quality_allowed(id, MAX_QUALITY_ID), "{id} 应当在封顶范围内");
         }
     }
 
@@ -20,8 +21,11 @@ mod stream_select_tests {
     fn ultra_hd_tiers_are_rejected() {
         // 120=4K, 125=HDR, 126=Dolby Vision, 127=8K：目标机硬解不到，默认排除。
         for id in [120u64, 125, 126, 127] {
-            assert!(!is_quality_allowed(id), "{id} 应当被封顶排除");
+            assert!(!is_quality_allowed(id, MAX_QUALITY_ID), "{id} 应当被封顶排除");
         }
+        // 把封顶调低一档，116 自己也要被排除——这条证明"参数真的生效"而不是恒等于常量。
+        assert!(!is_quality_allowed(116, 64));
+        assert!(is_quality_allowed(64, 64));
     }
 
     #[test]
@@ -140,11 +144,11 @@ mod player_tests {
 }
 
 #[cfg(test)]
-mod credentials_tests {
-    use crate::store::credentials::SavedCredential;
+mod auth_tests {
+    use crate::store::auth::Auth;
 
-    fn sample() -> SavedCredential {
-        SavedCredential {
+    fn sample() -> Auth {
+        Auth {
             dede_user_id: "123".into(),
             sessdata: "sess".into(),
             bili_jct: "jct".into(),
@@ -157,7 +161,7 @@ mod credentials_tests {
     #[test]
     fn json_roundtrip_keeps_every_field() {
         let json = serde_json::to_string(&sample()).expect("序列化应当成功");
-        let back: SavedCredential = serde_json::from_str(&json).expect("反序列化应当成功");
+        let back: Auth = serde_json::from_str(&json).expect("反序列化应当成功");
         assert_eq!(back.dede_user_id, "123");
         assert_eq!(back.sessdata, "sess");
         assert_eq!(back.bili_jct, "jct");
@@ -169,10 +173,20 @@ mod credentials_tests {
     fn optional_fields_default_when_absent() {
         // 老文件缺 refresh_token / saved_at_unix 时必须还能读，否则升级即掉登录态。
         let minimal = r#"{"dede_user_id":"1","sessdata":"2","bili_jct":"3","buvid3":"4"}"#;
-        let parsed: SavedCredential = serde_json::from_str(minimal).expect("缺省字段应当容错");
+        let parsed: Auth = serde_json::from_str(minimal).expect("缺省字段应当容错");
         assert!(parsed.refresh_token.is_empty());
         assert_eq!(parsed.saved_at_unix, 0);
         assert!(parsed.is_complete());
+    }
+
+    #[test]
+    fn broken_auth_text_is_treated_as_not_logged_in() {
+        // 这是"读不到就当没登录"的那条判断，`load` 与旧文件迁移都走它。
+        // 坏文本不能炸，也不能给出一份"看起来已登录"的空凭据。
+        assert!(Auth::from_json("not json").is_none());
+        assert!(Auth::from_json("").is_none());
+        let partial = Auth::from_json(r#"{"dede_user_id":"1","sessdata":"2"}"#).expect("缺省字段应当容错");
+        assert!(!partial.is_complete());
     }
 
     #[test]
@@ -238,9 +252,53 @@ mod search_format_tests {
 }
 
 #[cfg(test)]
+mod config_tests {
+    use crate::api::stream_select::MAX_QUALITY_ID;
+    use crate::store::config::{Config, MIN_QUALITY_ID, clamp_quality, quality_name};
+
+    #[test]
+    fn quality_cap_is_clamped_into_the_supported_range() {
+        // 用户手改 config.json 最容易写超：4K(120/127) 与 0 都必须收回来。
+        // 超上限会在目标机上掉软解丢帧（风险表第 14 条），0 则让整条起播路径请求一个不存在的档。
+        assert_eq!(clamp_quality(0), MIN_QUALITY_ID);
+        assert_eq!(clamp_quality(120), MAX_QUALITY_ID);
+        assert_eq!(clamp_quality(127), MAX_QUALITY_ID);
+        assert_eq!(clamp_quality(MAX_QUALITY_ID), MAX_QUALITY_ID);
+        assert_eq!(clamp_quality(64), 64);
+    }
+
+    #[test]
+    fn missing_field_falls_back_to_default_cap() {
+        // 新增字段一律带 `#[serde(default)]`，所以"只写了一半"的旧文件必须还能读。
+        let empty = Config::from_json("{}").expect("空对象应当能读");
+        assert_eq!(empty.max_quality, MAX_QUALITY_ID);
+        let written = Config::from_json(r#"{"max_quality":80}"#).expect("80 应当能读");
+        assert_eq!(written.max_quality, 80);
+        // 写超的那份在解析时就收回，并留一条日志（不是静默改掉用户的值却不吭声）。
+        let over = Config::from_json(r#"{"max_quality":125}"#).expect("超范围也应当能读");
+        assert_eq!(over.max_quality, MAX_QUALITY_ID);
+    }
+
+    #[test]
+    fn broken_config_text_is_not_a_panic() {
+        // 读不到就用默认值（`load_or_create` 会顺手写一份回去），这里只验"不炸、给 None"。
+        assert!(Config::from_json("not json").is_none());
+        assert!(Config::from_json("").is_none());
+    }
+
+    #[test]
+    fn quality_names_cover_the_tiers_we_allow() {
+        // 设置页显示的是这一串，所以"认不出就不编名字"要钉住。
+        assert_eq!(quality_name(MAX_QUALITY_ID), "1080P 60帧（qn=116）");
+        assert_eq!(quality_name(64), "720P（qn=64）");
+        assert!(quality_name(99).contains("qn=99"));
+    }
+}
+
+#[cfg(test)]
 mod login_tests {
-    use crate::api::login::{QrPollState, credential_from_cookies, needs_buvid3_backfill};
-    use crate::store::credentials::SavedCredential;
+    use crate::api::login::{QrPollState, auth_from_cookies, needs_buvid3_backfill};
+    use crate::store::auth::Auth;
 
     fn full_cookies() -> Vec<(String, String)> {
         vec![
@@ -286,7 +344,7 @@ mod login_tests {
 
     #[test]
     fn credential_needs_all_four_cookies() {
-        let credential = credential_from_cookies(&full_cookies(), "refresh")
+        let credential = auth_from_cookies(&full_cookies(), "refresh")
             .expect("四个 cookie 齐全时应当构造成功");
         assert_eq!(credential.dede_user_id, "42");
         assert_eq!(credential.sessdata, "sess");
@@ -300,14 +358,14 @@ mod login_tests {
             .into_iter()
             .filter(|(key, _)| key != "buvid3")
             .collect();
-        assert!(credential_from_cookies(&partial, "refresh").is_none());
+        assert!(auth_from_cookies(&partial, "refresh").is_none());
     }
 
     #[test]
     fn saved_credential_roundtrips_after_login() {
-        let credential = credential_from_cookies(&full_cookies(), "refresh").unwrap();
+        let credential = auth_from_cookies(&full_cookies(), "refresh").unwrap();
         let json = serde_json::to_string(&credential).unwrap();
-        let back: SavedCredential = serde_json::from_str(&json).unwrap();
+        let back: Auth = serde_json::from_str(&json).unwrap();
         assert_eq!(back, credential);
     }
 
@@ -349,8 +407,8 @@ mod qr_tests {
 }
 
 #[cfg(test)]
-mod mine_tests {
-    use crate::api::format_seconds;
+mod profile_tests {
+    use crate::api::{format_seconds, progress_text};
     use crate::api::profile::vip_label;
 
     #[test]
@@ -362,6 +420,16 @@ mod mine_tests {
         assert_eq!(format_seconds(3600), "1:00:00");
         assert_eq!(format_seconds(3725), "1:02:05");
         assert_eq!(format_seconds(86_399), "23:59:59");
+    }
+
+    #[test]
+    fn progress_text_hides_zero_and_unknown() {
+        // 历史与待看共用这一份口径：0 是"没看过"、-1 是 B 站偶尔给的"未知"，
+        // 两种都不许显示成"看到 00:00"（那是"看了但一秒没看"的误导）。
+        assert_eq!(progress_text(0), "");
+        assert_eq!(progress_text(-1), "");
+        assert_eq!(progress_text(45), "看到 00:45");
+        assert_eq!(progress_text(3725), "看到 1:02:05");
     }
 
     #[test]
@@ -473,7 +541,7 @@ mod detail_tests {
 #[cfg(test)]
 mod playback_tests {
     use crate::api::stream::{quality_label, quality_options};
-    use crate::store::credentials::SavedCredential;
+    use crate::store::auth::Auth;
 
     fn support(quality: u64, new_description: &str, display_desc: &str) -> bpi_rs::video::videostream_url::SupportFormat {
         bpi_rs::video::videostream_url::SupportFormat {
@@ -512,7 +580,7 @@ mod playback_tests {
 
     #[test]
     fn cookie_header_lists_only_what_we_have() {
-        let credential = SavedCredential {
+        let credential = Auth {
             dede_user_id: "42".to_string(),
             sessdata: "sess".to_string(),
             bili_jct: "csrf".to_string(),
@@ -525,7 +593,7 @@ mod playback_tests {
             "DedeUserID=42; SESSDATA=sess; bili_jct=csrf; buvid3=buvid"
         );
 
-        let partial = SavedCredential {
+        let partial = Auth {
             sessdata: String::new(),
             ..credential
         };

@@ -10,16 +10,23 @@
 //!
 //! ## 排序规则
 //!
-//! 1. 画质档 `id`（即 B 站 qn 代码）降序，且默认只允许 `<= MAX_QUALITY_ID`；
+//! 1. 画质档 `id`（即 B 站 qn 代码）降序，且只允许 `<= cap`；
 //! 2. 同档内编码优先级：HEVC(`hev1`/`hvc1`) > AV1(`av01`) > 其它(主要是 `avc1`)；
 //! 3. 仍并列时取带宽更高的一路。
+//!
+//! `cap` 由调用方给（起播那条路传的就是本次请求的 `qn`，见 [`crate::api::stream::request_qn`]，
+//! 它的值来自运行目录的 `config.json`）。[`MAX_QUALITY_ID`] 是它的**默认值与硬上限**。
 //!
 //! 若过滤后为空（例如响应只给了 4K），退回全集再选一次，保证总能拿到一路。
 
 use bpi_rs::video::videostream_url::DashStream;
 
-/// 画质档上限：116 = 1080P 60帧。允许 16/32/64/80/112/116，
+/// 画质档默认上限：116 = 1080P 60帧。允许 16/32/64/80/112/116，
 /// 排除 120(4K)/125(HDR)/126(Dolby Vision)/127(8K)。
+///
+/// 这一版它同时是**硬上限**：`config.json` 里的 `max_quality` 会被
+/// [`clamp_quality`](crate::store::config::clamp_quality) 收回到这个值以内，
+/// 因为再高的档目标机解不动、也要大会员。
 pub const MAX_QUALITY_ID: u64 = 116;
 
 /// 编码优先级，数值越大越优先。
@@ -35,9 +42,10 @@ fn codec_score(codecs: &str) -> u8 {
     }
 }
 
-/// 画质档是否落在允许的封顶范围内。单独抽出来便于单元测试。
-pub fn is_quality_allowed(id: u64) -> bool {
-    id <= MAX_QUALITY_ID
+/// 画质档是否落在封顶范围内。`cap` 由调用方给（来自 `config.json` 的 `max_quality`），
+/// 单独做成函数是为了进单测——边界都在这一行上。
+pub fn is_quality_allowed(id: u64, cap: u64) -> bool {
+    id <= cap
 }
 
 /// 三路比较键：(画质档, 编码优先级, 带宽)。
@@ -49,10 +57,10 @@ fn rank(stream: &DashStream) -> (u64, u8, u64) {
 ///
 /// 只用于 `dash.video`；`durl`（FLV/MP4 直链回退路径）现阶段不处理——
 /// 请求里带 DASH 标志后 B 站基本不会再返回 durl，真遇到再补。
-pub fn pick_video(streams: &[DashStream]) -> Option<&DashStream> {
+pub fn pick_video(streams: &[DashStream], cap: u64) -> Option<&DashStream> {
     let best = streams
         .iter()
-        .filter(|stream| is_quality_allowed(stream.id))
+        .filter(|stream| is_quality_allowed(stream.id, cap))
         .max_by(|a, b| rank(a).cmp(&rank(b)));
 
     // 封顶范围内没有可用流时退回全集，宁可不降级也别播不了。

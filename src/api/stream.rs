@@ -12,7 +12,8 @@
 //! `16 | 2048` = DASH + AV1。**没有单独的 HEVC 位**：开了 DASH 之后 `dash.video[]` 里
 //! HEVC/AVC/AV1 一起给，靠 `codecs` 区分（`docs/api-notes.md` 第 5 节）。
 //! 4K/HDR/杜比那几位（128/64/256/512/1024）不开：目标机 i5-6200U 硬解不到，
-//! 而且 `.fourk(false)` 与 `api::stream_select::MAX_QUALITY_ID` 一起把画质封在 116。
+//! 而且 `.fourk(false)` 与请求 `qn`（[`request_qn`]，值来自 `config.json` 的 `max_quality`，
+//! 默认与硬上限 116=1080P60）一起把画质封在封顶档以内。
 //!
 //! ## 域名
 //!
@@ -34,10 +35,15 @@ use super::stream_select;
 /// 请求位掩码：DASH + AV1。
 const FNVAL_DASH_AV1: u64 = 16 | 2048;
 
-/// 默认想要的画质档：就是封顶档，B 站会在能给的范围里给到最高。
+/// 起播时想要的画质档：**读进程级设置**（运行目录 `config.json` 的 `max_quality`，
+/// 默认与硬上限都是 [`stream_select::MAX_QUALITY_ID`]）。
 ///
-/// 页面不需要知道 `stream_select` 的存在（分层规则），起播一律用这个常量。
-pub const DEFAULT_REQUEST_QN: u64 = stream_select::MAX_QUALITY_ID;
+/// 页面不需要知道 `stream_select` 与 config 的存在（分层规则），起播一律用这个函数；
+/// 它同时也是选流的封顶值——见 [`fetch_streams`] 里把同一个数传给
+/// [`pick_video`](crate::api::stream_select::pick_video)，请求档与选择档不会各说一套。
+pub fn request_qn() -> u64 {
+    crate::app::config().max_quality
+}
 
 /// 一个可选清晰度。
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -143,7 +149,9 @@ pub fn fetch_streams(
 
         // DASH 优先：音视频两条流。
         if let Some(dash) = data.dash.as_ref() {
-            let video = stream_select::pick_video(&dash.video).ok_or_else(|| {
+            // 封顶值就用本次请求的 `qn`：请求档与选择档是同一个数，
+            // 不会出现"要 720P 却选了 1080P"或反过来的两套说法。
+            let video = stream_select::pick_video(&dash.video, want_qn).ok_or_else(|| {
                 BpiError::unsupported_response("playurl 的 dash.video 里没有封顶范围内的可用流")
             })?;
             let audio = stream_select::pick_audio(&dash.audio);

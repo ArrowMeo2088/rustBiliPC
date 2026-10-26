@@ -1,9 +1,11 @@
-//! 扫码登录页。
+//! 扫码登录页。它现在住在**自己的小窗口**里（2026-10-26 用户定稿："登录单独做一个窗口……
+//! 这个扫码登录的窗口做小一点，只要能显示 rustBiliPC 的 logo 和登录二维码即可"），
+//! 窗口尺寸与换窗口的时序在 [`windows`](crate::pages::windows) 与 [`LoginGate`](crate::pages::gate::LoginGate)。
 //!
-//! 流程（定稿：登录先行，没有凭据就先看到这一页）：
+//! 流程（定稿：登录先行，本机没有可用凭据就先看到这一页）：
 //! 1. `qr_generate` 拿 URL + `qrcode_key`，本地编码成模块矩阵画出来；
 //! 2. 每 1.5 秒 `qr_poll` 一次，按 B 站的码更新提示；
-//! 3. `code == 0` 时组装 `SavedCredential`、写盘、`set_account`，然后发 [`LoginSucceeded`]；
+//! 3. `code == 0` 时组装 [`Auth`]、写进运行同目录的 `auth.json`、`set_account`，然后发 [`LoginSucceeded`]；
 //! 4. 二维码过期则自增 generation 并重新走一遍，旧循环发现自己过期后自行退出。
 //!
 //! ## 两条必须遵守的规矩（都是真机踩出来的）
@@ -18,7 +20,11 @@
 //!   自己等自己 = 主线程死锁）。所以这里统一 `detach()`，改用 `generation` 序号让旧循环
 //!   自己判断"我已经被取代了"然后退出。
 //!
-//! 不开第二个窗口：登录成功后由根视图在同一窗口内换成主界面（`docs/architecture.md` 第 4.6 节）。
+//! ## 这一页为什么不再管"换成主界面"
+//!
+//! 以前它是主窗口里的一个视图，登录成功后由根视图原地换页（旧结论留在第 4.6 节）。
+//! 现在它只发 [`LoginSucceeded`]，**换窗口由外层做**：这条路上有两条硬约束
+//! （先开主窗再关登录窗、不能在别的窗口的 update 里开窗），都不适合塞进这一页。
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -27,17 +33,17 @@ use std::time::Duration;
 use gpui_kit::component::button::Button;
 use gpui_kit::*;
 
-use crate::api::login::{self, QrPollState, QrSession, credential_from_cookies};
-use crate::store::credentials::SavedCredential;
+use crate::api::login::{self, QrPollState, QrSession, auth_from_cookies};
+use crate::store::auth::Auth;
 use crate::ui::palette;
 use crate::ui::qr;
 
 /// 轮询间隔。B 站的 poll 接口对频率不敏感，1.5 秒既跟手又不刷接口。
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 
-/// 登录成功事件。根视图订阅它，把界面从登录切到主界面。
+/// 登录成功事件。[`LoginGate`](crate::pages::gate::LoginGate) 订阅它，然后换窗口。
 ///
-/// 带上 mid 是为了让根视图不必再回头读凭据文件（写盘可能失败，界面却已经拿到登录态了）。
+/// 带上 mid 是为了让外层不必再回头读凭据文件（写盘可能失败，界面却已经拿到登录态了）。
 #[derive(Clone, Debug)]
 pub struct LoginSucceeded {
     /// 刚登录账号的 mid（`DedeUserID`），个人中心页拿它去要自己的资料与收藏夹。
@@ -213,7 +219,7 @@ impl LoginPage {
                         cookies,
                         refresh_token,
                     } => {
-                        match credential_from_cookies(&cookies, &refresh_token) {
+                        match auth_from_cookies(&cookies, &refresh_token) {
                             Some(credential) => {
                                 if let Some(view) = this.upgrade() {
                                     view.update(cx, |view, cx| {
@@ -255,8 +261,8 @@ impl LoginPage {
         .detach();
     }
 
-    /// 落盘凭据、灌进客户端、通知根视图。
-    fn complete(&mut self, credential: SavedCredential, cx: &mut Context<Self>) {
+    /// 落盘凭据（`auth.json`）、灌进客户端、通知外层（登录窗）。
+    fn complete(&mut self, credential: Auth, cx: &mut Context<Self>) {
         if self.finished {
             return;
         }
@@ -304,19 +310,18 @@ impl Render for LoginPage {
             .justify_center()
             .gap(px(palette::CARD_TEXT_ROW_GAP))
             // 这一页是全项目的第一个画面：底色与字色必须和后面几页同一套，
-            // 否则登录成功后窗口"闪一下换个世界"。
+            // 否则登录成功后主窗口开出来会"闪一下换个世界"。
             .bg(palette::page_background())
             .text_color(palette::text_primary())
+            // 用户要的就是这两样：应用名 + 二维码。窗口只有 320×420，
+            // 所以原来那两行说明（"解锁 1080P"、日志路径）都收掉了——
+            // 日志路径在设置页有，"为什么登录"不用在登录窗里解释。
             .child(
                 div()
                     .text_size(px(palette::FONT_TITLE))
-                    .child("扫码登录 B 站"),
-            )
-            .child(
-                div()
-                    .text_size(px(palette::FONT_BODY))
-                    .text_color(palette::text_secondary())
-                    .child("登录后才能解锁 1080P 与个人内容"),
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(palette::text_primary())
+                    .child("rustBiliPC"),
             )
             .child(code)
             .child(
@@ -329,13 +334,6 @@ impl Render for LoginPage {
                 Button::new("refresh-qr")
                     .label("重新获取二维码")
                     .on_click(cx.listener(|this, _, _window, cx| this.refresh_qr(cx))),
-            )
-            // 出问题时用户能直接找到日志。
-            .child(
-                div()
-                    .text_size(px(palette::FONT_CAPTION))
-                    .text_color(palette::text_tertiary())
-                    .child(format!("日志：{}", crate::logging::log_path().display())),
             )
     }
 }

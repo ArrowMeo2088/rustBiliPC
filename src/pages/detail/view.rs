@@ -50,7 +50,7 @@ use crate::api::comments::{self, CommentItem, CommentSortKind};
 use crate::api::detail::{self, PageInfo, SubtitleBrief, VideoDetailInfo};
 use crate::api::stream::{self, StreamChoice};
 use crate::pages::{OpenUser, OpenVideo};
-use crate::store::credentials::SavedCredential;
+use crate::store::auth::Auth;
 use crate::ui::{cover, layout, palette};
 use crate::ui::video_card::{self, VideoCardData};
 
@@ -294,7 +294,7 @@ impl DetailPage {
             cx.notify();
             return;
         };
-        self.request_plan(page.cid, stream::DEFAULT_REQUEST_QN, cx);
+        self.request_plan(page.cid, stream::request_qn(), cx);
     }
 
     /// 换清晰度。
@@ -362,9 +362,9 @@ impl DetailPage {
         }
 
         // 1080P/高码率的 m4s 直链要校验登录 cookie；bpi-rs 不把它的 cookie jar 交出来，
-        // 所以由我们从凭据里拼一条，和 Referer/UA 一起给 mpv（见 player 模块注释）。
-        let extra_headers = match SavedCredential::load() {
-            Some(credential) => vec![format!("Cookie: {}", credential.cookie_header())],
+        // 所以由我们从凭据（运行同目录的 auth.json）里拼一条，和 Referer/UA 一起给 mpv。
+        let extra_headers = match Auth::load() {
+            Some(auth) => vec![format!("Cookie: {}", auth.cookie_header())],
             None => Vec::new(),
         };
 

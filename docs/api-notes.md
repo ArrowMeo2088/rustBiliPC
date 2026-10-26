@@ -47,7 +47,7 @@
 - cookie 白名单见 `src/client.rs:79`；我们要求 `DedeUserID/SESSDATA/bili_jct/buvid3` 四个全中，
   缺任何一个 `credential_from_cookies` 返回 `None`（否则会撞上 `Account::validate_complete`）。
 - `Account` 只 derive `Deserialize`（`src/session/account.rs:11`），所以落盘走
-  `SavedCredential` 镜像结构，见 `src/store/credentials.rs`。
+  `Auth` 镜像结构，见 `src/store/auth.rs`（2026-10-26 从 `credentials.rs`/`SavedCredential` 改名）。
 
 ## 3. 搜索
 
@@ -164,7 +164,7 @@ pub async fn play_url(&self, params: VideoPlayUrlParams) -> BpiResult<PlayUrlRes
 bpi-rs 自己请求时会加 `User-Agent` + `Referer: https://www.bilibili.com/` + `Origin`
 （`src/client.rs:68-72,394-413`），但**没有对外导出的 header 构造函数**，
 所以给 mpv 的头要在 `src/player/mod.rs` 里单独维护，改动时要两边对齐。
-1080P 及以上还要**登录 cookie**：`SavedCredential::cookie_header()` 从我们自己的凭据现拼一条
+1080P 及以上还要**登录 cookie**：`Auth::cookie_header()` 从我们自己的凭据现拼一条
 `Cookie: DedeUserID=…; SESSDATA=…; bili_jct=…; buvid3=…` 塞进 `--http-header-fields`
 （bpi-rs 的 cookie jar 是私有字段，拿不到）。
 
@@ -197,7 +197,7 @@ bpi-rs 自己请求时会加 `User-Agent` + `Referer: https://www.bilibili.com/`
 
 | 空白 | 证据 | 我们的处置 |
 | --- | --- | --- |
-| `Account` 无 `Serialize`，库不落盘 | `src/session/account.rs:11` | `SavedCredential` 镜像 + `<exe>/data/cookies.json` |
+| `Account` 无 `Serialize`，库不落盘 | `src/session/account.rs:11` | `Auth` 镜像 + `<exe>/auth.json`（旧 `data/cookies.json` 只作一次性迁移来源） |
 | 视频响应无码流选择助手 | `src/video/videostream_url.rs` 无 impl 方法 | `api/stream_select.rs` 自实现 |
 | `models::stream::best_video()` 优先分辨率、会选 4K | `src/models/stream.rs:150-172` | 不使用；且加封顶 |
 | `cookie_refresh.rs` 空文件 | `src/login/cookie_refresh.rs` | 自己实现失效检测与重新登录提示 |
@@ -390,3 +390,26 @@ bpi-rs 自己请求时会加 `User-Agent` + `Referer: https://www.bilibili.com/`
   所以三块各用一个序号（`video_seq/post_seq/folder_seq`），不能共用：共用会出现"图文在途时点了投稿的下一页，两边互相把对方判成过期"。
 - `tlist` 的解析**不许让整页失败**：`api::space::parse_tlist` 只认"`{tid: {name,count}}`"，认不出来就少一个 chip，
   这条有单测（含畸形输入与"键当 tid"的回退）。
+
+## 13. 待看（P8，已核对到行号）
+
+| 项 | 结论 | 出处 |
+| --- | --- | --- |
+| 入口 | `client.historytoview()` → `HistoryToViewClient` | `ref/bpi-rs/src/client.rs:520` |
+| 取列表 | `toview_list()` → `ToViewListData{count: u32, list: Vec<ToViewVideoItem>}`，**不收参数** | `src/historytoview/client.rs:54`、`toview.rs:139-144` |
+| 端点 | GET `https://api.bilibili.com/x/v2/history/toview` | `src/historytoview/client.rs:8` |
+| 分页 | **没有**：库里这条的 query 是零对（有断言），所以界面上不做翻页控件 | `src/historytoview/toview.rs:212` |
+| 登录 | 要。走 `client.get(..)` → `apply_default_headers` 注入 `COOKIE`，未登录是 `-101`；由 `BpiError::requires_login` 识别 | `src/client.rs:367`、`:404-412`、`src/err/error.rs:310-311` |
+| WBI | **不签**（这条路没碰 `wbi_key_cache`） | `src/client.rs:415` 附近 |
+| feature | `historytoview = []` 是空 cfg 开关，不引入依赖；**我们的 Cargo.toml 早就开着**（观看历史用的就是同一个 feature）⇒ 这一轮 `Cargo.lock` 一字不动 | `ref/bpi-rs/Cargo.toml:60` |
+| 条目里我们用的字段 | `bvid: String`、`title`、`pic`、`owner.name`、`duration: u32`（秒）、`tname`（子分区）、`progress: i32`（看到哪儿，秒）、`add_at: u64` | `src/historytoview/toview.rs:85-135` |
+| 严格结构 | `ToViewVideoItem` 与嵌套的 `ToViewRights`/`ToViewOwner`/`ToViewStat`/`ToViewDimension` **全无 `#[serde(default)]`**：少给任一必填字段就是整次 `BpiError::Decode`（这一路是"全有或全无"） | `toview.rs:16-135`、`request.rs:165` |
+| 写操作 | 库里另有 `add_toview`/`delete_toview`/`clear_toview`（要 CSRF），**客户端不做**：写操作不在清单里 | `toview.rs:148/162/176` |
+
+- 历史与待看的"看到哪儿"文案是同一份口径：`api::progress_text(i32)`——`0`（没看过）与 `-1`（B 站偶尔给的未知）
+  都返回空串，不许显示成"看到 00:00"。两处以前各写一遍，P8 起合成一个函数并进单测。
+- 观看历史那一路的 `ps` 由库里 `HistoryListParams::with_page_size` 控制，它**只拒绝 0**；
+  入口页独立成页后取 30（与 B 站网页端一屏的数量一致）。真正的连续翻页要游标
+  （`HistoryCursor{max, view_at, business, ps}`，`src/historytoview/history.rs:14-23`），这一版不做。
+- 库里**没有**"待看条数 picker/未读红点"这类接口（搜过 `picker*`、`later*`、`watch_later`，零命中）；
+  能拿到的总数只有 `ToViewListData.count`。

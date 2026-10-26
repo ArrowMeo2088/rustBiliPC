@@ -1,4 +1,4 @@
-//! 进程级基础设施：tokio runtime 桥接、exe 同目录约定。
+//! 进程级基础设施：tokio runtime 桥接、exe 同目录约定、进程级设置快照。
 //!
 //! ## 为什么需要这一层
 //!
@@ -27,6 +27,24 @@ pub fn runtime() -> &'static tokio::runtime::Runtime {
             .build()
             .expect("初始化 tokio runtime 失败")
     })
+}
+
+/// 进程级设置快照。启动时 [`init_config`] 一次（来源是运行目录的 `config.json`），
+/// 之后各处只读 [`config`]。
+///
+/// 为什么做成进程级而不是把 `Arc<Config>` 一路传进每个页面：真正读它的只有起播那一条路
+/// （请求 `qn` 与选流上限），传下去要动六个页面的构造函数；但**纯函数仍然收显式参数**
+/// （见 [`crate::api::stream_select`]），这样单测不用碰全局状态。
+static CONFIG: OnceLock<crate::store::config::Config> = OnceLock::new();
+
+/// 装好进程级设置（重复调用无效果，第一次的值算数）。
+pub fn init_config(config: crate::store::config::Config) {
+    let _ = CONFIG.set(config);
+}
+
+/// 取当前设置。没装过时返回默认值——单测与"设置读不到"两种情况都走这条路。
+pub fn config() -> crate::store::config::Config {
+    CONFIG.get().copied().unwrap_or_default()
 }
 
 /// 显式安装 rustls 的进程级默认 crypto provider。

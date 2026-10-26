@@ -35,6 +35,12 @@
   （越界会在本地就失败，症状比网络失败更难查）。
 - `search_format_tests`：标题高亮标签清洗、播放量的中文读法（万/亿与尾零截断、边界值）、
   排序项的中文标签。
+- `auth_tests` / `config_tests`（2026-10-26 改名与新增）：凭据 JSON 往返、缺省字段容错、
+  **坏文本按未登录处理**（`Auth::from_json`，读新文件与迁移旧文件都走它）、
+  `clamp_quality` 把越界的 `max_quality` 收回 16…116、`config.json` 缺字段用默认上限、
+  `quality_name` 认不出档位时只报 `qn=数字` 不编中文名。
+- `profile_tests`（原 `mine_tests`）：秒数格式化在一小时处的边界、会员文案只认"已开通"、
+  **`progress_text` 把 `0`（没看过）与 `-1`（B 站偶尔给的未知）都收成空串**——历史与待看共用这一份口径。
 - `login_tests`：B 站登录码值到状态的翻译（0/86101/86038/未知码带文案）、cookie→凭据的
   完整性要求（少 `buvid3` 必须判 `None`）、**只有"成功且缺 buvid3"才需要补取**
   （`needs_buvid3_backfill`，等待/过期时不该多发请求）、凭据 JSON 往返相等。

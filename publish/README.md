@@ -15,7 +15,8 @@
 | --- | --- |
 | `rustbilipc.exe` | 主程序 |
 | `mpv.exe` | **要自己放的官方原版 mpv**（约 75 MB，不入库、不由 CI 产出）——起播只认这个位置 |
-| `data/cookies.json` | 首次扫码登录后由程序写入（运行同目录），不是编译产物 |
+| `auth.json` | 首次扫码登录后由程序写入 **exe 同目录**（2026-10-26 起取代 `data/cookies.json`），不是编译产物；取产物时**只搬 exe**，这个文件绝不能被清理动作带走 |
+| `config.json` | 第一次启动由程序写出一份默认设置（目前只有 `max_quality`），同样**不是编译产物**，不要删 |
 
 运行时不需要额外 DLL：gpui 的 Windows 后端用系统 DLL（D3D11 / DirectComposition / DirectWrite），
 mpv 是**外部独立进程**，不被链接进来。

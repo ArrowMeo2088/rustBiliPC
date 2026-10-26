@@ -62,7 +62,10 @@
 - **播放期归 mpv，客户端只做播放之外**（用户定稿，2026-10-23；范围纠正的直接后果）：
   进度条、播放时间、暂停、音量、全屏、字幕显示都由 mpv 自带的 OSC 负责，
   **不要**在 `pages/` 里加播放控制按钮或进度行。rustBiliPC 的清单是：主页（首页推荐）、搜索、
-  个人中心、视频详情、评论区、分集/分P 的呈现、清晰度档位、用户空间（投稿/图文/收藏）、拉起 mpv。
+  收藏、历史、待看、下载（这一版只有入口）、设置（这一版只是关于页）、视频详情、评论区、
+  分集/分P 的呈现、清晰度档位、用户空间（投稿/图文/收藏）、拉起 mpv。
+  **2026-10-26 用户把"个人中心"拆平了**：不要"我的"这一格，收藏/历史/待看/下载/设置直接做侧栏入口
+  （原来的 `pages/mine/` 因此删除，别再"顺手"把它加回来）。
   第二十二~二十三轮我按"遥控"做过一版（`player/ipc.rs` + `player/state.rs` + 详情页控制条），
   方向错了、已整体删除，**连 `--input-ipc-server` 也不传了**；核实过的机制与坑记在
   `docs/architecture.md` 第 4.14 节**只作档案**。**别把那版代码"捡回来"**。
@@ -74,8 +77,22 @@
   复用件只从 `src/ui/layout.rs` 取，页面里不许出现 `rgba(0x…)` / `px(56.)` 这类字面量；
   每个数字的 XAML 出处逐条记在 `docs/architecture.md` 第 4.15 节。
   Acrylic/Mica、`ItemsView`、icon font 这些 gpui 没有等价物的东西**不要硬模仿**。
-- 凭据：明文 JSON 存 `<exe 同目录>/data/cookies.json`（用户知情选择）。要改加密只动
-  `src/store/credentials.rs` 的 `save`/`load`。
+- **主界面外壳与窗口的形状是用户定的，不要自己改回去**（2026-10-26）：
+  侧栏宽 **80**（`palette::SIDE_COLUMN_WIDTH`，用户要求 240 的 1/3）、导航项是
+  "Lucide 图标 + 两字"竖排、左上角是**登录账号头像且只做显示不可点**（原来那格是
+  "rustBiliPC" 文字）、**左下角的 mpv 自检行已删**（信息挪进设置页）、返回那一格文案是
+  "返回"。**登录是独立小窗口**（320×420、不可缩放），不再是主窗口里换视图——
+  换窗口有两条硬约束（先开主窗再关登录窗；不能在别的窗口的 update 里开窗），
+  写在 `docs/architecture.md` 第 4.19 节与 `src/pages/windows.rs` 文件头，改之前先读那两处。
+  图标名写错**不会报错也不会 panic**，只会画出一片空白，所以加图标前先确认
+  `ref/gpui-kit/crates/assets/assets/icons/<名字>.svg` 存在。
+- **落盘位置（2026-10-26 用户定稿，取代旧的 `data/cookies.json`）**：凭据 =
+  `<exe 同目录>/auth.json`（`src/store/auth.rs`），设置 = `<exe 同目录>/config.json`
+  （`src/store/config.rs`）。**别再往 `data/` 里写任何东西**；旧文件只允许在 `auth.json`
+  读不到时作一次性迁移来源（迁移后保留、不删）。都是明文 JSON（用户知情选择），
+  要改加密只动 `save`/`load`。
+- **`config.json` 里只允许放"真的有代码在读"的项**。目前只有 `max_quality`（起播的封顶档，
+  被 `api::stream::request_qn` 读走）；设置页这一版是**只读关于页**，不做显示了但不生效的假开关。
 - **每个 `cx.spawn` 返回的 `gpui::Task` 必须持有或 `.detach()`**：Task 被 drop 即取消任务
   （`gpui-pre-scheduler/src/executor.rs:396-402`），裸写 `cx.spawn(...);` 会让"等结果并写回界面"
   那一段永远不执行，症状是请求在 tokio 侧正常返回、界面却卡在加载态、日志里连闭包第一行都没有。
@@ -126,15 +143,16 @@
   不必为几行说明再烧一轮）。第十四轮编的是 `5c7c8ae`，我随后才提交
   "懒加载"，那轮的 exe 就不能当作最终交付物，得再编一轮（2026-10-23）。
 - 取产物一律解到临时目录，再**只**覆盖 `publish/rustbilipc.exe`：`gh run download -D publish`
-  遇到同名文件会整体失败（第十轮就是这么静默没换掉的），而 `publish/debug.log` 与
-  `publish/data/cookies.json` 是用户的现场与凭据，绝不能被清理动作带走。
+  遇到同名文件会整体失败（第十轮就是这么静默没换掉的），而 `publish/debug.log`、
+  `publish/auth.json`（以及历史遗留的 `publish/data/cookies.json`）是用户的现场与凭据，
+  **绝不能被清理动作带走**。
 
 ## 6. 输出与文档
 
 - 中文必须可读：UTF-8，禁止 `\uXXXX` 转义与 GBK 乱码；`.bat` 文件内容保持 ASCII（cmd 按 OEM 代码页解析）。
 - 从 `ref/` 得出的结论要抄进 `docs/`，因为 `ref/` 不入库。
 - **调试靠 `debug.log`，不靠猜测**：GUI 程序没有控制台，日志由 `src/logging.rs` 写到
-  **exe 同目录**的 `debug.log`（与 `data/cookies.json` 同一层，每次启动清空、Debug 级）。
+  **exe 同目录**的 `debug.log`（与 `auth.json`、`config.json` 同一层，每次启动清空、Debug 级）。
   从 GitHub 取产物时**只搬 exe**（解到临时目录再 copy），不要清空 `publish/`——日志就在那里。
   新增任何异步链路时，必须在"提交任务 / 任务内请求前后 / 回到 gpui / 写入状态"四类位置各留日志，
   否则真机问题无法定位。排查用户问题时先要这个文件。

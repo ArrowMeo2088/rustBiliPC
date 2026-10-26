@@ -15,14 +15,14 @@
 //! 但 `qr_poll` 成功响应的 Set-Cookie 里一般只有 `DedeUserID / SESSDATA / bili_jct`
 //! （bpi-rs 只是把 `response.cookies()` 原样塞进 `data.cookies`，见 `src/login/client.rs:211-223`），
 //! `buvid3` 是设备标识、要靠 `misc().buvid()` 单取。所以 [`poll_qr`] 在 code==0 且缺 buvid3 时
-//! 自己去补一个，[`credential_from_cookies`] 仍要求四个字段全部命中。
+//! 自己去补一个，[`auth_from_cookies`] 仍要求四个字段全部命中。
 
 use std::sync::Arc;
 
 use bpi_rs::{BpiClient, BpiResult};
 
 use super::spawn_on_api_runtime;
-use crate::store::credentials::SavedCredential;
+use crate::store::auth::Auth;
 
 /// 一次扫码会话的初始信息。
 #[derive(Clone, Debug)]
@@ -69,7 +69,7 @@ impl QrPollState {
 }
 
 /// 从响应 cookie 里凑出凭据。四个必需字段缺任何一个都返回 `None`。
-pub fn credential_from_cookies(cookies: &[(String, String)], refresh_token: &str) -> Option<SavedCredential> {
+pub fn auth_from_cookies(cookies: &[(String, String)], refresh_token: &str) -> Option<Auth> {
     let pick = |name: &str| {
         cookies
             .iter()
@@ -77,16 +77,16 @@ pub fn credential_from_cookies(cookies: &[(String, String)], refresh_token: &str
             .map(|(_, value)| value.clone())
     };
 
-    let credential = SavedCredential {
+    let auth = Auth {
         dede_user_id: pick("DedeUserID")?,
         sessdata: pick("SESSDATA")?,
         bili_jct: pick("bili_jct")?,
         buvid3: pick("buvid3")?,
         refresh_token: refresh_token.to_string(),
-        saved_at_unix: SavedCredential::now_unix(),
+        saved_at_unix: Auth::now_unix(),
     };
 
-    credential.is_complete().then_some(credential)
+    auth.is_complete().then_some(auth)
 }
 
 /// 申请一张新的登录二维码。

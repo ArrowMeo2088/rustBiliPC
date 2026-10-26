@@ -25,7 +25,7 @@ use std::sync::Arc;
 
 use bpi_rs::{BpiClient, BpiResult, historytoview::{HistoryListParams, HistoryListType}};
 
-use super::format_seconds;
+use super::{format_seconds, progress_text};
 use super::spawn_on_api_runtime;
 
 /// 一条历史记录。字段已处理好可直接展示。
@@ -69,11 +69,7 @@ pub fn fetch_history(
             .list
             .into_iter()
             .map(|item| {
-                let progress = if item.progress > 0 {
-                    format!("看到 {}", format_seconds(item.progress.max(0) as u32))
-                } else {
-                    String::new()
-                };
+                let progress = progress_text(item.progress);
                 HistoryItem {
                     bvid: item.history.bvid.unwrap_or_default(),
                     title: item.title,

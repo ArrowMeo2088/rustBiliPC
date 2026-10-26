@@ -2,17 +2,19 @@
 //!
 //! ## 为什么要有这一层
 //!
-//! 度量与颜色只在 [`palette`](super::palette) 里出现，排版骨架又要在四个页面里一模一样，
-//! 所以做成组件；否则"页头 56 + 1px 线 + 侧栏 240"这套东西会被抄四遍，
-//! 下次改度量就得同步四处，一定会有人漏掉其中一处。
+//! 度量与颜色只在 [`palette`](super::palette) 里出现，排版骨架又要在这些页面里一模一样，
+//! 所以做成组件；否则"页头 56 + 1px 线 + 侧栏 80"这套东西会被抄七遍，
+//! 下次改度量就得同步七处，一定会有人漏掉其中一处。
 //!
 //! ## 结构对齐的是 `ref/Bili.Copilot`
 //!
 //! - 页头 + 分隔线：`PopularPage.xaml:17-35` 的行是"头 **56** + 1px `DividerStrokeColor` + 体"，
 //!   页头内左右内边距 16（`PopularMainHeader.xaml:27`）。
-//! - 侧栏：同一批页面用 `240` 宽的列 + `ColumnSplitter`；列表项高 **40**、
+//! - 侧栏：参考项目那一栏是 `240` 宽的列 + `ColumnSplitter`，列表项高 **40**、
 //!   左右外边距 8、内容内边距 `12,0`、行距 8、底色是卡片底
-//!   （`PopularSideBody.xaml:31-52`）。选中态是 WinUI `ItemContainer` 的
+//!   （`PopularSideBody.xaml:31-52`）。我们这一版按用户要求收到 80，只保留"底色 +
+//!   行距 + 2px 选中边框"这三条口径，排法改成图标在上、文字在下（见 [`side_item`]）。
+//!   选中态是 WinUI `ItemContainer` 的
 //!   `PART_SelectionVisual`：一条 **2px** 的边框 + 换选中底色，
 //!   而且这条边框**平时就在，只是透明**（`Overrides.xaml:190-197` 与 `:233-247`），
 //!   所以点选不会让内容位移。我们照做：`border_2` + 透明/主色。
@@ -21,6 +23,8 @@
 //! - 字重：WinUI 那边"要强一档的字"用的是 `*Strong` 样式（`AccountCard.xaml:44` 的
 //!   `BodyStrongTextBlockStyle`），对应到 gpui 就是 `font_weight(FontWeight::SEMIBOLD)`（600）；
 //!   正文不加粗。层级仍然是"字号 + 三档灰 + 这一档字重"，不靠别的。
+use gpui_kit::assets::IconName;
+use gpui_kit::component::Icon;
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
@@ -112,22 +116,43 @@ pub fn section_title(text: impl Into<SharedString>) -> AnyElement {
         .into_any_element()
 }
 
-/// 侧栏的一项（40 高、圆角 4、常态卡片底；选中换更亮的底 + 2px 强调色边框；hover 加深）。
+/// 侧栏的一项：**竖排**的"图标在上、两字在下"，高 48（复用 `TITLE_BAR_HEIGHT`）、
+/// 圆角 4、常态卡片底；选中换更亮的底 + 让那条常驻 2px 边框变主色；hover 加深底色。
+///
+/// 为什么换形状：2026-10-26 用户把侧栏收到 80 宽（"左边的菜单的长度也收小到原来的1/3"），
+/// 240 那一版的"一行文字"排不下七个入口了。图标 + 两字是这个宽度里唯一还能读的排法；
+/// 参考项目的紧凑态也是这个形状，只是它交给系统控件（WinUI `NavigationView`）画，我们没有等价物。
+///
+/// 图标来自 kit 的 Lucide 集，用的是**完整目录** `gpui_kit::assets::IconName`（1830 个变体，
+/// 变体名是文件名的 PascalCase）。两个坑记在这里：
+/// - kit 默认那份 `Assets` 只嵌了 106 个图标，`House`/`Clock`/`Bookmark`/`Download` 都不在，
+///   所以 `main.rs` 挂的是 `assets::AllAssets`；
+/// - 名字写错**不会编译失败也不会 panic**：找不到资源时 svg 那边 `log_err()` 后直接不画
+///   （`component/src/svg.rs:166-171`），界面上就是一片空白——加新入口时先确认 `icons/*.svg` 在不在。
 ///
 /// 回调是 gpui 原样的 `Fn(&ClickEvent, &mut Window, &mut App)`，由调用方用 `cx.listener` 造，
 /// 组件层不认识任何页面类型。
 pub fn side_item(
     id: impl Into<ElementId>,
+    icon: IconName,
     label: &'static str,
     selected: bool,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> AnyElement {
+    // 图标与文字必须同一档灰：只把文字调灰、图标跟着全局色走，选中态就会一边亮一边不亮。
+    let color = if selected {
+        palette::text_primary()
+    } else {
+        palette::text_secondary()
+    };
     let base = div()
         .flex()
+        .flex_col()
         .w_full()
-        .h(px(palette::LIST_ROW_MIN_HEIGHT))
+        .h(px(palette::TITLE_BAR_HEIGHT))
         .items_center()
-        .px(px(palette::LIST_ROW_PADDING_X))
+        .justify_center()
+        .gap(px(palette::CARD_LINE_GAP))
         .rounded(px(palette::RADIUS))
         .cursor_pointer()
         // 参考项目每一项都带卡片底色（`PopularSideBody.xaml:41` 的
@@ -140,14 +165,17 @@ pub fn side_item(
         } else {
             palette::border_none()
         })
-        .text_size(px(palette::FONT_BODY))
+        .text_size(px(palette::FONT_CAPTION))
         // 选中的那一项用主文本色，未选中是次要灰：层级靠"底色 + 边框 + 字色"，不靠花哨颜色。
-        .text_color(if selected {
-            palette::text_primary()
-        } else {
-            palette::text_secondary()
+        .text_color(color)
+        .when(selected, |this| {
+            this.bg(palette::card_background_elevated())
         })
-        .when(selected, |this| this.bg(palette::card_background_elevated()))
+        .child(
+            Icon::new(icon)
+                .size(px(palette::SIDEBAR_ICON_SIZE))
+                .text_color(color),
+        )
         .child(label);
     base.id(id)
         .on_click(on_click)

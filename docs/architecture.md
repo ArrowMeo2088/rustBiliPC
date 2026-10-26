@@ -85,20 +85,28 @@ src/
 │   ├── home.rs        主页：video().homepage_recommendations()（WBI 由库里签）+ **按 goto 过滤**
 │   ├── space.rs       用户空间：card()（不签 WBI）+ uploaded_videos()（签 WBI、带分区筛选）+ opus 图文（游标）
 │   ├── search.rs      搜索封装：DTO（SearchHit/PageInfo/SearchSort）+ 标签清洗 + 播放量格式化
-│   ├── stream.rs      播控：video().play_url() 取地址 + 选流成 StreamChoice（DASH 双流 / durl 单文件）
-│   └── stream_select.rs  DASH 选择纯函数（HEVC 优先、画质档封顶 116）
+│   ├── toview.rs      待看：historytoview().toview_list()（零参数、没有分页、要登录、不签 WBI）
+│   ├── stream.rs      播控：video().play_url() 取地址 + 选流成 StreamChoice（DASH 双流 / durl 单文件）；请求 qn 与封顶档都取自 `app::config()`
+│   └── stream_select.rs  DASH 选择纯函数（HEVC 优先；封顶值由调用方给，默认与硬上限 116）
 ├── store/
-│   └── credentials.rs 明文 JSON 凭据落盘（<exe>/data/cookies.json）+ cookie_header() 给 mpv
+│   ├── auth.rs        明文 JSON 凭据落盘（<exe>/auth.json）+ cookie_header() 给 mpv；旧 data/cookies.json 只作一次性迁移来源
+│   └── config.rs      明文 JSON 设置落盘（<exe>/config.json，只有 max_quality 一个字段，越界由 clamp_quality 收回）
 ├── player/
 │   └── mod.rs         mpv 参数构造（一律 `--opt=value`）+ launch() 拉起进程 + Referer/UA 常量 + 运行目录定位
                       **不做播放期 UI，也不接它的命名管道/文本输出**（范围定稿见第 4.3 节）
 ├── pages/
-│   ├── mod.rs         页面层出口 + 共用导航事件 `OpenVideo`（三个页面发同一个信号）
-│   ├── root.rs        窗口根视图：无凭据→登录页，有凭据→主界面外壳；登录成功后原地切换
-│   ├── shell/         外壳：左侧 240 导航栏（主页/搜索/我的）+ **下钻栈**（详情页或空间页），订阅 OpenVideo 与 OpenUser
-│   ├── home/          主页（P6 第一步，默认页）：首页推荐流网格 + "换一批"，懒加载与序号让位同个人中心
-│   ├── login/         扫码登录页（二维码 + 1.5s 轮询 + 过期自动重载）
-│   ├── mine/          个人中心页（资料 + 收藏夹 + 历史，三路并发各自显示错误；懒加载）
+│   ├── mod.rs         页面层出口 + 两个共用导航事件 `OpenVideo` / `OpenUser`
+│   ├── windows.rs     窗口这一层：主窗 1120×760 与登录窗 320×420；**先开主窗再关登录窗**（Windows 默认 QuitMode 会在最后一个窗口关闭时退进程）
+│   ├── gate.rs        登录窗根视图：摆登录页 + 收到 LoginSucceeded 后在**任务里**换窗口（root.rs 已删除，不再原地换视图）
+│   ├── loading.rs     各入口页共用的"投请求 → 序号判定 → 写回实体"样板（Task 必 detach）
+│   ├── shell/         外壳：**80 宽窄侧栏**（左上是账号头像、只显示不可点；Lucide 图标 + 两字的七入口 主页/搜索/收藏/历史/待看/下载/设置；栈非空时第一项是"返回"）+ **下钻栈**（详情页或空间页）
+│   ├── home/          主页（P6 第一步，默认页）：首页推荐流网格 + "换一批"
+│   ├── login/         扫码登录页（二维码 + 1.5s 轮询 + 过期自动重载），住在自己的小窗里
+│   ├── favorites/     收藏页：收藏夹列表（明确**不下钻**）
+│   ├── history/       历史页：最近观看卡片网格，取一页（连续翻页要游标，这一版不做）
+│   ├── toview/        待看页：稍后再看列表（接口一次给全，所以没有分页控件）
+│   ├── download/      下载页：**占位**，写清开工前要先定的三件事
+│   ├── about/         设置页（这一版是关于）：版本 / 账户 / auth.json 与 config.json 路径 / 画质上限 / mpv / 日志
 │   ├── detail/        详情页（主列信息 + 播放块 + 字幕 + 评论区；右栏 360 选集与相关推荐；持 mpv 子进程并在 Drop 时收掉）
 │   ├── space/         用户空间页（P7：资料卡 + 投稿/图文/收藏三块，投稿带分区筛选 chips）
 │   └── search/        阶段一页面（view.rs 为根视图）
@@ -193,8 +201,9 @@ cx.spawn(async move |this, cx| {
 
 ### 4.4 凭据
 
-`<exe 同目录>/data/cookies.json`，明文（定稿选择，风险已在 `store/credentials.rs` 顶部写明）。
-`bpi_rs::session::Account` 只 derive `Deserialize`，所以用 `SavedCredential` 做可序列化镜像，
+`<exe 同目录>/auth.json`，明文（定稿选择，风险已在 `store/auth.rs` 顶部写明；
+2026-10-26 从 `data/cookies.json` 搬过来，旧文件只作一次性迁移来源、不删）。
+`bpi_rs::session::Account` 只 derive `Deserialize`，所以用 `Auth` 做可序列化镜像，
 读回时构造 `Account` 交给 `BpiClient::set_account`。四字段（DedeUserID/SESSDATA/bili_jct/buvid3）
 必须齐全，缺 `buvid3` 会被判定不完整。
 
@@ -236,18 +245,21 @@ gpui 0.3.9 的 `ImageAssetLoader`（`src/elements/img.rs:619-656`）对 `Resourc
 
 ### 4.6 扫码登录与启动判定（定稿：登录先行，不做免登录搜索）
 
-- **启动判定**在 `pages/root.rs`：`SavedCredential::load()` 且四字段完整 → 直接把凭据
-  `set_account` 进共享的 `BpiClient` 并进主界面；否则进登录页。登录成功后由登录页发
-  `LoginSucceeded` 事件（带 mid），根视图**在同一窗口内**换成主界面外壳。
-  之所以不开第二个窗口：`AsyncWindowContext::open_window` 可用，但"关掉登录窗口"要先拿到窗口
-  句柄再走 `Window::remove_window`，其中取句柄这一步在参考仓库里没有可照抄的先例，风险不值得。
+- **启动判定**：`Auth::load()` 且四字段完整 → 把凭据 `set_account` 进共享的 `BpiClient`
+  并**只开主窗口**；否则**只开一个小的扫码登录窗**。判定的位置从 `pages/root.rs` 移到了
+  `src/main.rs` + [`pages/windows.rs`](../src/pages/windows.rs)。
+  **这一条在 2026-10-26 被用户推翻并重来**：当初不开第二个窗口的理由是"取窗口句柄没有可抄的先例"，
+  现在核实到位了（`Window::window_handle()` 在 `gpui/src/window.rs:2371`，
+  关窗口是 `Window::remove_window()` `:2384`，kit 的 `open_window` 返回
+  `(AnyWindowHandle, Entity<V>)` `crates/kit/src/lib.rs:181-193`），
+  于是按他的要求做成独立登录窗。**新方式的两条硬约束记在第 4.19 节**，`root.rs` 已删除，别改回去。
 - **二维码不用图片管线**：`qrcode-generator`（只开 `std`+`qr` feature）出 `Vec<Vec<bool>>`，
   一格一个 div 铺出来。走 `RenderImage` 要构造 Zed 自己那个 `image` 分支的 `Frame`
   （`gpui/src/svg_renderer.rs:5`），而且会把 pixels 版 `image` 拖进同一棵依赖树。
 - **轮询节奏与状态机**在 `pages/login/view.rs`：每 1.5 秒一次；`86101` 继续等、`86038` 过期自动
   重新取码并**退出旧循环**（避免两条轮询并存）、`code==0` 组装凭据；网络错误只记日志、下一轮重试。
 - 码值翻译与 cookie→凭据是纯函数（`api/login.rs` 的 `QrPollState::from_code` /
-  `credential_from_cookies`），单测覆盖——真机登录时才碰得到的分支，先在 CI 里锁住。
+  `auth_from_cookies`），单测覆盖——真机登录时才碰得到的分支，先在 CI 里锁住。
 
 ### 4.7 异步任务的失败必须可见（真机教训）
 
@@ -278,7 +290,7 @@ bpi-rs 的 builder 默认 `no_proxy = true`、`timeout = 10s`、`connect_timeout
 
 GUI 程序双击启动时没有控制台，`stderr` 一律看不见，所以 `src/logging.rs` 自实现 `log::Log`：
 
-- 路径 **exe 同目录**的 `debug.log`（与 `data/cookies.json` 同一层，用户不用找系统目录），
+- 路径 **exe 同目录**的 `debug.log`（与 `auth.json`、`config.json` 同一层，用户不用找系统目录），
   **每次启动 `File::create` 清空重写**，级别 `Debug`。因为它落在构建输出目录 `publish/` 里，
   取产物时**只搬 exe、绝不整目录清空**（`gh run download -D publish` 会因同名文件失败，
   正确做法是解到临时目录再 copy——上一轮我们因此差点连现场一起删掉）。
@@ -420,7 +432,7 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
   此时 `audio_url = None`，`build_arguments` **不能**再加 `--audio-file=`——
   空值会让 mpv 直接报错退出。这条由单测 `single_file_playback_adds_no_audio_argument` 守住。
 - **直链必须和头成对出现**：Referer + UA + **登录 Cookie**。bpi-rs 不会把它自己那份 cookie jar
-  交出来（`jar` 是私有字段），所以由 `SavedCredential::cookie_header()` 现拼一条
+  交出来（`jar` 是私有字段），所以由 `Auth::cookie_header()` 现拼一条
   `Cookie: DedeUserID=…; SESSDATA=…; bili_jct=…; buvid3=…` 塞进 `--http-header-fields`；
   缺它就是 403/-101，而症状与"地址过期"长得一样，所以 `player_note` 把档位/编码/轨数都写出来。
 - **`Child` 的 drop 不杀子进程**（`std::process::Child` 文档明确）。"关掉详情页但声音还在放"
@@ -661,6 +673,64 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 - **这一轮没做**：收藏夹**只列不钻**（点进去看内容是 `fav().list_detail`，我们已经在"我的"那页用过，
   差的是"再压一层什么页"这个结构决定）；关注/取关是写操作，不在客户端清单里。
 
+### 4.19 登录改成独立小窗口：两条不能反的顺序（2026-10-26）
+
+用户定稿：「登录单独做一个窗口……启动时若没有 auth.json，先弹窗让用户扫码登录，
+注意这个扫码登录的窗口做小一点，只要能显示 rustBiliPC 的 logo 和登录二维码即可」。
+形状：320×420、`is_resizable: false`、保留系统标题栏（无边框要自己处理拖动与关闭按钮，
+为一个二维码引一套 `TitleBar` 不值得）；页面上只剩**应用名 + 二维码 + 一行状态 + 重新获取按钮**，
+原来那两行说明（解锁 1080P、日志路径）收掉了——日志路径现在写在设置页。
+
+换窗口有两条**顺序性**约束，写反就是「点完登录程序自己没了」：
+
+1. **先开主窗口，再关登录窗口**。gpui 在 Windows 上的默认 `QuitMode` 是最后一个窗口关闭就退进程
+   （`ref/gpui/gpui/src/app.rs:458` 的 `Default` 取 `cfg!(not(target_os = "macos"))`，
+   判定在 `:3180-3188`）。反过来的话中间出现一个零窗口的瞬间，进程当场退出。
+2. **不要在别的窗口的 update 里开关窗口**。`App::open_window` 会强制画一帧才返回（`app.rs:1520`），
+   而 `LoginSucceeded` 的事件回调正跑在登录窗自己的一次更新里。所以
+   [`LoginGate`](../src/pages/gate.rs) 只 `cx.spawn` 一个任务，在任务里
+   `AsyncApp::update(|app| …)` 再开关（kit 文档同一姿势：`crates/kit/src/lib.rs:180`）。
+
+`Subscription` 的归属也是这一节决定的：原本想让 `main.rs` 在应用层订阅登录事件，
+但 run 闭包里的局部 `Subscription` 一析构就取消订阅（`subscription.rs:147-152`），
+所以订阅挂在登录窗的真实视图 `LoginGate` 的字段上——与本项目「订阅跟着实体走」的既有做法一致。
+
+### 4.20 侧栏：80 宽的七个入口 + 头像占住左上角（2026-10-26）
+
+用户四条要求逐条落地：
+
+| 要求 | 落点 |
+| --- | --- |
+| 不要「我的」这一格 | `pages/mine/` 删除，拆成 `favorites/`、`history/`，新增 `toview/`、`download/`、`about/`；`ShellTab` 从 3 个变 7 个 |
+| 栏宽收到 1/3 | `palette::SIDE_COLUMN_WIDTH` 240 → **80**（数是怎么反推的写在 `palette.rs` 那条注释里，**不是抄来的**） |
+| 左上角换成登录账号头像、不做菜单 | 48 那一格（`TITLE_BAR_HEIGHT`）里摆 44 的圆头像（`AVATAR_UP`），**不可点**；头像来自外壳自己那一路 `profile::fetch_profile` |
+| 左下角 mpv 信息删除 | `status_note` 整块删掉；**信息没丢**，挪进设置页（播放内核那一行连路径一起给） |
+
+导航项的形状改成「Lucide 图标在上、两字在下」（`layout::side_item`，高 48 =
+上下各 8 + 图标 16 + 间距 4 + 12 号字，全是既有常量）。图标用**完整目录**
+`gpui_kit::assets::IconName`，因此 `main.rs` 的 `with_assets` 从 kit 默认的 `Assets`
+换成 `AllAssets`：默认那份只嵌 106 个 svg，`House`/`Clock`/`Bookmark`/`Download` 都不在，
+而**名字写错既不编译失败也不 panic，只画出一片空白**（`component/src/svg.rs:166-171`
+`log_err()` 后直接 return）——这是这一节最需要记住的坑。
+
+「← 返回上一层」缩成「返回」：80 宽放不下那句，含义没变（还是弹下钻栈的一层）。
+
+### 4.21 落盘改名：`auth.json` 与 `config.json`（2026-10-26）
+
+- **凭据**：`store/credentials.rs` → `store/auth.rs`，类型 `SavedCredential` → `Auth`，
+  路径 `<exe>/data/cookies.json` → `<exe>/auth.json`。**旧文件不删**：`Auth::load()` 只在
+  `auth.json` 读不到时去读它一次，字段合格才迁移并写新文件；不合格就当没登录。
+  这样他原来登录好的现场不会因为我改路径就掉登录态，而删用户文件这件事是不可逆的，我们不做。
+- **设置**：新增 `store/config.rs`，`<exe>/config.json`，**只有 `max_quality` 一个字段**，
+  默认与硬上限都是 `stream_select::MAX_QUALITY_ID`(116)，下限 16=360P，超出范围的写法由
+  `clamp_quality` 收回并留一条日志（不静默改用户的值）。它**真的被读走**：
+  `stream::request_qn()` 起播时取它，同一个数既当请求 `qn` 又当选流封顶（`pick_video(streams, cap)`
+  因此从常量改成参数）。设置页只把它显示出来，**不做假开关**（用户定稿「先只做关于页」）。
+- **为什么 `max_quality` 做成进程级快照**：`app::init_config` 在 `main.rs` 装一次，
+  各处 `app::config()` 只读。传 `Arc<Config>` 一路要动七个页面的构造函数；
+  而**纯函数仍然收显式参数**（`is_quality_allowed(id, cap)`），单测因此不碰全局状态。
+- 明文落盘的选择没变（风险与理由见 `store/auth.rs` 文件头），只是位置与文件名变了。
+
 ## 5. 阶段进度
 
 
@@ -678,6 +748,7 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | P6b | 评论区（顶层列表 + 翻页 + 最热/最新） | **编译与测试已绿**（第二十九轮 48 passed、零 Rust warning，产物 `edd553e`）；待真机看：评论有没有内容、翻页与排序（第 4.17 节） |
 | P6c | 曾计划做"字幕 `sub-add` + 同实例换清晰度保住进度" | **用户 2026-10-25 判定不做**（"我认为P6c两个都没必要做"）：换清晰度现在就重开一个实例、字幕只列清单。第 4.14 节那套管道机制仍然留档，将来要捡起来照那份做 |
 | P7 | 用户空间：点详情页 UP 主 → 资料卡 + 投稿（带分区筛选）/ 图文 / 收藏（第 4.18 节） | **编译与测试已绿**（第三十二轮 54 passed、零 Rust warning，产物 `40f556d`，md5 `86297ed0…`）；待真机看：第 4.18 节那 6 条 |
+| P8 | 外壳重构（2026-10-26 用户定稿）：登录改独立小窗 + 侧栏 80 宽七入口（收藏/历史/待看/下载/设置）+ 左上角账号头像 + 落盘改 `auth.json`/`config.json` + 待看接口（第 4.19、4.20、4.21 节） | 代码完成，等编译与真机 |
 
 ## 6. 已知风险与待验证
 
@@ -703,6 +774,8 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | 18 | `fresh_idx`/`fetch_row` 的递增口径**没有官方文档**（bpi-rs 只把两者原样发出去） | 真机验证"换一批"是否真换出不同内容；不换就改成只递增 `fresh_idx`、`fetch_row` 恒为 1，再不行就换 `video_ranking().popular_list()` 那条热门接口 |
 | 19 | 评论区类型代码如果写错（**11 是相簿、1 才是视频**），症状是"评论永远是空的"而不报错；另外 `Comment`/`Member` 全是必填字段，少给任一就 `BpiError::parse` | 类型代码钉成常量 + 单测 `video_comment_target_type_is_one`（值来自 bpi-rs 的 `CommentType::Video = 1` 与它的 live 测试，见 api-notes 第 11 节）；解析失败只砸在评论区那一块，原因写在提示位，详情页其余部分照常 |
 | 20 | **空间页三块各自可能被严格结构砸到**：`UserUploadedVideos`/`SpaceItem`（图文）这些模型同样没有全套 `#[serde(default)]`，B 站少给任一字段就 `BpiError::parse`；`list.tlist` 更是 `serde_json::Value`，形状完全由接口决定 | 三块各有独立提示位与独立序号（第 4.18 节），坏哪块只显示哪块，`debug.log` 里有原始错误文本；chips 解析失败只少一格（[`parse_tlist`](../src/api/space.rs) 有畸形输入单测）。真机若"投稿空但日志是 parse 失败"，就照第 4.16 节主页那条同法改成自己读 `Value` |
+| 21 | **待看这一路是全有或全无**：`ToViewVideoItem` 与嵌套的 `ToViewRights/Owner/Stat/Dimension` 一个 `#[serde(default)]` 都没有（`ref/bpi-rs/src/historytoview/toview.rs:16-144`），B 站少给任一字段就整次 `BpiError::Decode`；这条接口还没有分页（零参数），所以失败时不是少几条而是整块没有 | 错误只写进待看那一页的提示位，别处照常（第 4.20 节）；日志里有原始文本。真机若稳定复现，照主页那条同法改成自己读 `Value` |
+| 22 | **换窗口的顺序**：登录成功后如果先关登录窗再开主窗，Windows 的默认 `QuitMode` 会在最后一个窗口关闭时直接退进程（`gpui/src/app.rs:458` + `:3180-3188`），症状是扫完码程序闪退 | 顺序钉死在 `open_main_and_close_login`（先开主窗、开成功才关登录窗），且整段跑在 `Context::spawn` 的任务里而不是事件回调里（`app.rs:1520` 会强制画一帧）；改窗口代码前先读第 4.19 节 |
 
 ## 7. 维护规则
 
