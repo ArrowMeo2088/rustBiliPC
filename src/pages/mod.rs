@@ -55,3 +55,30 @@ pub struct OpenUser {
     /// 昵称（用于首屏占位）。
     pub name: String,
 }
+
+/// 第三个共用导航事件：点开收藏夹 → 压一层"收藏夹内容"页（P9）。
+///
+/// `title` 与 [`OpenUser::name`] 同理：内容页要先一次请求才知道夹子名，
+/// 先拿列表里那个名字占住页头，回来后用接口的 `info.title` 覆盖（改名了也以接口为准）。
+#[derive(Clone, Debug)]
+pub struct OpenFolder {
+    /// 收藏夹 ID（接口那边叫 `media_id`）。
+    pub id: u64,
+    /// 夹子名（用于首屏占位）。
+    pub title: String,
+}
+
+/// 本地关键词过滤：标题或 UP 主名命中即可（2026-10-26 用户定稿的匹配字段）。
+///
+/// 为什么要有这个函数、而且只做小写化：历史与待看**没有服务端搜索参数**
+/// （库里 `HistoryListParams` 只有 `max/business/view_at/type/ps`，
+/// `toview_list()` 干脆零参数），所以这两页只能过滤已经拿到手的条目。
+/// 空关键词一律放行（"还没输入"和"输入了又删干净"是同一种状态，不许出现空列表）。
+/// 大小写只对拉丁字母有意义，中文 `contains` 天然按字面匹配。
+pub fn matches_keyword(title: &str, author: &str, keyword: &str) -> bool {
+    let needle = keyword.trim().to_lowercase();
+    if needle.is_empty() {
+        return true;
+    }
+    title.to_lowercase().contains(&needle) || author.to_lowercase().contains(&needle)
+}

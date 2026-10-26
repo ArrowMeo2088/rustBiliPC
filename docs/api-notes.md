@@ -413,3 +413,32 @@ bpi-rs 自己请求时会加 `User-Agent` + `Referer: https://www.bilibili.com/`
   （`HistoryCursor{max, view_at, business, ps}`，`src/historytoview/history.rs:14-23`），这一版不做。
 - 库里**没有**"待看条数 picker/未读红点"这类接口（搜过 `picker*`、`later*`、`watch_later`，零命中）；
   能拿到的总数只有 `ToViewListData.count`。
+
+## 14. 收藏夹内容与三种"搜索"（P9，已核对到行号）
+
+| 项 | 结论 | 出处 |
+| --- | --- | --- |
+| 取内容 | `fav().list_detail(FavListDetailParams) -> BpiResult<FavListDetailData>` | `ref/bpi-rs/src/fav/client.rs:105` |
+| 端点 | GET `https://api.bilibili.com/x/v3/fav/resource/list`（`platform=web` 恒定带上） | `src/fav/client.rs:15`、`src/fav/list.rs:189` |
+| 入参 | `media_id`（**是 `MediaId` 不是 `Mid`**，`src/ids.rs:98`）、`tid`、**`keyword`**、`order`、`content_type`→`type`、`ps`、`pn` | `src/fav/list.rs:109-210` |
+| 校验 | `keyword` 拒绝空白串（`:140`）、`ps` 与 `pn` 只拒绝 0（`:162`/`:174`）；默认 `ps=20` | 同上 |
+| 分页 | **页码**（`pn`/`ps`）+ `has_more`，不是游标 | `src/fav/list.rs:86-93` |
+| 总数 | `info.media_count`（夹子总数，不是本页长度）；另有 `cnt_info.collect` | `src/fav/list.rs:59` |
+| 条目 | `FavListMedia { id(aid), type(→type_name): u8, title, cover, intro(备注), page: Option, duration: u32 秒, upper{mid,name,face}, cnt_info{collect,play,danmaku?,view_text_1?}, link, ctime, pubtime, fav_time, bv_id: Option, bvid: Option, season: Option }` | `src/fav/list.rs:63-83`、`:11-37` |
+| 严格性 | 整个 fav 模块**只有 `medias` 带 `#[serde(default)]`**（null→空表）；`info`/`has_more`/`ttl` 与条目里十几个字段必填，`upper.vip_status` 还带了个 `vip_statue` 的别名（B 站的拼写错误被库兼容下来了） | `src/fav/list.rs:17`、`:89` |
+
+三条列表接口的"搜索"能力**不一样**，这是这一节最要紧的结论：
+
+| 列表 | 有没有 `keyword` | 我们怎么做 |
+| --- | --- | --- |
+| 收藏夹内容 | **有**（`fav/list.rs:140`/`:196`，测试里也断言了这个 query 键 `:327`） | 服务端搜索：回车/点"搜索"才请求，回到第 1 页并清空累加状态 |
+| 观看历史 | **没有**：`HistoryListParams` 只有 `max/business/view_at/typ/ps`（`historytoview/params.rs:84-90`），全库 grep `keyword` 只在 `fav/list.rs`、`search/*`、`user/params.rs:536-611`、`live/*`、`article/view.rs:53` 命中；也没有任何 `history/search` 端点（只有 `cursor`/`shadow`/`delete`/`clear`/`report`） | 本地过滤**已加载**的条目（`matches_keyword`：标题或 UP 主，忽略大小写，空串放行），并给"再加载 30 条"把范围手动扩出去 |
+| 待看 | **没有**：`toview_list(&self)` 零参数（`historytoview/client.rs:54`，query 为空有断言 `:178`） | 本地过滤即可等于搜全量——这条接口一次把整个列表给完 |
+
+- 历史翻页要**三个字段一起回传**：`with_max`(`params.rs:98`，返回 `Self`)、`with_view_at`(`:117`，返回 `Self`)、
+  `with_raw_business`(`:110`，返回 `BpiResult`，它拒绝空串——所以我们只在非空时才设这一项)。
+  下一页游标的取法是 `data.cursor`（`history.rs:121` 的 `HistoryListData.cursor`），不是从条目里找。
+- **`FavListMedia.type` 的取值没有可信文档**：库里既没有枚举也没有常量，
+  自带测试里那个 `"type": 2`（`fav/list.rs:437`）是**夹子 info** 的字段、不是条目。
+  所以我们不猜"2=视频"，改成看**拿不拿得到稿件号**（`bvid` 或 `bv_id`，两个键都空就是点不开的行），
+  跳过的行数在页头如实写成"另有 M 条打不开"，不假装知道它是什么类型。

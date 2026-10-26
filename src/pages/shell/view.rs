@@ -20,13 +20,16 @@
 //! 只在日志里留话，界面上不解释——头像是装饰，功能一页都不缺。真正需要看见的账户错误
 //! 由设置页自己那一路请求负责显示（它有自己的提示位），这里不摆第二份同样的话。
 //!
-//! ## 栈里可以放两种页
+//! ## 栈里放三种页（P9 起）
 //!
-//! "点 UP 主 → 空间页"和"点卡片 → 详情页"是同一类下钻，所以栈里存的是
-//! [`StackPage`]（详情 / 空间）而不是裸的 `Entity<DetailPage>`：
+//! "点卡片 → 详情页"、"点 UP 主 → 空间页"、"点收藏夹 → 内容页"是同一类下钻，所以栈里存的是
+//! [`StackPage`]（详情 / 空间 / 收藏夹内容）而不是三个裸字段或三个栈：
 //! 打开 = push，返回 = pop，栈空时显示选中的那一页。
-//! 两种页发的都是同一对事件（[`OpenVideo`](crate::pages::OpenVideo) 与
-//! [`OpenUser`](crate::pages::OpenUser)），新压进来的一页两条订阅都装上；
+//! 订阅按各页**真的会发**的事件给：详情与空间两种页都实现 `OpenVideo` + `OpenUser`，
+//! 所以 [`watch_page`](Self::watch_page) 一次装两条；收藏夹内容页只发 `OpenVideo`；
+//! 收藏列表页只发 [`OpenFolder`](crate::pages::OpenFolder)，用
+//! [`watch_folders`](Self::watch_folders)。第三十三轮的 CI 就是这条把关的——
+//! 给不下钻的页多订一次直接 `E0277`。
 //! 导航决定（压哪一层、弹回哪一层）全部收在这里，页面不知道自己在栈里。
 //! "返回"做成侧栏第一项而不是再加一条横栏：再加一条就会和详情页自己的 56 页头叠成两层，
 //! 看着像两个标题栏。文案也从"← 返回上一层"缩成"返回"——80 宽放不下那句。
@@ -49,17 +52,21 @@ use gpui_kit::*;
 
 use crate::api::profile;
 use crate::pages::{
-    OpenUser, OpenVideo, about::AboutPage, detail::DetailPage, download::DownloadPage,
-    favorites::FavoritesPage, history::HistoryPage, home::HomePage, loading, search::SearchPage,
-    space::UserSpacePage, toview::ToViewPage,
+    OpenFolder, OpenUser, OpenVideo, about::AboutPage, detail::DetailPage,
+    download::DownloadPage,
+    favorites::{FavFolderPage, FavoritesPage},
+    history::HistoryPage, home::HomePage, loading, search::SearchPage, space::UserSpacePage,
+    toview::ToViewPage,
 };
 use crate::ui::{layout, palette};
 
-/// 栈里的一层。"点 UP 主"和"点卡片"是两类下钻、会交错发生，所以必须做成一个枚举而不是两个栈：
-/// 两个栈的话，"返回"就不知道该弹哪一个了。
+/// 栈里的一层。"点 UP 主"、"点卡片"、"点收藏夹"是三类下钻、会交错发生
+/// （收藏 → 夹子内容 → 某个视频 → 那个 UP 主的空间 → …），所以必须做成一个枚举而不是三个栈：
+/// 分栈的话"返回"就不知道该弹哪一个了。
 enum StackPage {
     Detail(Entity<DetailPage>),
     Space(Entity<UserSpacePage>),
+    Folder(Entity<FavFolderPage>),
 }
 
 impl StackPage {
@@ -68,6 +75,7 @@ impl StackPage {
         match self {
             Self::Detail(page) => page.clone().into_any_element(),
             Self::Space(page) => page.clone().into_any_element(),
+            Self::Folder(page) => page.clone().into_any_element(),
         }
     }
 }
@@ -153,9 +161,11 @@ impl MainShell {
     ) -> Self {
         let search = cx.new(|cx| SearchPage::new(window, cx, Arc::clone(&client)));
         let home = cx.new(|_cx| HomePage::new(Arc::clone(&client)));
-        let favorites = cx.new(|_cx| FavoritesPage::new(Arc::clone(&client), mid_raw.clone()));
-        let history = cx.new(|_cx| HistoryPage::new(Arc::clone(&client)));
-        let toview = cx.new(|_cx| ToViewPage::new(Arc::clone(&client)));
+        // 这三页现在都有输入框，构造时要 `window`（`InputState::new` 与 `subscribe_in` 都要它）。
+        let favorites =
+            cx.new(|cx| FavoritesPage::new(window, cx, Arc::clone(&client), mid_raw.clone()));
+        let history = cx.new(|cx| HistoryPage::new(window, cx, Arc::clone(&client)));
+        let toview = cx.new(|cx| ToViewPage::new(window, cx, Arc::clone(&client)));
         let download = cx.new(|_cx| DownloadPage::new());
         let about = cx.new(|_cx| AboutPage::new(Arc::clone(&client), mid_raw.clone()));
 
@@ -190,6 +200,10 @@ impl MainShell {
         shell.watch_videos(&search, window, cx);
         shell.watch_videos(&history, window, cx);
         shell.watch_videos(&toview, window, cx);
+
+        // 收藏页发的不是"打开视频"，是"打开收藏夹"（P9 下钻）。
+        let favorites = shell.favorites.clone();
+        shell.watch_folders(&favorites, window, cx);
 
         // 主页是默认页：构造完就把第一批推荐取回来，登录后第一眼不该是一片空白。
         shell.home.update(cx, |page, cx| page.ensure_loaded(cx));
@@ -232,6 +246,42 @@ impl MainShell {
                 this.open_detail(&event.bvid, window, cx);
             });
         self._subscriptions.push(subscription);
+    }
+
+    /// 只订"点收藏夹 → 内容页"这一种信号的页（目前就是收藏列表页）。
+    fn watch_folders<T>(&mut self, page: &Entity<T>, window: &mut Window, cx: &mut Context<Self>)
+    where
+        T: 'static + Render + EventEmitter<OpenFolder>,
+    {
+        let subscription =
+            cx.subscribe_in(page, window, |this, _page, event: &OpenFolder, window, cx| {
+                this.open_folder(event, window, cx);
+            });
+        self._subscriptions.push(subscription);
+    }
+
+    /// 压一层收藏夹内容页。进来就取第 1 页：这一页是被点进来的，不给一片空白。
+    fn open_folder(&mut self, event: &OpenFolder, window: &mut Window, cx: &mut Context<Self>) {
+        log::debug!(
+            "外壳：打开收藏夹内容 id={}（{}，栈深 {}）",
+            event.id,
+            event.title,
+            self.stack.len()
+        );
+        let page = cx.new(|cx| {
+            FavFolderPage::new(
+                window,
+                cx,
+                Arc::clone(&self.client),
+                event.id,
+                event.title.clone(),
+            )
+        });
+        // 内容页只发"打开视频"这一种信号，订那一条就够（P9：夹子里点卡片进详情）。
+        self.watch_videos(&page, window, cx);
+        page.update(cx, |page, cx| page.ensure_loaded(cx));
+        self.stack.push(StackPage::Folder(page));
+        cx.notify();
     }
 
     /// 压一层详情页。它自己发的两种事件都订阅上，所以"相关推荐一路点下去"和

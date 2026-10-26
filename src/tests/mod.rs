@@ -708,6 +708,33 @@ mod comment_tests {
 }
 
 #[cfg(test)]
+mod favorites_tests {
+    use crate::api::favorites::pick_bvid;
+    use crate::pages::matches_keyword;
+
+    #[test]
+    fn bvid_prefers_the_new_key_and_falls_back_to_the_old_one() {
+        // B 站这个字段历史上换过名，库里两个键都留着（`ref/bpi-rs/src/fav/list.rs:80-81`）。
+        assert_eq!(pick_bvid(Some("BV1new".into()), Some("BVold".into())), "BV1new");
+        assert_eq!(pick_bvid(None, Some("BVold".into())), "BVold");
+        // 空串也算没有：拿不到稿件号的行进不了详情页，必须被跳过而不是画成一张点不动的卡。
+        assert_eq!(pick_bvid(Some("".into()), Some("BVold".into())), "BVold");
+        assert!(pick_bvid(Some("".into()), None).is_empty());
+        assert!(pick_bvid(None, None).is_empty());
+    }
+
+    #[test]
+    fn keyword_filter_matches_title_or_author_and_lets_blank_through() {
+        // 空关键词一律放行：「还没输入」与「输入了又删干净」是同一种状态，不许出现空列表。
+        assert!(matches_keyword("任何标题", "任何UP", ""));
+        assert!(matches_keyword("任何标题", "任何UP", "   "));
+        assert!(matches_keyword("Rust 入门教程", "UP主", "rust")); // 拉丁字母忽略大小写
+        assert!(matches_keyword("某视频", "老番茄", "番茄")); // 中文按字面匹配
+        assert!(!matches_keyword("某视频", "老番茄", "不存在的词"));
+    }
+}
+
+#[cfg(test)]
 mod space_tests {
     use crate::api::space::{SpaceSection, VideoOrder, parse_tlist};
     use serde_json::json;

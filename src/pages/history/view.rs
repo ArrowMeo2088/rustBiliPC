@@ -1,50 +1,87 @@
-//! 历史页：最近观看的条目，卡片式，点卡片进详情页。
+//! 历史页：最近观看的条目，卡片式，点卡片进详情页；带**本地筛选**与**再加载 30 条**。
 //!
-//! ## 只取一页，不做"加载更多"
+//! ## 搜索为什么是本地的，而且要说清范围
 //!
-//! 这条接口是**游标**分页（`HistoryCursor { max, view_at, business, ps }`，
-//! `ref/bpi-rs/src/historytoview/history.rs:14-23`），要往回翻得把上一页最后一条的
-//! `max`/`view_at` 带回去。这一版只拉第一页 + 一个"重新加载"：
-//! `ps` 在库里只拒绝 0（`params.rs:136-143`），30 与 B 站网页端一屏给的数量一致，够用。
-//! 真要连续翻历史，得先决定"游标放哪儿、翻回去算不算同一层页"，那是结构问题，不顺手做。
+//! 这条接口**没有** `keyword` 参数：`HistoryListParams` 只有 `max/business/view_at/typ/ps`
+//! （`ref/bpi-rs/src/historytoview/params.rs:84-90`），整个库里也没有 `history/search` 端点。
+//! 所以这一页的过滤只能盖住**已经加载到本机**的那些条目。界面不藏这件事：
+//! 输入框的提示写"筛选已加载的历史"，页头写"筛出 N / 已加载 M 条"，
+//! 想要更大范围就用"再加载 30 条"把它扩出去（用户 2026-10-26 定稿就是这个方案）。
+//!
+//! ## "再加载"靠游标三件套，不靠页码
+//!
+//! B 站这条是游标分页：把上一页 `cursor` 的 `max`/`view_at`/`business` 原样回传
+//! （见 [`fetch_history`](crate::api::history::fetch_history)）。取完的判据用**我们自己那条**：
+//! 这次没拿到条目就停按钮，不看接口的 cursor（它就算空列表也照样回，照它判断会出现
+//! "点了再加载、什么也没多、按钮也不消失"的死圈）。
 //!
 //! ## 卡片的第三行放的是"看到哪儿"
 //!
-//! `HistoryItem` 不给播放量，给的是 `progress`（上次看到的秒数，`history.rs:94`）与
-//! `tag_name`（子分区名）。历史里用户认的是"我看到哪儿了"，所以左格放分区、右格放进度；
-//! 进度文案的口径与待看页共用 [`progress_text`](crate::api::progress_text)，两页说法必须一样。
+//! `HistoryItem` 不给播放量，给的是 `progress`（上次看到的秒数）与 `tag_name`（子分区名）。
+//! 历史里用户认的是"我看到哪儿了"，所以左格放分区、右格放进度；进度文案与待看同一份口径
+//! （[`progress_text`](crate::api::progress_text)：`0` 与 `-1` 都给空串）。
 
 use std::sync::Arc;
 
 use gpui_kit::component::button::Button;
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::*;
 
-use crate::api::history::{self, HistoryItem};
-use crate::pages::{loading, OpenVideo};
+use crate::api::history::{self, HistoryCursor, HistoryItem};
+use crate::pages::{loading, matches_keyword, OpenVideo};
 use crate::ui::video_card::{self, VideoCardData};
-use crate::ui::layout;
+use crate::ui::{layout, palette};
 
-/// 一次取多少条历史。见文件头那条：这条接口的 `ps` 只拒绝 0。
+/// 一次取多少条历史。库里的 `ps` 只拒绝 0（`params.rs:136-143`），
+/// 30 与 B 站网页端一屏给的数量一致；"再加载"每次也是这个数。
 const HISTORY_LIMIT: u32 = 30;
 
 /// 历史页根视图。
 pub struct HistoryPage {
     client: Arc<bpi_rs::BpiClient>,
     items: Vec<HistoryItem>,
+    /// 下一页的起点；`None` = 翻到头了（或还没取过）。
+    cursor: Option<HistoryCursor>,
+    input: Entity<InputState>,
+    filter: SharedString,
     note: SharedString,
     seq: u32,
     loaded: bool,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl HistoryPage {
-    /// 建页但不发请求（懒加载）。
-    pub fn new(client: Arc<bpi_rs::BpiClient>) -> Self {
+    /// 建页但不发请求（懒加载）。要 `window` 是为了 `InputState::new` 与 `subscribe_in`。
+    pub fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        client: Arc<bpi_rs::BpiClient>,
+    ) -> Self {
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("筛选已加载的历史（标题或 UP 主）")
+        });
+        let subscriptions = vec![cx.subscribe_in(
+            &input,
+            window,
+            |this, state, event: &InputEvent, _window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.filter = state.read(cx).value().trim().to_string().into();
+                    cx.notify();
+                }
+            },
+        )];
+
         Self {
             client,
             items: Vec::new(),
+            cursor: None,
+            input,
+            filter: "".into(),
             note: "".into(),
             seq: 0,
             loaded: false,
+            _subscriptions: subscriptions,
         }
     }
 
@@ -53,34 +90,81 @@ impl HistoryPage {
         if self.loaded {
             return;
         }
-        self.reload(cx);
+        self.fetch(None, cx);
     }
 
-    /// 重新拉一页历史。
+    /// 重新取第一页（清空已加载的，游标从头）。
     pub fn reload(&mut self, cx: &mut Context<Self>) {
+        self.items.clear();
+        self.cursor = None;
+        self.fetch(None, cx);
+    }
+
+    /// 往后翻一页并**累加**。翻到头时这个按钮不会再出现（`cursor` 是 `None`）。
+    fn load_more(&mut self, cx: &mut Context<Self>) {
+        let Some(cursor) = self.cursor.clone() else {
+            return;
+        };
+        self.fetch(Some(cursor), cx);
+    }
+
+    /// 取一段历史。`after` 是 `None` 时替换列表，`Some` 时往后加一页。
+    fn fetch(&mut self, after: Option<HistoryCursor>, cx: &mut Context<Self>) {
         self.loaded = true;
         self.seq += 1;
         let seq = self.seq;
-        self.note = "历史加载中…".into();
+        let resuming = after.is_some();
+        self.note = if resuming {
+            "正在加载更早的记录…".into()
+        } else {
+            "历史加载中…".into()
+        };
         cx.notify();
 
-        let join = history::fetch_history(Arc::clone(&self.client), HISTORY_LIMIT);
-        loading::spawn_into(cx, seq, "观看历史", join, |page| page.seq, |page, outcome| {
+        let join = history::fetch_history(Arc::clone(&self.client), HISTORY_LIMIT, after);
+        // `move`：这个闭包要跨 `await` 存活（`'static`），所以 `resuming` 必须搬进去而不是借。
+        loading::spawn_into(cx, seq, "观看历史", join, |page| page.seq, move |page, outcome| {
             match outcome {
-                Ok(list) => {
-                    page.note = if list.is_empty() {
+                Ok(batch) => {
+                    if !resuming {
+                        page.items = batch.items;
+                    } else {
+                        page.items.extend(batch.items);
+                    }
+                    page.cursor = batch.next;
+                    page.note = if page.items.is_empty() {
                         "还没有观看记录".into()
                     } else {
                         "".into()
                     };
-                    page.items = list;
                 }
                 Err(message) => {
-                    page.items.clear();
+                    if !resuming {
+                        page.items.clear();
+                    }
                     page.note = format!("取历史失败：{message}").into();
                 }
             }
         });
+    }
+
+    /// 当前要画出来的那些条（本地过滤后的结果）。
+    fn shown(&self) -> Vec<&HistoryItem> {
+        self.items
+            .iter()
+            .filter(|item| matches_keyword(&item.title, &item.author, self.filter.as_str()))
+            .collect()
+    }
+
+    /// 页头副标题：筛选时说明盖住了多少条已加载记录。
+    fn summary(&self) -> String {
+        if self.items.is_empty() {
+            return String::new();
+        }
+        if self.filter.is_empty() {
+            return format!("已加载 {} 条", self.items.len());
+        }
+        format!("筛出 {} / 已加载 {} 条", self.shown().len(), self.items.len())
     }
 
     fn reload_button(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -89,22 +173,30 @@ impl HistoryPage {
             .on_click(cx.listener(|this, _event, _window, cx| this.reload(cx)))
             .into_any_element()
     }
-}
 
-/// 点历史卡片 = 请外壳压一层详情页，与搜索/主页/空间页同一个信号。
-impl EventEmitter<OpenVideo> for HistoryPage {}
+    fn load_more_button(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if self.cursor.is_none() {
+            return None;
+        }
+        Some(
+            div()
+                .id("history-more")
+                .flex()
+                .w_full()
+                .justify_center()
+                .py(px(palette::CARD_TEXT_ROW_GAP))
+                .child(
+                    Button::new("history-more-btn")
+                        .label(format!("再加载 {HISTORY_LIMIT} 条"))
+                        .on_click(cx.listener(|this, _event, _window, cx| this.load_more(cx))),
+                )
+                .into_any_element(),
+        )
+    }
 
-impl Render for HistoryPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let count = if self.items.is_empty() {
-            String::new()
-        } else {
-            format!("最近 {} 条", self.items.len())
-        };
-        let note = self.note.clone();
-        let cards: Vec<AnyElement> = self
-            .items
-            .iter()
+    fn cards(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        self.shown()
+            .into_iter()
             .map(|item| {
                 let card = VideoCardData {
                     bvid: item.bvid.clone().into(),
@@ -124,7 +216,20 @@ impl Render for HistoryPage {
                 )
                 .into_any_element()
             })
-            .collect();
+            .collect()
+    }
+}
+
+/// 点历史卡片 = 请外壳压一层详情页，与搜索/主页/空间页同一个信号。
+impl EventEmitter<OpenVideo> for HistoryPage {}
+
+impl Render for HistoryPage {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let summary = self.summary();
+        let note = self.note.clone();
+        let empty_hint = !note.is_empty() && self.shown().is_empty();
+        let cards = self.cards(cx);
+        let more = self.load_more_button(cx);
 
         div()
             .flex()
@@ -132,9 +237,10 @@ impl Render for HistoryPage {
             .size_full()
             .child(layout::header(
                 "历史",
-                (!count.is_empty()).then(|| count.into()),
+                (!summary.is_empty()).then(|| summary.into()),
                 Some(self.reload_button(cx)),
             ))
+            .child(layout::search_box(&self.input))
             .child(layout::divider())
             .child(
                 div()
@@ -144,19 +250,18 @@ impl Render for HistoryPage {
                     .min_w(px(0.))
                     .overflow_y_scroll()
                     .child(
-                        // 请求出问题时先把话说清楚，再给一片空网格——只写提示不画列表是
-                        // 第 4.7 节定的做法（错误必须看得见）。
-                        if note.is_empty() {
-                            video_card::grid(cards)
-                        } else {
-                            div()
-                                .flex()
-                                .flex_col()
-                                .w_full()
-                                .child(layout::note(note))
-                                .child(video_card::grid(cards))
-                                .into_any_element()
-                        },
+                        div()
+                            .flex()
+                            .flex_col()
+                            .w_full()
+                            // 请求出问题时先把话说清楚再摆列表（第 4.7 节：错误必须看得见）。
+                            .child(if empty_hint {
+                                layout::note(note)
+                            } else {
+                                div().into_any_element()
+                            })
+                            .child(video_card::grid(cards))
+                            .children(more),
                     ),
             )
     }

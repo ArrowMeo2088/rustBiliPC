@@ -25,6 +25,7 @@
 //!   正文不加粗。层级仍然是"字号 + 三档灰 + 这一档字重"，不靠别的。
 use gpui_kit::assets::IconName;
 use gpui_kit::component::Icon;
+use gpui_kit::component::input::{Input, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
@@ -295,5 +296,73 @@ pub fn card(items: Vec<AnyElement>) -> AnyElement {
         .border_1()
         .border_color(palette::divider())
         .children(items)
+        .into_any_element()
+}
+
+/// 一行筛选/搜索输入框。`input` 由页面自己 `cx.new(|_| InputState::new(window, cx).placeholder(..))`
+/// 造好再传进来：占位文案每页不同（"筛选标题或 UP 主" / "在收藏夹内搜索"），
+/// 而"什么时候算一次搜索"是页面的事（本地过滤听 `Change`，服务端搜索听回车），
+/// 组件只负责把它摆成一行。
+///
+/// 宽度交给外层 `flex_1()`：这一行既出现在 80 宽侧栏之外的主区顶部，
+/// 也可能被塞进页头右侧，所以不写死数字。kit 的 `Input` 底色与字色走全局主题
+/// （第二十六轮把主题切成暗色之后，输入框才不再是"页面黑、框白"）。
+pub fn search_box(input: &Entity<InputState>) -> AnyElement {
+    div()
+        .flex()
+        .w_full()
+        .items_center()
+        .gap(px(palette::CARD_TEXT_ROW_GAP))
+        .px(px(palette::CARD_TEXT_PADDING_X))
+        .pt(px(palette::CARD_TEXT_ROW_GAP))
+        .child(div().flex_1().min_w(px(0.)).child(Input::new(input)))
+        .into_any_element()
+}
+
+/// 可点的一行"标题 + 说明"：与 [`list_row`] 同一套度量（40 高、`12,8` 内边距、卡片底），
+/// 差别只在这一行**是交互元素**——收藏列表点进去是收藏夹内容，
+/// 所以它要 `id` + `on_click` + hover。
+///
+/// 为什么不复用 `list_row` 再加个可选回调：gpui 里 `hover`/`on_click` 只存在于
+/// `Stateful<Div>`（要先 `.id()`），把它做成可选参数会把复用件变成两种形状；
+/// 两个函数共用同一组常量，度量仍然只有一个出处。
+pub fn clickable_row(
+    id: impl Into<ElementId>,
+    label: impl Into<SharedString>,
+    meta: impl Into<SharedString>,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> AnyElement {
+    let base = div()
+        .flex()
+        .w_full()
+        .min_h(px(palette::LIST_ROW_MIN_HEIGHT))
+        .gap(px(palette::LIST_ROW_PADDING_Y))
+        .items_center()
+        .px(px(palette::LIST_ROW_PADDING_X))
+        .py(px(palette::LIST_ROW_PADDING_Y))
+        .rounded(px(palette::RADIUS))
+        .cursor_pointer()
+        .bg(palette::card_background())
+        .child(
+            div()
+                .flex_1()
+                .min_w(px(0.))
+                .text_size(px(palette::FONT_BODY))
+                .text_color(palette::text_primary())
+                .whitespace_nowrap()
+                .text_ellipsis()
+                .overflow_hidden()
+                .child(label),
+        )
+        .child(
+            div()
+                .flex_shrink_0()
+                .text_size(px(palette::FONT_CAPTION))
+                .text_color(palette::text_tertiary())
+                .child(meta),
+        );
+    base.id(id)
+        .on_click(on_click)
+        .hover(|style| style.bg(palette::card_background_hover()))
         .into_any_element()
 }

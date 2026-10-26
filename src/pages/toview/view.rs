@@ -19,11 +19,12 @@
 use std::sync::Arc;
 
 use gpui_kit::component::button::Button;
+use gpui_kit::component::input::{InputEvent, InputState};
 use gpui_kit::prelude::FluentBuilder;
 use gpui_kit::*;
 
 use crate::api::toview::{self, ToViewItem};
-use crate::pages::{loading, OpenVideo};
+use crate::pages::{loading, matches_keyword, OpenVideo};
 use crate::ui::video_card::{self, VideoCardData};
 use crate::ui::{layout, palette};
 
@@ -33,21 +34,49 @@ pub struct ToViewPage {
     items: Vec<ToViewItem>,
     /// 接口报的总条数（`count`），与 [`items`](Self::items) 的长度的差值要显示给用户看。
     total: u32,
+    input: Entity<InputState>,
+    /// 本地筛选词。这条接口**没有** `keyword`（`toview_list()` 零参数，
+    /// `ref/bpi-rs/src/historytoview/client.rs:54`），但它一次把整个列表给完，
+    /// 所以本地过滤在这里等于搜全量——与历史页那种"只盖得住已加载的一页"不同。
+    filter: SharedString,
     note: SharedString,
     seq: u32,
     loaded: bool,
+    _subscriptions: Vec<Subscription>,
 }
 
 impl ToViewPage {
-    /// 建页但不发请求（懒加载）。
-    pub fn new(client: Arc<bpi_rs::BpiClient>) -> Self {
+    /// 建页但不发请求（懒加载）。要 `window` 是为了 `InputState::new` 与 `subscribe_in`。
+    pub fn new(
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        client: Arc<bpi_rs::BpiClient>,
+    ) -> Self {
+        let input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder("筛选待看（标题或 UP 主）")
+        });
+        let subscriptions = vec![cx.subscribe_in(
+            &input,
+            window,
+            |this, state, event: &InputEvent, _window, cx| {
+                if matches!(event, InputEvent::Change) {
+                    this.filter = state.read(cx).value().trim().to_string().into();
+                    cx.notify();
+                }
+            },
+        )];
+
         Self {
             client,
             items: Vec::new(),
             total: 0,
+            input,
+            filter: "".into(),
             note: "".into(),
             seq: 0,
             loaded: false,
+            _subscriptions: subscriptions,
         }
     }
 
@@ -89,17 +118,29 @@ impl ToViewPage {
         });
     }
 
-    /// 页头副标题：总数 + （有的话）打不开的差额。
+    /// 当前要画出来的那些条（本地过滤后的结果）。
+    fn shown(&self) -> Vec<&ToViewItem> {
+        self.items
+            .iter()
+            .filter(|item| matches_keyword(&item.title, &item.author, self.filter.as_str()))
+            .collect()
+    }
+
+    /// 页头副标题：总数 + 打不开的差额 + 筛选时说明盖住了多少。
     fn summary(&self) -> String {
         if self.items.is_empty() {
             return String::new();
         }
         let skipped = self.total.saturating_sub(self.items.len() as u32);
-        if skipped == 0 {
+        let mut text = if skipped == 0 {
             format!("共 {} 条", self.total)
         } else {
             format!("共 {} 条 · {skipped} 条打不开", self.total)
+        };
+        if !self.filter.is_empty() {
+            text = format!("{} · 筛出 {} 条", text, self.shown().len());
         }
+        text
     }
 
     fn reload_button(&self, cx: &mut Context<Self>) -> AnyElement {
@@ -110,8 +151,8 @@ impl ToViewPage {
     }
 
     fn cards(&self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        self.items
-            .iter()
+        self.shown()
+            .into_iter()
             .map(|item| {
                 let card = VideoCardData {
                     bvid: item.bvid.clone().into(),
@@ -154,6 +195,7 @@ impl Render for ToViewPage {
                 (!summary.is_empty()).then(|| summary.into()),
                 Some(self.reload_button(cx)),
             ))
+            .child(layout::search_box(&self.input))
             .child(layout::divider())
             .child(
                 div()
