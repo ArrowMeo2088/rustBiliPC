@@ -144,7 +144,8 @@ impl FavFolderPage {
             "收藏夹内容",
             join,
             |page_state| page_state.seq,
-            |page_state, outcome| match outcome {
+            // `move`：闭包要跨 await 存活（'static），所以 `page` 是搬进来而不是借。
+            move |page_state, outcome| match outcome {
                 Ok(batch) => {
                     // 名字以接口为准：列表里那个可能是改名前抓的。
                     if !batch.title.is_empty() {
@@ -170,7 +171,13 @@ impl FavFolderPage {
                     };
                 }
                 Err(message) => {
-                    page_state.items.clear();
+                    // 只有第一页失败才清空：翻第 N 页失败时，已经看到的第 1..N-1 页
+                    // 仍然有效，跟着一起清等于把用户的浏览记录砸了（历史页同一条口径）。
+                    if page == 1 {
+                        page_state.items.clear();
+                        page_state.total = 0;
+                        page_state.skipped = 0;
+                    }
                     page_state.note = format!("取收藏夹内容失败：{message}").into();
                 }
             },
@@ -187,7 +194,7 @@ impl FavFolderPage {
             text.push_str(&format!(" · 另有 {} 条打不开", self.skipped));
         }
         if !self.submitted.is_empty() {
-            text = format!("搜索「{}」· {}", self.submitted, text);
+            text = format!("搜索「{}」· {}", self.submitted.as_str(), text);
         }
         text
     }
