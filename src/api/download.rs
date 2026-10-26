@@ -3,9 +3,9 @@
 //! ## 这是唯一允许写到运行目录之外的功能
 //!
 //! 2026-10-26 用户的原话："下载功能要做一下，**仅这个能下载到外部文件里**。"
-//! 其余落盘仍然只有运行同目录的 `debug.log` / `auth.json` / `config.json`
-//! （口径见 QODER.md"运行期数据"）。所以这一层的目录**只来自系统弹框选出来的那个**，
-//! 不猜、不用默认目录、也不在运行目录里开一个 downloads/。
+//! 其余落盘仍然只有设置目录（`%APPDATA%/ArrowMeo/rustBiliPC`）里的
+//! `debug.log` / `auth.json` / `config.json`（口径见 QODER.md"运行期数据"）。
+//! 所以这一层的目录**只来自系统弹框选出来的那个**，不猜、不用默认目录、也不在运行目录里开一个 downloads/。
 //!
 //! ## 为什么是两个文件
 //!
@@ -23,8 +23,10 @@
 //!    在 `remove_file` 了——Windows 上"文件还开着就删"会失败或留下孤儿。
 //!    现在的方式：界面置标志 → 任务在下一个分块处看见 → 自己收尾（flush、删 `.part`）→ 发 `Cancelled`。
 //! 3. **主地址失败就换 `backupUrl`**（`baseUrl` 之外 B 站给一组备用域名）。
-//!    这条正是播放层做不到的事：mpv 内部的地址我们替换不了，而下载是我们自己读字节，
-//!    所以这里能把备用域名真正用上（第三十九轮 roadmap 里的 R0 第 3 条）。
+//!    候选地址的排法与 CDN 要的那条 Cookie 都在 [`probe`](super::probe) 里，
+//!    在线播那一路也共用同一组（[`ordered_urls`] / [`cdn_headers`]）——
+//!    两条路的差别只在"谁读字节"：这里能当场换下一个域名，
+//!    播那一路只能在交给 mpv 之前先探好（mpv 内部的地址我们替换不了）。
 //!
 //! ## 不做的事
 //!
@@ -42,10 +44,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use futures::AsyncReadExt as _;
 use gpui_kit::http_client::{AsyncBody, Builder, HttpClient, HttpRequestExt as _, RedirectPolicy};
 
+use super::probe::{cdn_headers, ordered_urls};
 use super::spawn_on_api_runtime;
 use super::stream::StreamChoice;
 use crate::player::{BILIBILI_REFERER, MPV_USER_AGENT};
-use crate::store::auth::Auth;
 
 /// 一次读多少字节。256 KiB：太小会让 `tokio` 任务被大量 poll 占住，太大会让"取消"响应变慢。
 const CHUNK_SIZE: usize = 256 * 1024;
@@ -229,7 +231,7 @@ async fn run(
     cancel: Arc<AtomicBool>,
     sender: tokio::sync::mpsc::UnboundedSender<DownloadEvent>,
 ) {
-    let headers = stream_headers();
+    let headers = cdn_headers();
     let mut tracks = vec![Track::new(
         "视频",
         ordered_urls(&request.video_url, &request.video_backup),
@@ -416,31 +418,6 @@ fn clean_up(written: &[PathBuf], part_path: &Path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => log::warn!("下载收尾：删不掉 {:?}（{error}）", path),
         }
-    }
-}
-
-/// 主地址排在备用域名前面。空串一律丢掉（B 站偶尔给空数组，偶尔给空串）。
-fn ordered_urls(primary: &str, backup: &[String]) -> Vec<String> {
-    let mut urls: Vec<String> = Vec::with_capacity(backup.len() + 1);
-    if !primary.is_empty() {
-        urls.push(primary.to_string());
-    }
-    urls.extend(
-        backup.iter()
-            .filter(|url| !url.is_empty() && url.as_str() != primary)
-            .cloned(),
-    );
-    urls
-}
-
-/// 下载用的请求头：Referer/UA 在 `attempt` 里给，这里只补凭据相关的那一条。
-///
-/// 读的是运行目录的 `auth.json`（和起播那一路同一个来源）：没登录就没有 Cookie 头，
-/// 1080P 会被 CDN 拒成 403——那种失败会以"HTTP 403"原话出现在界面上，不静默降级。
-fn stream_headers() -> Vec<(String, String)> {
-    match Auth::load().filter(|auth| auth.is_complete()) {
-        Some(auth) => vec![("Cookie".to_string(), auth.cookie_header())],
-        None => Vec::new(),
     }
 }
 

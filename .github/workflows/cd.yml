@@ -1,0 +1,239 @@
+name: CD
+
+# 手动触发的**发布**流水线：多平台 + `release-dist`（LTO / codegen-units=1 / strip）
+# + UPX 压缩 + 发 GitHub Release。
+# 2026-10-26（P13）与 `ci.yml` 分工：那条管"推的东西还能不能编过、测试是不是全绿"，
+# 这条管"给人下载的产物"。**只打包 exe**——不塞 dll、不塞 mpv、不塞 README
+# （用户定稿："注意只需要打包 exe，不要打包其他东西"；本项目本来就是单 exe + 外置 mpv.exe）。
+#
+# 四个目标里哪些是**已验证**的，写在下面的 `notes` 里；第一次跑完请把结论回填
+# `docs/architecture.md` 第 2 节与风险清单，别把"配上了"当成"能用了"。
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release 的 tag（比如 v0.1.0）"
+        type: string
+        required: true
+        default: "v0.1.0"
+      prerelease:
+        description: "标成预发布（prerelease）"
+        type: boolean
+        required: false
+        default: true
+      upx:
+        description: "用 UPX 压缩（--lzma --best）"
+        type: boolean
+        required: false
+        default: true
+
+# `contents: write` 是**这条**流水线要的（建 release、传资产）；
+# ci.yml 那边仍然保持 `contents: read`——构建与测试不需要写权限。
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: ""
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: win-x64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            exe: rustbilipc.exe
+            asset: rustbilipc-win-x64.exe
+            # aws-lc-sys 在 MSVC 上要 NASM，gpui 的 build.rs 要 fxc.exe（两条都在步骤里装/探）。
+            windows: true
+            nasm: true
+
+          - name: win-arm64
+            os: windows-latest
+            target: aarch64-pc-windows-msvc
+            exe: rustbilipc.exe
+            asset: rustbilipc-win-arm64.exe
+            windows: true
+            nasm: true
+
+          - name: linux-x64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            exe: rustbilipc
+            asset: rustbilipc-linux-x64
+            windows: false
+            nasm: false
+
+          - name: linux-arm64
+            # ARM 型的 Linux 托管 runner。为什么不用 x86 runner 交叉编译：
+            # gpui 的 Linux 后端要链接一堆系统库（X11/wayland/fontconfig/ALSA），
+            # 交叉编译得先搭一个带这些 .so 与头文件的 arm64 sysroot，比直接用 arm runner 贵得多。
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            exe: rustbilipc
+            asset: rustbilipc-linux-arm64
+            windows: false
+            nasm: false
+
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install NASM (for aws-lc-sys on MSVC)
+        if: matrix.nasm
+        run: choco install nasm --no-progress -y
+
+      # gpui 的 Linux 后端要 X11/wayland/fontconfig/ALSA/vulkan 这些开发包；
+      # Debian/Ubuntu 的包名按 gpui 自己 CI 的那一份列（缺一个就是 link 阶段一大串 undefined）。
+      - name: Install Linux system dependencies
+        if: ${{ !matrix.windows }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libx11-xcb-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libclang-dev \
+            libvulkan1 libfontconfig1-dev libexpat1-dev fonts-noto-color-emoji \
+            libwayland-dev wayland-protocols libxcursor-dev libxcb1-dev \
+            pkg-config mold
+        # `mold` 只当链接器加速用；装不上也不该挡住整条流水线（下一步显式判断）。
+
+      - name: Locate fxc.exe (gpui compiles HLSL at build time in release)
+        if: matrix.windows
+        run: |
+          $sdk = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+          $fxc = Get-ChildItem -Path $sdk -Recurse -Filter fxc.exe -ErrorAction SilentlyContinue |
+                 Where-Object { $_.FullName -match 'x64' } |
+                 Sort-Object FullName -Descending |
+                 Select-Object -First 1
+          if ($fxc) {
+            "GPUI_FXC_PATH=$($fxc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "fxc: $($fxc.FullName)"
+          } else {
+            "fxc.exe 未找到；gpui 的 build.rs 会自行搜索，若失败请检查 Windows SDK"
+          }
+
+      - name: Cache cargo home and target
+        uses: actions/cache@v4
+        with:
+          save-always: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            C:/Users/runneradmin/.cargo/registry
+            C:/Users/runneradmin/.cargo/git
+            target
+          key: cargo-${{ matrix.name }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ matrix.name }}-
+
+      # `release-dist` 是 Cargo.toml 里为这条流水线单独加的配置：
+      # LTO + codegen-units=1 + strip（+ 不做 debug 信息），产物才配得上 UPX 与"发出去"。
+      # 交叉/多目标都走同一份配置；输出目录是 `target/<triple>/release-dist/`。
+      - name: Build (release-dist, ${{ matrix.target }})
+        shell: bash
+        run: cargo build --profile release-dist --target ${{ matrix.target }}
+
+      - name: Install UPX
+        if: inputs.upx
+        run: |
+          set -o pipefail
+          if command -v choco >/dev/null 2>&1; then
+            choco install upx --no-progress -y
+            echo "UPX_BIN=$(command -v upx || echo '/c/Program Files/UPX/upx.exe')" >> "$GITHUB_ENV"
+          else
+            sudo apt-get update && sudo apt-get install -y upx || sudo apt-get install -y upx-ufl
+            echo "UPX_BIN=$(command -v upx)" >> "$GITHUB_ENV"
+          fi
+
+      - name: Compress with UPX
+        if: inputs.upx
+        shell: bash
+        run: |
+          bin="target/${{ matrix.target }}/release-dist/${{ matrix.exe }}"
+          if [ ! -f "$bin" ]; then echo "找不到产物：$bin"; exit 1; fi
+          before=$(wc -c < "$bin")
+          # 不覆盖原文件：先压到临时名，成功了才换回去（压失败时至少还有一个能用的 exe）。
+          # `-9` 是最高压缩档；`--lzma` 换 LZMA 过滤器（更小、更慢）。UPX 对
+          # PE/ARM64 与 ELF/ARM64 都支持，但** Rust 产物压缩后偶尔会在运行期出问题 **，
+          # 所以这一步失败不挡住发布：未压缩的那一份照样发出去。
+          if "$UPX_BIN" -9 --lzma "$bin" -o "$bin.upx"; then
+            mv "$bin.upx" "$bin"
+            after=$(wc -c < "$bin")
+            echo "UPX：$before → $after 字节（省 $((before - after))）"
+          else
+            echo "UPX 失败，发布未压缩的那一份（$before 字节）"
+            rm -f "$bin.upx"
+          fi
+
+      - name: Stage asset (only the executable)
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release-dist/${{ matrix.exe }}" "dist/${{ matrix.asset }}"
+          ls -l dist
+          sha256sum "dist/${{ matrix.asset }}"
+
+      - name: Upload staged asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: asset-${{ matrix.name }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      # `gh release` 要本地仓库（它拿 remote 拼 API 地址），所以这一步必须 checkout；
+      # 少了它整条 release 步骤报 "no git remote"（本项目以前踩过，见 QODER.md CI 那条）。
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Collect assets
+        uses: actions/download-artifact@v4
+        with:
+          # 只收四个 exe（每个作业一个 `asset-<name>`），别的 artifact（Cargo.lock 那类）不混进来。
+          pattern: asset-*
+          path: release-files
+          merge-multiple: true
+
+      - name: Show what will be published
+        run: ls -l release-files
+
+      - name: Create or refresh the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          PRERELEASE: ${{ inputs.prerelease }}
+        run: |
+          set -e
+          notes="rustBiliPC（Rust + GPUI 的 Bilibili 桌面客户端）。"
+          notes="$notes 每个资产都是**单个可执行文件**，不带 dll、不带 mpv——"
+          notes="$notes 播放用的是外置 mpv（放在 PATH 里，或在设置页指给它）。"
+          notes="$notes 登录凭据与设置写在 %APPDATA%/ArrowMeo/rustBiliPC（Linux 是 ~/.config/ArrowMeo/rustBiliPC）。"
+          notes="$notes 经过 UPX 压缩的 exe 容易被杀软误报，遇到拦截请加白名单。"
+          # 同 tag 重跑时只 `--clobber` 同名文件：改名或减少目标会留下上一轮的孤儿资产，
+          # 所以真要清干净请先把 release 删掉再跑。
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            for f in release-files/*; do
+              gh release upload "$TAG" "$f" --clobber
+            done
+          else
+            args=(release-files/* --title "$TAG" --notes "$notes")
+            if [ "$PRERELEASE" = "true" ]; then args+=(--prerelease); fi
+            gh release create "$TAG" "${args[@]}"
+          fi
+          echo "### 发布内容" >> "$GITHUB_STEP_SUMMARY"
+          ls -l release-files >> "$GITHUB_STEP_SUMMARY"
+          gh release view "$TAG" --json tagName,assets,url >> "$GITHUB_STEP_SUMMARY"

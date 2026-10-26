@@ -23,7 +23,7 @@ use gpui_kit::*;
 
 use crate::api::collection::{self, CollectionEpisode, CollectionKind};
 use crate::pages::OpenVideo;
-use crate::ui::scroll::DragScroll;
+use crate::ui::scroll::{should_auto_page, DragScroll};
 use crate::ui::{layout, palette};
 
 /// 合集/系列内容页根视图。
@@ -44,6 +44,8 @@ pub struct CollectionContentPage {
     note: SharedString,
     seq: u32,
     loaded: bool,
+    /// 有没有在途请求（自动连续翻页的第二道闸，见 [`should_auto_page`]）。
+    loading: bool,
     scroll: DragScroll,
 }
 
@@ -70,6 +72,7 @@ impl CollectionContentPage {
             note: "加载中…".into(),
             seq: 0,
             loaded: false,
+            loading: false,
             scroll: DragScroll::default(),
         }
     }
@@ -85,6 +88,7 @@ impl CollectionContentPage {
     /// 取某一页。`page == 1` 是替换，大于 1 是往后**累加**。
     fn request(&mut self, page: u64, cx: &mut Context<Self>) {
         self.loaded = true;
+        self.loading = true;
         self.seq += 1;
         let seq = self.seq;
         self.note = if page == 1 {
@@ -118,49 +122,53 @@ impl CollectionContentPage {
             |page_state| page_state.seq,
             // `move` 不能省：这个闭包要跨 `await` 活下来（`'static`），
             // 而它外面那个 `page` 是栈上的局部值——不搬进来就是 E0373。
-            move |page_state, outcome| match outcome {
-                Ok(batch) => {
-                    // 先把"已加载多少"与两个判据算出来再搬 `batch` 的字段：
-                    // `has_more`/`total_known` 借的是整个 `batch`，而下面要把 `batch.items` 搬走
-                    // （部分移动之后再 `&batch` 就是 E0382）。
-                    let loaded = if batch.page <= 1 {
-                        batch.items.len() as u64
-                    } else {
-                        page_state.items.len() as u64 + batch.items.len() as u64
-                    };
-                    let more = batch.has_more(loaded);
-                    // 存**校验过的**总数：比已加载还小的那个数不是条目数，界面就不该拿它说"共 N 集"。
-                    let known_total = batch.total_known(loaded);
-                    let title = batch.title;
-                    let desc = batch.desc;
-
-                    // 名字以接口为准：合集会给 `meta.name`，系列那一路是我们自己带进去的。
-                    if !title.is_empty() {
-                        page_state.title = title.into();
+            move |page_state, outcome| {
+                // 到站了（成功或失败都算）：放开自动翻页那道闸。
+                page_state.loading = false;
+                match outcome {
+                    Ok(batch) => {
+                        // 先把"已加载多少"与两个判据算出来再搬 `batch` 的字段：
+                        // `has_more`/`total_known` 借的是整个 `batch`，而下面要把 `batch.items` 搬走
+                        // （部分移动之后再 `&batch` 就是 E0382）。
+                        let loaded = if batch.page <= 1 {
+                            batch.items.len() as u64
+                        } else {
+                            page_state.items.len() as u64 + batch.items.len() as u64
+                        };
+                        let more = batch.has_more(loaded);
+                        // 存**校验过的**总数：比已加载还小的那个数不是条目数，界面就不该拿它说"共 N 集"。
+                        let known_total = batch.total_known(loaded);
+                        let title = batch.title;
+                        let desc = batch.desc;
+    
+                        // 名字以接口为准：合集会给 `meta.name`，系列那一路是我们自己带进去的。
+                        if !title.is_empty() {
+                            page_state.title = title.into();
+                        }
+                        if !desc.is_empty() {
+                            page_state.desc = desc.into();
+                        }
+                        page_state.total = known_total;
+                        page_state.page = batch.page;
+                        if batch.page <= 1 {
+                            page_state.items = batch.items;
+                        } else {
+                            page_state.items.extend(batch.items);
+                        }
+                        page_state.has_more = more;
+                        page_state.note = if page_state.items.is_empty() {
+                            format!("这个{}里还没有能看的稿件", page_state.kind.label()).into()
+                        } else {
+                            "".into()
+                        };
                     }
-                    if !desc.is_empty() {
-                        page_state.desc = desc.into();
+                    Err(message) => {
+                        // 只有第一页失败才清空：翻下一页失败时把已加载的留着，比抹成空白有用。
+                        if page == 1 {
+                            page_state.items.clear();
+                        }
+                        page_state.note = format!("取内容失败：{message}").into();
                     }
-                    page_state.total = known_total;
-                    page_state.page = batch.page;
-                    if batch.page <= 1 {
-                        page_state.items = batch.items;
-                    } else {
-                        page_state.items.extend(batch.items);
-                    }
-                    page_state.has_more = more;
-                    page_state.note = if page_state.items.is_empty() {
-                        format!("这个{}里还没有能看的稿件", page_state.kind.label()).into()
-                    } else {
-                        "".into()
-                    };
-                }
-                Err(message) => {
-                    // 只有第一页失败才清空：翻下一页失败时把已加载的留着，比抹成空白有用。
-                    if page == 1 {
-                        page_state.items.clear();
-                    }
-                    page_state.note = format!("取内容失败：{message}").into();
                 }
             },
         );
@@ -242,6 +250,13 @@ impl EventEmitter<OpenVideo> for CollectionContentPage {}
 impl Render for CollectionContentPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.scroll.watch(window, cx.entity_id());
+        // 滚到底就自动接下一页（P13）。这一页的"还有下一页"是我们按已加载条数算的
+        // （接口不给布尔），判据四条见 [`should_auto_page`]。
+        if should_auto_page(&self.scroll, self.has_more, self.items.len(), self.loading) {
+            let next = self.page + 1;
+            log::debug!("合集内容页：滚到底，自动取第 {next} 页");
+            self.request(next, cx);
+        }
 
         let mut lines: Vec<AnyElement> = Vec::new();
         if !self.desc.is_empty() {

@@ -6,22 +6,33 @@
 
 #[cfg(test)]
 mod stream_select_tests {
-    use crate::api::stream_select::{is_quality_allowed, MAX_QUALITY_ID};
+    use crate::api::stream_select::{DEFAULT_QUALITY_CAP, is_quality_allowed, pick_video};
+    use crate::store::config::CodecPreference;
+    use bpi_rs::video::videostream_url::DashStream;
 
     #[test]
     fn quality_up_to_full_hd_is_allowed() {
         // 16/32/64/80 = 360P/480P/720P/1080P，112/116 = 1080P+ / 1080P60。
-        // 封顶值现在由调用方给（它来自 config.json 的 max_quality），测试里给默认的 116。
+        // 封顶值由调用方给（它来自 config.json 的 max_quality），测试里给默认的 116。
         for id in [16u64, 32, 64, 80, 112, 116] {
-            assert!(is_quality_allowed(id, MAX_QUALITY_ID), "{id} 应当在封顶范围内");
+            assert!(
+                is_quality_allowed(id, DEFAULT_QUALITY_CAP),
+                "{id} 应当在封顶范围内"
+            );
         }
     }
 
     #[test]
-    fn ultra_hd_tiers_are_rejected() {
-        // 120=4K, 125=HDR, 126=Dolby Vision, 127=8K：目标机硬解不到，默认排除。
+    fn tiers_above_the_cap_are_rejected() {
+        // 120=4K, 125=HDR, 126=Dolby Vision, 127=8K：**默认**封顶之外（目标机硬解不到）。
+        // P13 起用户能在设置页把上限调到 127，所以这里测的是"给定 cap 时 behaved"，
+        // 而不是"这些档永远不许"。
         for id in [120u64, 125, 126, 127] {
-            assert!(!is_quality_allowed(id, MAX_QUALITY_ID), "{id} 应当被封顶排除");
+            assert!(
+                !is_quality_allowed(id, DEFAULT_QUALITY_CAP),
+                "{id} 应当被默认封顶排除"
+            );
+            assert!(is_quality_allowed(id, 127), "{id} 应当在 8K 封顶以内");
         }
         // 把封顶调低一档，116 自己也要被排除——这条证明"参数真的生效"而不是恒等于常量。
         assert!(!is_quality_allowed(116, 64));
@@ -30,7 +41,78 @@ mod stream_select_tests {
 
     #[test]
     fn cap_constant_matches_1080p60() {
-        assert_eq!(MAX_QUALITY_ID, 116);
+        assert_eq!(DEFAULT_QUALITY_CAP, 116);
+    }
+
+    /// 造一条流：选择只用得到 `id`/`codecs`/`bandwidth` 三个键，其余字段一律给"没有"。
+    /// （`DashStream` 的字段都是公开的、没有 `Default`，所以这里逐个写全——
+    /// 以后库里加字段会在这里编译失败，那是**好事**：说明选择逻辑可能也要跟着看一眼。）
+    fn stream(id: u64, codecs: &str, bandwidth: u64) -> DashStream {
+        DashStream {
+            id,
+            base_url: String::new(),
+            backup_url: Vec::new(),
+            bandwidth,
+            mime_type: "video/mp4".to_string(),
+            codecs: codecs.to_string(),
+            width: None,
+            height: None,
+            frame_rate: None,
+            sar: None,
+            start_with_sap: None,
+            segment_base: None,
+            md5: None,
+            size: None,
+            db_type: None,
+            r#type: None,
+            stream_name: None,
+            orientation: None,
+        }
+    }
+
+    #[test]
+    fn default_preference_still_prefers_hevc_over_av1_and_avc() {
+        // 默认偏好 HEVC：同画质档里 HEVC > AV1 > AVC（省带宽优先）。
+        let streams = vec![
+            stream(80, "avc1.64.00", 9_000_000),
+            stream(80, "av01.0.08M.08", 8_000_000),
+            stream(80, "hev1.1.6.L150.90", 7_000_000),
+        ];
+        let picked = pick_video(&streams, 116, CodecPreference::Hevc).expect("应当选出一路");
+        assert!(picked.codecs.starts_with("hev1"), "{}", picked.codecs);
+    }
+
+    #[test]
+    fn explicit_codec_preference_beats_the_default_order() {
+        // 他选了 AV1 就该给 AV1，哪怕同档里 HEVC 更省带宽——
+        // 否则界面上写着 AV1、实际播的是 HEVC，就是假设置。
+        let streams = vec![
+            stream(80, "hev1.1.6.L150.90", 9_000_000),
+            stream(80, "av01.0.08M.08", 7_000_000),
+        ];
+        let av1 = pick_video(&streams, 116, CodecPreference::Av1).expect("应当选出一路");
+        assert!(av1.codecs.starts_with("av01"), "{}", av1.codecs);
+        let avc_missing = pick_video(&streams, 116, CodecPreference::Avc).expect("应当选出一路");
+        // 这一档没有 avc1：偏好那一类不存在时**退回默认顺序**（HEVC 在前），不能选不出来。
+        assert!(avc_missing.codecs.starts_with("hev1"), "{}", avc_missing.codecs);
+    }
+
+    #[test]
+    fn quality_still_outranks_codec_preference() {
+        // 编码偏好只在**同一画质档内**决定谁先；不许为了 HEVC 放弃更高的档。
+        let streams = vec![
+            stream(116, "avc1.64.00", 5_000_000),
+            stream(80, "hev1.1.6.L150.90", 9_000_000),
+        ];
+        let picked = pick_video(&streams, 116, CodecPreference::Hevc).expect("应当选出一路");
+        assert_eq!(picked.id, 116);
+        assert!(picked.codecs.starts_with("avc1"), "{}", picked.codecs);
+    }
+
+    #[test]
+    fn empty_candidates_have_no_pick() {
+        // 空列表不是错误，是"没有流可选"：由上层（`api::stream`）翻成一句给人看的话。
+        assert!(pick_video(&[], 116, CodecPreference::Hevc).is_none());
     }
 }
 
@@ -122,13 +204,100 @@ mod player_tests {
     }
 
     #[test]
-    fn mpv_is_resolved_from_the_run_directory_not_path() {
-        // 定稿：只认 `<exe 同目录>/mpv.exe`。PATH 那条路会先命中控制台版 mpv.com，
-        // 它再派生的 mpv.exe 不受我们的 kill 管。
+    fn fallback_location_is_still_the_run_directory() {
+        // 自动查找的最后一级兜底仍然是 `<exe 同目录>/mpv.exe`（他现在那份 publish/mpv.exe 还能用）。
         let dir = crate::app::exe_dir();
         let path = crate::player::mpv_path();
-        assert_eq!(path.file_name().and_then(|name| name.to_str()), Some("mpv.exe"));
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some(crate::player::exe_name())
+        );
         assert_eq!(path.parent(), Some(dir.as_path()));
+    }
+
+    #[test]
+    fn mpv_resolution_prefers_path_over_run_directory() {
+        // P13 的定稿顺序：设置里指定的 → PATH → 运行目录。用注入的 `exists` 判定，不碰真文件系统。
+        use std::path::{Path, PathBuf};
+        let dirs = vec![PathBuf::from("pathx")];
+        let exe = crate::player::exe_name();
+
+        // 现场一：PATH 里没有，运行目录里有 → 兜底那份。
+        let run = Path::new("run").join(exe);
+        let picked = crate::player::resolve_mpv("", &dirs, Path::new("run"), &|path: &Path| {
+            path == run.as_path()
+        });
+        assert_eq!(picked, Some(run), "运行目录那份该被当成兜底");
+
+        // 现场二：PATH 里有 → 用 PATH 那份（它排在运行目录之前）。
+        let from_path = Path::new("pathx").join(exe);
+        let picked = crate::player::resolve_mpv("", &dirs, Path::new("run"), &|path: &Path| {
+            path == from_path.as_path()
+        });
+        assert_eq!(picked, Some(from_path));
+    }
+
+    #[test]
+    fn mpv_lookup_only_asks_for_the_exe_never_the_console_launcher() {
+        // 第十八轮真机的坑：`PATHEXT` 把 `.COM` 排在 `.EXE` 前，按 shell 语义找会先命中
+        // `mpv.com`——那是个会再派生一个 mpv.exe 的控制台启动器，我们 kill 不到真正在放的那个。
+        // `resolve_mpv` 自己拼 `目录/mpv.exe` 去判存在，所以就算两种都在也只可能选到 exe。
+        use std::path::{Path, PathBuf};
+        let both = |path: &Path| -> bool {
+            let text = path.to_string_lossy().to_string();
+            text.ends_with("mpv.exe") || text.ends_with("mpv.com")
+        };
+        let picked = crate::player::resolve_mpv(
+            "",
+            &[PathBuf::from("pathx")],
+            Path::new("run"),
+            &both,
+        );
+        let picked = picked.expect("PATH 里那份该被选中");
+        assert!(
+            picked.to_string_lossy().ends_with(crate::player::exe_name()),
+            "{picked:?}"
+        );
+        assert!(
+            !picked.to_string_lossy().ends_with(".com"),
+            "绝不接受 mpv.com：{picked:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_mpv_path_wins_and_a_broken_one_falls_through() {
+        use std::path::{Path, PathBuf};
+        let good = Path::new("pathx").join(crate::player::exe_name());
+        // 显式路径存在 → 用它（哪怕 PATH 与运行目录也各有一份）。
+        let picked = crate::player::resolve_mpv(
+            good.to_str().unwrap_or_default(),
+            &[PathBuf::from("pathx")],
+            Path::new("run"),
+            &|path: &Path| path == good.as_path(),
+        );
+        assert_eq!(picked, Some(good.clone()));
+        // 显式路径读不到 → 继续往下找，并**不退化成"随便跑个什么"**。
+        let fell = crate::player::resolve_mpv(
+            "settings/没有这个文件.exe",
+            &[PathBuf::from("pathx")],
+            Path::new("run"),
+            &|path: &Path| path == good.as_path(),
+        );
+        assert_eq!(fell, Some(good));
+        // 三处都没有 → None，由上层给一句实话（设置页那行与起播失败的原因都读这个）。
+        let none = crate::player::resolve_mpv("", &[], Path::new("run"), &|_path: &Path| false);
+        assert_eq!(none, None);
+    }
+
+    #[test]
+    fn path_variable_splits_without_empty_entries() {
+        // `path_directories` 会把空段滤掉：空段在 shell 语义里等于"当前目录"，
+        // 那会让程序在用户的当前目录里找一个 mpv.exe——最坏的"随机执行"。
+        let joined = std::env::join_paths(["/opt/tools/bin", "", "/usr/bin"]).expect("拼接应当成功");
+        let dirs = crate::player::path_directories(&joined.to_string_lossy());
+        assert_eq!(dirs.len(), 2, "{dirs:?}");
+        assert!(dirs.iter().all(|one| !one.as_os_str().is_empty()));
+        assert!(crate::player::path_directories("").is_empty());
     }
 
     #[test]
@@ -261,35 +430,81 @@ mod search_format_tests {
 
 #[cfg(test)]
 mod config_tests {
-    use crate::api::stream_select::MAX_QUALITY_ID;
-    use crate::store::config::{Config, MIN_QUALITY_ID, clamp_quality, quality_name};
+    use crate::api::stream_select::DEFAULT_QUALITY_CAP;
+    use crate::store::config::{
+        clamp_quality, quality_name, CodecPreference, Config, MAX_QUALITY_ID, MIN_QUALITY_ID,
+        QUALITY_CHOICES, DEFAULT_QUALITY_ID,
+    };
 
     #[test]
     fn quality_cap_is_clamped_into_the_supported_range() {
-        // 用户手改 config.json 最容易写超：4K(120/127) 与 0 都必须收回来。
-        // 超上限会在目标机上掉软解丢帧（风险表第 14 条），0 则让整条起播路径请求一个不存在的档。
+        // P13 起上限不再是 116 那条硬红线，而是"接口里最高的档"（127=8K）。
+        // 0 仍然要收到下界：起播请求一个不存在的档会让整条路没法走。
         assert_eq!(clamp_quality(0), MIN_QUALITY_ID);
-        assert_eq!(clamp_quality(120), MAX_QUALITY_ID);
-        assert_eq!(clamp_quality(127), MAX_QUALITY_ID);
+        assert_eq!(clamp_quality(6), MIN_QUALITY_ID);
+        assert_eq!(clamp_quality(116), 116);
+        // 4K 现在是**允许**的（他要能在设置里选到），所以不再被收回。
+        assert_eq!(clamp_quality(120), 120);
+        assert_eq!(clamp_quality(125), 125);
+        assert_eq!(clamp_quality(9999), MAX_QUALITY_ID);
         assert_eq!(clamp_quality(MAX_QUALITY_ID), MAX_QUALITY_ID);
-        assert_eq!(clamp_quality(64), 64);
     }
 
     #[test]
-    fn missing_field_falls_back_to_default_cap() {
-        // 新增字段一律带 `#[serde(default)]`，所以"只写了一半"的旧文件必须还能读。
+    fn default_is_the_device_friendly_cap() {
+        // 默认仍是 116：目标机（i5-6200U）能硬解到的最高档。
+        // 这条把"上限放宽"与"默认放宽"分开——前者是给他选的，后者是我们替他选的。
+        assert_eq!(DEFAULT_QUALITY_ID, DEFAULT_QUALITY_CAP);
         let empty = Config::from_json("{}").expect("空对象应当能读");
-        assert_eq!(empty.max_quality, MAX_QUALITY_ID);
-        let written = Config::from_json(r#"{"max_quality":80}"#).expect("80 应当能读");
-        assert_eq!(written.max_quality, 80);
-        // 写超的那份在解析时就收回，并留一条日志（不是静默改掉用户的值却不吭声）。
-        let over = Config::from_json(r#"{"max_quality":125}"#).expect("超范围也应当能读");
-        assert_eq!(over.max_quality, MAX_QUALITY_ID);
+        assert_eq!(empty.max_quality, DEFAULT_QUALITY_ID);
+        assert_eq!(empty.codec, CodecPreference::Hevc);
+        assert!(empty.mpv_path.is_empty(), "空 = 自动找 PATH/运行目录");
+        assert!(!empty.debug_log, "调试模式默认关（不产生 debug.log）");
+    }
+
+    #[test]
+    fn quality_choices_are_the_tiers_bilibili_actually_has() {
+        // 他列了"1080P、1080P 60帧、2K、4K"，但 B 站的 qn 里**没有 2K** 这一档，
+        // 所以设置页只给这三个真值。这里钉住"不造名字"这条口径。
+        assert!(
+            !QUALITY_CHOICES.iter().any(|(_, label)| label.contains("2K")),
+            "B 站没有 2K 档，界面上不许出现假档位"
+        );
+        assert_eq!(QUALITY_CHOICES.len(), 3);
+        for (qn, _) in QUALITY_CHOICES {
+            assert!(!quality_name(qn).contains("未知"), "档位 {qn} 应当有名字");
+        }
+    }
+
+    #[test]
+    fn codec_preference_serializes_lowercase() {
+        // 落盘格式定死：手改文件的人写 "hevc"/"avc"/"av1" 就该读得出来。
+        let written = serde_json::to_string(&CodecPreference::Av1).expect("序列化应当成功");
+        assert_eq!(written, "\"av1\"");
+        let parsed: CodecPreference = serde_json::from_str("\"avc\"").expect("小写应当能读");
+        assert_eq!(parsed, CodecPreference::Avc);
+        // 认不出的写法不许静默变成默认值：这条要它读**失败**
+        // （字段整个缺失才走 `#[serde(default)]`，写错值属于用户能看见的问题）。
+        assert!(serde_json::from_str::<CodecPreference>("\"h266\"").is_err());
+    }
+
+    #[test]
+    fn written_config_roundtrips_all_four_settings() {
+        let config = Config {
+            max_quality: 120,
+            codec: CodecPreference::Av1,
+            mpv_path: "D:\\tools\\mpv.exe".to_string(),
+            debug_log: true,
+        };
+        let json = serde_json::to_string(&config).expect("序列化应当成功");
+        let back = Config::from_json(&json).expect("往返应当能读");
+        assert_eq!(back, config);
     }
 
     #[test]
     fn broken_config_text_is_not_a_panic() {
-        // 读不到就用默认值（`load_or_create` 会顺手写一份回去），这里只验"不炸、给 None"。
+        // 读不到就用默认值（`load_or_create` 会顺手写一份回去并强制开日志），
+        // 这里只验"不炸、给 None"。
         assert!(Config::from_json("not json").is_none());
         assert!(Config::from_json("").is_none());
     }
@@ -297,8 +512,10 @@ mod config_tests {
     #[test]
     fn quality_names_cover_the_tiers_we_allow() {
         // 设置页显示的是这一串，所以"认不出就不编名字"要钉住。
-        assert_eq!(quality_name(MAX_QUALITY_ID), "1080P 60帧（qn=116）");
+        assert_eq!(quality_name(DEFAULT_QUALITY_CAP), "1080P 60帧（qn=116）");
         assert_eq!(quality_name(64), "720P（qn=64）");
+        assert_eq!(quality_name(120), "4K 超清（qn=120）");
+        assert_eq!(quality_name(127), "8K 超高清（qn=127）");
         assert!(quality_name(99).contains("qn=99"));
     }
 }
@@ -1201,5 +1418,140 @@ mod season_tests {
         assert_eq!(brief.season_id, 0, "id 是字符串时当没有");
         assert_eq!(brief.ep_count, 0, "总数给成小数时当没有，界面那行就不说总数");
         assert_eq!(brief.sections[0].episodes[0].videos, 1, "分 P 数给成字符串时按单 P");
+    }
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use crate::api::probe::{
+        choose, describe, host_of, is_playable_status, ordered_urls, ProbeOutcome,
+    };
+
+    fn ok(url: &str, status: u16) -> (String, Result<u16, String>) {
+        (url.to_string(), Ok(status))
+    }
+
+    fn bad(url: &str, reason: &str) -> (String, Result<u16, String>) {
+        (url.to_string(), Err(reason.to_string()))
+    }
+
+    #[test]
+    fn candidates_put_the_primary_first_without_duplicates() {
+        // 主地址永远排第一；B 站偶尔把同一个域名同时写进 baseUrl 与 backupUrl，
+        // 空串也真的出现过（给空数组以外的空字符串），照原样探就是白跑一趟。
+        let backups = vec![
+            "https://a/x.m4s".to_string(),
+            String::new(),
+            "https://p/x.m4s".to_string(),
+        ];
+        let urls = ordered_urls("https://p/x.m4s", &backups);
+        assert_eq!(
+            urls,
+            vec!["https://p/x.m4s".to_string(), "https://a/x.m4s".to_string()]
+        );
+        // 没有备用域名时就只有主地址一条。
+        assert_eq!(ordered_urls("https://p/x.m4s", &[]), vec!["https://p/x.m4s"]);
+        // 主地址是空串（理论上不该发生，但接口给过空字段）：不占位，备用域名照常排。
+        assert_eq!(ordered_urls("", &backups).len(), 2, "{:?}", ordered_urls("", &backups));
+    }
+
+    #[test]
+    fn playable_statuses_are_two_and_three_hundred_range() {
+        assert!(is_playable_status(200));
+        // 有些 CDN 对 `Range: bytes=0-0` 直接回 200 而不是 206，那也是通。
+        assert!(is_playable_status(206));
+        assert!(is_playable_status(302));
+        // 403 是凭据/权限问题，416 是 Range 不被接受，5xx 是节点抽风：都不算能播。
+        for status in [400u16, 401, 403, 404, 416, 500, 503] {
+            assert!(!is_playable_status(status), "{status} 不该算通");
+        }
+    }
+
+    #[test]
+    fn choose_stops_at_the_first_playable_candidate() {
+        let results = vec![
+            ok("https://a/x.m4s", 403),
+            ok("https://b/x.m4s", 206),
+            ok("https://c/x.m4s", 200),
+        ];
+        let outcome = choose(&results);
+        assert_eq!(outcome.url.as_deref(), Some("https://b/x.m4s"));
+        // 探到能用就停：第三条根本没问，所以 `attempted` 是"用掉第几个"。
+        assert_eq!(outcome.attempted, 2);
+        assert_eq!(outcome.failures.len(), 1);
+        assert!(outcome.fell_back(), "换成第二个域名应当算换过");
+        // 那行话里带的是**主机名**（不是完整直链，里面有签名令牌）与状态码。
+        assert_eq!(outcome.failures[0], "a：HTTP 403", "{}", outcome.failures[0]);
+    }
+
+    #[test]
+    fn choose_reports_no_fallback_when_the_primary_works() {
+        let outcome = choose(&[ok("https://a/x.m4s", 200)]);
+        assert_eq!(outcome.attempted, 1);
+        assert!(!outcome.fell_back());
+        assert!(describe("视频", &outcome).is_empty(), "主地址就通就不该多打一行字");
+    }
+
+    #[test]
+    fn choose_keeps_trying_the_primary_when_every_candidate_fails() {
+        // 全不通 → `url` 是 None：调用方仍要把**主地址**交给 mpv（探测本身可能误判，
+        // 而 mpv 自己还有一次机会）。界面那行要说清"仍按主地址试一次"。
+        let results = vec![bad("https://a/x.m4s", "请求失败: timeout"), ok("https://b/x.m4s", 403)];
+        let outcome = choose(&results);
+        assert_eq!(outcome.url, None);
+        assert_eq!(outcome.attempted, 2);
+        let text = describe("视频", &outcome);
+        assert!(text.contains("仍按主地址"), "{text}");
+        assert!(text.contains("timeout"), "{text}");
+    }
+
+    #[test]
+    fn untouched_outcome_adds_no_noise() {
+        // durl 回退且没给备用域名时候选是空的：这时不该在界面上写"探测失败"。
+        let outcome = ProbeOutcome::untouched();
+        assert_eq!(outcome.attempted, 0);
+        assert!(describe("音频", &outcome).is_empty());
+        assert!(!outcome.fell_back());
+    }
+
+    #[test]
+    fn host_extraction_never_shows_the_signed_url() {
+        // 界面那行只写主机名：完整直链里是签名令牌（deadline/mid/gen），不该显示出来。
+        assert_eq!(
+            host_of("https://cn.example.cdn/bili/1.m4s?deadline=1&gen=abc"),
+            "cn.example.cdn"
+        );
+        assert_eq!(host_of("not a url"), "not a url", "认不出 scheme 就原样给出，不编一个空的");
+        assert_eq!(host_of("https://only.host"), "only.host");
+    }
+}
+
+#[cfg(test)]
+mod auto_page_tests {
+    use crate::ui::scroll::is_at_bottom;
+
+    // `offset` 是滚动句柄给的**负**偏移（0 = 顶部），`max` 是正的可用行程，两者符号不一样，
+    // 所以判"到底"要拿 `max - |offset|` 与提前量比。方向写反的症状是"停在半路就翻页"，
+    // 在真机上很容易被误认成"接口又给了一页重复内容"，所以这里钉住。
+    #[test]
+    fn bottom_detection_uses_absolute_offset() {
+        // 到底：行程 1000、已经滚了 1000。
+        assert!(is_at_bottom(-1000., 1000., 240.));
+        // 差 200 还没到底，但落在 240 的提前量里 → 触发（把等待藏在滚动里）。
+        assert!(is_at_bottom(-800., 1000., 240.));
+        // 离底还远：不许触发。
+        assert!(!is_at_bottom(-300., 1000., 240.));
+        // 顶部（offset=0）在长列表里当然不算到底。
+        assert!(!is_at_bottom(0., 1000., 240.));
+    }
+
+    #[test]
+    fn zero_travel_counts_as_bottom_by_definition() {
+        // 内容比视口短 = 零行程，按定义就是"在底部"。
+        // 这条**不是**"所以会自动翻页"：那一层由 `should_auto_page` 的 `scrollable()` 挡掉，
+        // 这里只是把纯函数的边界写清楚，免得以后有人以为它返回 false。
+        assert!(is_at_bottom(0., 0., 240.));
+        // 拖过头（偏移比行程还大）仍然算在底部，不会翻不回来。
+        assert!(is_at_bottom(-1200., 1000., 240.));
     }
 }

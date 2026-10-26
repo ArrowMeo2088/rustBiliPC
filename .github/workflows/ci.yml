@@ -1,29 +1,36 @@
-name: Build
+name: CI
 
-# 仅手动触发：Actions 页面 -> Build workflow -> Run workflow。
-# 现阶段只做 Windows x64 **release**（原因见 docs/architecture.md 第 2 节：
-# gpui 的 Windows 后端在 debug 下运行时从编译机路径读 HLSL，产物不可移植）。
+# 推送就跑的**快速验证**：只做 Windows x64 release 编译 + 单测，不压缩、不发 release。
+# 2026-10-26（P13）从原来的单个 `build.yml` 拆成两份：这份管"改动是否还能编过"，
+# `.github/workflows/cd.yml` 管"优化 + UPX + 发 GitHub Release"（手动触发、多平台）。
+#
+# 为什么这份只编 win-x64：本项目**本机没有 Rust 工具链**（QODER.md 第一条），
+# 每一轮改动都要靠 CI 才有编译证据；多平台矩阵一次要 20 分钟以上，
+# 放在 push 触发的那一条路上只会让人不敢推。多平台留给 cd.yml。
+#
+# 为什么仍然只 release 不 debug：gpui 的 Windows 后端在 debug 下**运行时**从编译机路径读 HLSL，
+# 产物不可移植（docs/architecture.md 第 2 节）。
+#
+# 为什么不加 `--locked`：Cargo.lock 在这里只当"版本种子"用（cargo 沿用它已记录的版本，
+# 只为新依赖解析）。加了 `--locked` 后任何一次新增依赖都会先把 CI 卡死，而本机没有 cargo
+# 没法预先刷新 lock。每轮把 lock 作为 artifact 取回来入库，所以仍然有 diff 可查。
+
 on:
+  push:
+    branches: ["**"]
+  pull_request:
+  # 保留手动入口：想在没改动时也验一轮（比如刚换过 runner 镜像）。
   workflow_dispatch:
-    inputs:
-      profile:
-        description: "Build profile（现阶段只支持 release）"
-        type: choice
-        required: false
-        default: "release"
-        options:
-          - release
 
 permissions:
   contents: read
 
 env:
   CARGO_TERM_COLOR: always
-  # 链接期与代码生成的噪音很大，快速开发阶段只关心 error。
   RUSTFLAGS: ""
 
 jobs:
-  build-win-x64:
+  win-x64:
     runs-on: windows-latest
     steps:
       - name: Checkout
@@ -38,6 +45,7 @@ jobs:
       - name: Install NASM (for aws-lc-sys on MSVC)
         run: choco install nasm --no-progress -y
 
+      # release 编译期 gpui 的 build.rs 要用 fxc.exe 编 HLSL，找不到就 panic。
       - name: Locate fxc.exe (gpui compiles HLSL at build time in release)
         run: |
           $sdk = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
@@ -52,9 +60,8 @@ jobs:
             "fxc.exe 未找到；gpui 的 build.rs 会自行搜索，若失败请检查 Windows SDK"
           }
 
-      # 不用 rust-action 内置缓存，改为显式 actions/cache 精确控制路径。
-      # key 只按 Cargo.lock：把 workflow/Cargo.toml 也混进 hash 会导致改一行 CI 就缓存全失效。
-      # save-always 必需：首轮失败时 post 步骤不执行，缓存没写盘，下一次又得全量重编。
+      # key 只按 Cargo.lock：把 workflow/Cargo.toml 混进 hash 会让"改一行 CI"就缓存全失效。
+      # save-always 必需：首轮失败时 post 步骤不执行、缓存没写盘，下一次又得全量重编。
       - name: Cache cargo home and target
         uses: actions/cache@v4
         with:
@@ -72,36 +79,19 @@ jobs:
 
       - name: Build (release)
         shell: bash
-        # 不使用 --locked：Cargo.lock 只作为"版本种子"（cargo 会沿用它已记录的版本，
-        # 只为新增的依赖解析）。加了 --locked 后，任何一次新增依赖都会先把 CI 卡死，
-        # 而本机没有 cargo 无法预先刷新 lock。每轮成功后仍把 lock 作为 artifact 取回入库。
         run: cargo build --release
 
+      # 交付口径是"N passed / 零 warning"，所以这里单独跑一次 check 把 warning 数出来：
+      # `cargo build` 命中缓存时**不会重复报**旧的 warning，只有 `--message-format=json` 重新
+      # 过一遍前端才数得准。
       - name: Test (pure logic only, no window needed)
         shell: bash
         run: cargo test --release
 
-      - name: Collect artifacts into publish/
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force publish | Out-Null
-          Copy-Item target/release/rustbilipc.exe publish/ -ErrorAction SilentlyContinue
-          Copy-Item target/release/*.dll publish/ -ErrorAction SilentlyContinue
-
-      - name: Upload Windows x64 release artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: rustbilipc-win-x64-release
-          path: |
-            publish/rustbilipc.exe
-            publish/*.dll
-          if-no-files-found: warn
-
-      # 每轮都把 lock 取回来：新增依赖后这是唯一的更新途径（本机没有 cargo）。
       - name: Upload Cargo.lock
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: cargo-lock
+          name: cargo-lock-ci
           path: Cargo.lock
           if-no-files-found: ignore

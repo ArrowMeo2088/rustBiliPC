@@ -9,8 +9,18 @@
 //!
 //! 与"个人中心页里那三份重复的 spawn 代码"（P2b 时期）的区别：那一页三路并发、
 //! 每路写各的槽位，样板化后调用点只剩"投请求 + 写哪个槽"，加新页面不用再抄 20 行。
+//!
+//! ## P13 起的第四条：`-101` 不用人管
+//!
+//! 错误是 `BpiError` 时先问一句 [`requires_login`](bpi_rs::BpiError::requires_login)，
+//! 是"要登录"那一类就交给 [`relogin`](super::relogin) 处置（清凭据 + 自动开扫码小窗）。
+//! 两步分开做：**判断**在 `await` 之后立刻做（那时还没有能开窗口的上下文），
+//! **处置**回到 `AsyncApp::update` 那一层做 —— `App::open_window` 会强制画一帧，
+//! 不能塞在某个实体的 `update` 里（第 4.11 节那条，`pages/windows.rs` 文件头写得更细）。
 
 use gpui_kit::*;
+
+use crate::pages::relogin;
 
 /// 起一路加载任务。`label` 只用于日志；`write` 决定结果写进哪个槽位。
 ///
@@ -29,7 +39,7 @@ pub fn spawn_into<V, T>(
 {
     cx.spawn(async move |this, cx| {
         let outcome = match join.await {
-            Ok(inner) => inner.map_err(|error| error.to_string()),
+            Ok(inner) => inner.map_err(|error| relogin::message(&error)),
             Err(join_error) => Err(crate::app::describe_join_error(join_error)),
         };
         log::debug!("页面加载：{label} 结果回到前台（请求 #{seq}）");
@@ -46,6 +56,8 @@ pub fn spawn_into<V, T>(
             write(view, outcome);
             cx.notify();
         });
+        // 处置放在实体更新之外那一层（见文件头第四条）。
+        relogin::flush(cx);
     })
     .detach();
 }

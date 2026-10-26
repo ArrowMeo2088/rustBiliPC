@@ -41,13 +41,20 @@
 //! 副作用是值里不能出现裸逗号——已对着现场凭据核过：四个 cookie 字段（含 222 字符的
 //! `SESSDATA`）都不含逗号与空格，所以拼起来不会被切坏。
 //!
-//! ## mpv 可执行文件的位置：运行同目录，不用 PATH
+//! ## mpv 可执行文件的位置：设置里能指，默认查 PATH（2026-10-26 P13 改）
 //!
-//! 定稿（2026-10-23）：**只认 `<exe 同目录>/mpv.exe`**。原因不是"找不到"，而是找到的是错的东西：
-//! PATH 上排第一的是 `mpv.com`（`PATHEXT` 把 `.COM` 排在 `.EXE` 前面），而控制台版 mpv 是个
-//! 会**再派生一个 mpv.exe** 的启动器——我们 `kill` 的是外层那个，真正的播放器不归我们管。
-//! 用户机器上那份还属于 mpv-lazy 懒人包（带 `umpv.conf` 的单实例启动器与 `portable_config`），
-//! 拿它当"我们的播放进程"更不可控。原版 mpv 放进运行目录后，进程树是我们自己的一条。
+//! 定稿顺序（`resolve_mpv`，纯函数、进单测）：**设置页指定的路径 → PATH 里的 `mpv.exe` → 运行目录的 `mpv.exe`**。
+//!
+//! 之前那一版是"只认 `<exe 同目录>/mpv.exe`，不查 PATH"。他这次要求"默认在 PATH，支持打开资源管理器选择"，
+//! 所以查 PATH 了——但**当年那个坑还在，用两条规则避开**：
+//! 1. 只找 **`mpv.exe`**，绝不接受 `mpv.com`。`PATHEXT` 把 `.COM` 排在 `.EXE` 前面，
+//!    用 shell 的 `where`/`which` 语义去解析会先命中 `mpv.com`，而那是个**会再派生一个 `mpv.exe`
+//!    的控制台启动器**：我们 `kill` 的只是外层那个，真正的播放器不归我们管（第十八轮真机实测）。
+//!    我们自己拼 `目录/mpv.exe` 去 `is_file()`，不经过 `PATHEXT`，所以不会拿到 `.com`。
+//! 2. 设置里那条路径**必须指向一个真实存在的文件**才算数；写了个不存在的.path 不会退化成"随便跑个什么"，
+//!    而是继续往下找，并把失败原因显示在设置页那一行（不静默）。
+//!
+//! 运行目录那一档仍然留着：他现在这台机器的 `publish/mpv.exe` 还能直接用，不用为了升级重新配。
 //!
 //! ## 参数必须写成 `--opt=value`，而且只给所有构建都存在的选项
 //!
@@ -81,17 +88,70 @@ pub const BILIBILI_REFERER: &str = "https://www.bilibili.com";
 pub const MPV_USER_AGENT: &str =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-/// mpv 可执行文件的约定位置：`<exe 同目录>/mpv.exe`。
-pub fn mpv_path() -> std::path::PathBuf {
-    crate::app::exe_dir().join("mpv.exe")
+/// 要找的文件名：Windows 是 `mpv.exe`，Linux 是 `mpv`。
+///
+/// **这里永远不带 `.com`**——见文件头那条：`mpv.com` 是会再派生 `mpv.exe` 的控制台启动器，
+/// 拿到它我们的 `kill` 就管不到真正播放的那个进程。
+pub const fn exe_name() -> &'static str {
+    if cfg!(windows) {
+        "mpv.exe"
+    } else {
+        "mpv"
+    }
 }
 
-/// mpv 是否就放在运行目录。
+/// 运行目录那一档的完整路径（设置页与日志里都拿它当"兜底位置"说给用户听）。
+pub fn mpv_path() -> std::path::PathBuf {
+    crate::app::exe_dir().join(exe_name())
+}
+
+/// 把 `PATH` 那个环境变量拆成目录列表（纯函数，为了能在单测里喂假值）。
+pub fn path_directories(path_var: &str) -> Vec<std::path::PathBuf> {
+    std::env::split_paths(path_var)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .collect()
+}
+
+/// 按定稿顺序挑一个可用的 mpv：**设置里的显式路径 → PATH 各目录 → 运行目录**。
 ///
-/// 找不到是常态（用户还没放），返回 `None` 让上层去提示该放哪，而不是直接失败。
+/// `exists` 是注入的判定（生产用 `Path::is_file`，单测用闭包），因为"存在"这件事本身
+/// 不适合写死在纯函数里。找不到返回 `None`，让上层去提示该放哪，而不是直接失败。
+pub fn resolve_mpv(
+    explicit: &str,
+    path_dirs: &[std::path::PathBuf],
+    exe_dir: &std::path::Path,
+    exists: &dyn Fn(&std::path::Path) -> bool,
+) -> Option<std::path::PathBuf> {
+    let explicit = explicit.trim();
+    if !explicit.is_empty() {
+        let candidate = std::path::PathBuf::from(explicit);
+        if exists(&candidate) {
+            return Some(candidate);
+        }
+        log::warn!("设置里写的 mpv 路径不可用，继续按 PATH/运行目录找: {explicit}");
+    }
+    for dir in path_dirs {
+        let candidate = dir.join(exe_name());
+        if exists(&candidate) {
+            return Some(candidate);
+        }
+    }
+    let fallback = exe_dir.join(exe_name());
+    exists(&fallback).then_some(fallback)
+}
+
+/// 按当前设置解析 mpv 的位置。
 pub fn find_mpv() -> Option<std::path::PathBuf> {
-    let path = mpv_path();
-    path.is_file().then_some(path)
+    let config = crate::app::config();
+    let path_var = std::env::var_os("PATH")
+        .map(|value| value.to_string_lossy().to_string())
+        .unwrap_or_default();
+    resolve_mpv(
+        &config.mpv_path,
+        &path_directories(&path_var),
+        &crate::app::exe_dir(),
+        &|path| path.is_file(),
+    )
 }
 
 /// 构造一次播放所需的 mpv 命令行参数（不含可执行文件名）。
@@ -153,7 +213,8 @@ pub fn launch(
 ) -> anyhow::Result<std::process::Child> {
     let exe = find_mpv().ok_or_else(|| {
         anyhow::anyhow!(
-            "运行目录里没有 mpv.exe（应放在 {}）",
+            "找不到 mpv：设置里没指定，PATH 里没有 `{}`，运行目录也没有（可在「设置 → MPV 播放器位置」里选，或放在 {}）",
+            exe_name(),
             mpv_path().display()
         )
     })?;

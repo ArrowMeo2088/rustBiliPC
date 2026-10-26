@@ -30,7 +30,7 @@ use gpui_kit::*;
 use crate::api::history::{self, HistoryCursor, HistoryItem};
 use crate::pages::{loading, matches_keyword, OpenVideo};
 use crate::ui::video_card::{self, VideoCardData};
-use crate::ui::scroll::DragScroll;
+use crate::ui::scroll::{should_auto_page, DragScroll};
 use crate::ui::{layout, palette};
 
 /// 一次取多少条历史。库里的 `ps` 只拒绝 0（`params.rs:136-143`），
@@ -50,6 +50,9 @@ pub struct HistoryPage {
     note: SharedString,
     seq: u32,
     loaded: bool,
+    /// 有没有在途的历史请求。自动连续翻页靠它挡"一帧连发五个下一页"（见
+    /// [`should_auto_page`](crate::ui::scroll::should_auto_page)），所以**开始置真、回来置假**。
+    loading: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -85,6 +88,7 @@ impl HistoryPage {
             note: "".into(),
             seq: 0,
             loaded: false,
+            loading: false,
             _subscriptions: subscriptions,
         }
     }
@@ -115,6 +119,7 @@ impl HistoryPage {
     /// 取一段历史。`after` 是 `None` 时替换列表，`Some` 时往后加一页。
     fn fetch(&mut self, after: Option<HistoryCursor>, cx: &mut Context<Self>) {
         self.loaded = true;
+        self.loading = true;
         self.seq += 1;
         let seq = self.seq;
         let resuming = after.is_some();
@@ -128,6 +133,7 @@ impl HistoryPage {
         let join = history::fetch_history(Arc::clone(&self.client), HISTORY_LIMIT, after);
         // `move`：这个闭包要跨 `await` 存活（`'static`），所以 `resuming` 必须搬进去而不是借。
         loading::spawn_into(cx, seq, "观看历史", join, |page| page.seq, move |page, outcome| {
+            page.loading = false;
             match outcome {
                 Ok(batch) => {
                     if !resuming {
@@ -231,6 +237,13 @@ impl Render for HistoryPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 每帧登记一次移动/抬起监听（`Window::on_mouse_event` 只覆盖下一帧，见 `ui/scroll.rs`）。
         self.scroll.watch(window, cx.entity_id());
+        // 滚到底就自动取下一页（P13 的"自动连续翻页"）。判据四条，分工写在
+        // [`should_auto_page`](crate::ui::scroll::should_auto_page)；那个"再加载"按钮仍然留着，
+        // 自动那一路万一没触发（比如窗口很高、一屏装完），手点还能走。
+        if should_auto_page(&self.scroll, self.cursor.is_some(), self.items.len(), self.loading) {
+            log::debug!("历史页：滚到底，自动取下一页");
+            self.load_more(cx);
+        }
         let summary = self.summary();
         let note = self.note.clone();
         let empty_hint = !note.is_empty() && self.shown().is_empty();

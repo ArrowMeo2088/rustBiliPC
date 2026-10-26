@@ -22,11 +22,12 @@
 //! ## 已知需要自己补的空白
 //!
 //! - `bpi_rs::session::Account` 只 derive 了 `Deserialize`，没有 `Serialize`，库也不落盘
-//!   → 落盘由 [`crate::store::auth`] 负责（运行同目录的 `auth.json`）。
+//!   → 落盘由 [`crate::store::auth`] 负责（`%APPDATA%/ArrowMeo/rustBiliPC/auth.json`）。
 //! - 视频链路的 `DashInfo` 上**没有** `best_video()`（那个助手在 `models::stream::VideoStreamData`
 //!   上，属于番剧/课程响应），所以码流选择见 [`stream_select`]。
 //! - bpi-rs 不外发它自己用的请求头 → mpv 需要的 Referer/UA 常量在 [`crate::player`]，
-//!   下载需要的同一套在 [`download`]。
+//!   下载与地址探测需要的同一套在 [`download`] / [`probe`]（三处必须是同一组值，
+//!   否则会出现"我们探到 403、mpv 却能播"这种对不上的结论）。
 //! - bpi-rs **没有任何下载助手**：它的每个接口都是 `response.bytes().await`（整个响应进内存）。
 //!   一部片子不能这么读，所以 [`download`] 走 gpui 的 `HttpClient`（`App::http_client()`，
 //!   我们在 `main.rs` 里装的那个 reqwest 客户端），把响应体当 `AsyncRead` 一块一块搬到磁盘。
@@ -40,6 +41,7 @@ pub mod history;
 pub mod home;
 pub mod login;
 pub mod profile;
+pub mod probe;
 pub mod search;
 pub mod space;
 pub mod stream;

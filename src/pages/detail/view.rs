@@ -68,10 +68,11 @@ use crate::api::detail::{
     self, PageInfo, SeasonSectionBrief, SubtitleBrief, VideoDetailInfo,
 };
 use crate::api::download;
+use crate::api::probe::{self, ProbeOutcome};
 use crate::api::stream::{self, StreamChoice};
 use crate::pages::download::DownloadQueue;
+use crate::pages::relogin;
 use crate::pages::{OpenUser, OpenVideo};
-use crate::store::auth::Auth;
 use crate::ui::scroll::DragScroll;
 use crate::ui::video_card::{self, VideoCardData};
 use crate::ui::{cover, layout, palette};
@@ -127,6 +128,8 @@ pub struct DetailPage {
     player: Option<std::process::Child>,
     /// 正在为哪个 cid、为了什么取地址；取回来时不是它就丢掉（用户可能又点了别的 P）。
     planning: Option<(u64, PlanPurpose)>,
+    /// 起播探测（`api::probe`）的序号：探测期间用户又点了一次播放/换了 P，旧结果作废。
+    probe_seq: u32,
     /// 外壳注入的下载队列：这一页只负责"把一次下载排进去"，列表在下载页看。
     queue: Entity<DownloadQueue>,
     /// 评论区当前这一页（None = 还没取到）。总数与页码都在里面，"还有下一页"由它自己算。
@@ -183,6 +186,7 @@ impl DetailPage {
             player_note: "".into(),
             player: None,
             planning: None,
+            probe_seq: 0,
             queue,
             season_section: 0,
             comment: None,
@@ -206,7 +210,7 @@ impl DetailPage {
         let join = detail::fetch_detail(Arc::clone(&self.client), self.bvid.to_string());
         cx.spawn(async move |this, cx| {
             let outcome = match join.await {
-                Ok(inner) => inner.map_err(|error| error.to_string()),
+                Ok(inner) => inner.map_err(|error| relogin::message(&error)),
                 Err(join_error) => Err(crate::app::describe_join_error(join_error)),
             };
             log::debug!("详情页：主体结果已回到前台（请求 #{seq}）");
@@ -253,6 +257,7 @@ impl DetailPage {
                     None => view.comment_note = "主体里没有可用的稿件号，取不了评论".into(),
                 }
             });
+            relogin::flush(cx);
         })
         .detach();
     }
@@ -263,7 +268,7 @@ impl DetailPage {
         let join = detail::fetch_subtitles(Arc::clone(&self.client), self.bvid.to_string(), cid);
         cx.spawn(async move |this, cx| {
             let outcome = match join.await {
-                Ok(inner) => inner.map_err(|error| error.to_string()),
+                Ok(inner) => inner.map_err(|error| relogin::message(&error)),
                 Err(join_error) => Err(crate::app::describe_join_error(join_error)),
             };
             log::debug!("详情页：字幕结果已回到前台（请求 #{seq}）");
@@ -288,6 +293,7 @@ impl DetailPage {
                 }
                 cx.notify();
             });
+            relogin::flush(cx);
         })
         .detach();
     }
@@ -305,7 +311,7 @@ impl DetailPage {
         let join = comments::fetch_comments(Arc::clone(&self.client), aid, page, sort);
         cx.spawn(async move |this, cx| {
             let outcome = match join.await {
-                Ok(inner) => inner.map_err(|error| error.to_string()),
+                Ok(inner) => inner.map_err(|error| relogin::message(&error)),
                 Err(join_error) => Err(crate::app::describe_join_error(join_error)),
             };
             log::debug!("详情页：评论结果已回到前台（#{seq}）");
@@ -335,6 +341,7 @@ impl DetailPage {
                 }
                 cx.notify();
             });
+            relogin::flush(cx);
         })
         .detach();
     }
@@ -457,6 +464,7 @@ impl DetailPage {
                 };
                 cx.notify();
             });
+            relogin::flush(cx);
         })
         .detach();
     }
@@ -499,7 +507,7 @@ impl DetailPage {
         let join = stream::fetch_streams(Arc::clone(&self.client), bvid, cid, qn);
         cx.spawn(async move |this, cx| {
             let outcome = match join.await {
-                Ok(inner) => inner.map_err(|error| error.to_string()),
+                Ok(inner) => inner.map_err(|error| relogin::message(&error)),
                 Err(join_error) => Err(crate::app::describe_join_error(join_error)),
             };
             log::debug!("详情页：播控地址已回到前台（cid={cid}）");
@@ -516,7 +524,7 @@ impl DetailPage {
                         let page = view.pages_of(plan.cid);
                         view.plan = Some(plan);
                         match purpose {
-                            PlanPurpose::Play => view.start_playback(),
+                            PlanPurpose::Play => view.start_playback(cx),
                             PlanPurpose::Download => {
                                 if let Some(page) = page {
                                     // `ask_destination` 会自己 spawn 等对话框，
@@ -535,6 +543,7 @@ impl DetailPage {
                 }
                 cx.notify();
             });
+            relogin::flush(cx);
         })
         .detach();
     }
@@ -553,9 +562,97 @@ impl DetailPage {
         self.ask_destination(plan, page, cx);
     }
 
-    /// 用已取到的地址拉起 mpv（独立窗口）。不 notify，调用方负责。
-    fn start_playback(&mut self) {
+    /// 用已取到的地址拉起 mpv（独立窗口）。
+    ///
+    /// **交给它之前先探一次地址**（P13）：主地址不通就按顺序换 `backupUrl`。
+    /// 为什么必须先探：mpv 内部用的地址我们看不到也换不了，"失败之后再换"这一路做不到，
+    /// 机制与口径见 [`api::probe`](crate::api::probe)。探测跑在 gpui 前台任务里，
+    /// 用的就是加载封面图那个 `HttpClient`（不引第二套 HTTP 栈）。
+    ///
+    /// 探测期间用户又点了播放或换了 P：`probe_seq` 变了，这一份结果直接丢掉。
+    fn start_playback(&mut self, cx: &mut Context<Self>) {
         let Some(plan) = self.plan.clone() else { return };
+        let http = cx.http_client();
+        let executor = cx.background_executor();
+        let headers = probe::cdn_headers();
+        let video_urls = probe::ordered_urls(&plan.video_url, &plan.backup_urls);
+        let audio_urls = plan
+            .audio_url
+            .as_ref()
+            .map(|url| probe::ordered_urls(url, &plan.audio_backup_urls));
+        self.probe_seq += 1;
+        let seq = self.probe_seq;
+        self.player_note = "探测 CDN 地址…".into();
+        cx.notify();
+
+        cx.spawn(async move |this, cx| {
+            let video = probe::probe_track(
+                Arc::clone(&http),
+                video_urls,
+                headers.clone(),
+                executor.clone(),
+            )
+            .await;
+            let audio = match audio_urls {
+                Some(urls) => Some(
+                    probe::probe_track(Arc::clone(&http), urls, headers.clone(), executor.clone())
+                        .await,
+                ),
+                None => None,
+            };
+            log::debug!(
+                "详情页：CDN 探测完成 视频={} 音频={:?}",
+                video.attempted,
+                audio.as_ref().map(|one| one.attempted)
+            );
+            let Some(view) = this.upgrade() else { return };
+            view.update(cx, |view, cx| {
+                if view.probe_seq != seq {
+                    log::debug!("详情页：探测结果已过时（用户又点了一次），丢弃");
+                    return;
+                }
+                view.launch(plan, headers, video, audio);
+                cx.notify();
+            });
+            relogin::flush(cx);
+        })
+        .detach();
+    }
+
+    /// 地址定了，真正拉进程。不 notify，调用方负责。
+    ///
+    /// `video`/`audio` 是探测结果：探到可用地址就用它，**全不通就退回计划里的主地址**
+    /// （理由见 [`probe`] 文件头最后一条：探测本身可能误判，不能因为它彻底不给播）。
+    /// 探测换来的每一句说明都拼在提示最前面——用户要能看出"这次播的是备用域名"。
+    fn launch(
+        &mut self,
+        plan: StreamChoice,
+        headers: Vec<(String, String)>,
+        video: ProbeOutcome,
+        audio: Option<ProbeOutcome>,
+    ) {
+        let video_url = video.url.clone().unwrap_or_else(|| plan.video_url.clone());
+        let audio_url = match (plan.audio_url.clone(), audio.as_ref()) {
+            (Some(primary), Some(outcome)) => outcome.url.clone().unwrap_or(primary),
+            (primary, _) => primary,
+        };
+        let mut notes: Vec<String> = Vec::new();
+        for (label, outcome) in [
+            ("视频", Some(video)),
+            ("音频", audio),
+        ] {
+            if let Some(one) = outcome {
+                let text = probe::describe(label, &one);
+                if !text.is_empty() {
+                    notes.push(text);
+                }
+            }
+        }
+        let prefix = if notes.is_empty() {
+            String::new()
+        } else {
+            format!("{}。", notes.join("；"))
+        };
 
         // 上一次也是我们拉起的实例：先收掉，否则点几次就堆几个窗口。
         if let Some(mut previous) = self.player.take() {
@@ -564,13 +661,13 @@ impl DetailPage {
         }
 
         // 1080P/高码率的 m4s 直链要校验登录 cookie；bpi-rs 不把它的 cookie jar 交出来，
-        // 所以由我们从凭据（运行同目录的 auth.json）里拼一条，和 Referer/UA 一起给 mpv。
-        let extra_headers = match Auth::load() {
-            Some(auth) => vec![format!("Cookie: {}", auth.cookie_header())],
-            None => Vec::new(),
-        };
+        // 所以由我们从凭据里拼，和 Referer/UA 一起给 mpv（探测用的就是这一组头，两边口径一致）。
+        let extra_headers: Vec<String> = headers
+            .iter()
+            .map(|(name, value)| format!("{name}: {value}"))
+            .collect();
 
-        match crate::player::launch(&plan.video_url, plan.audio_url.as_deref(), &extra_headers) {
+        match crate::player::launch(&video_url, audio_url.as_deref(), &extra_headers) {
             Ok(child) => {
                 let pid = child.id();
                 self.player = Some(child);
@@ -580,13 +677,13 @@ impl DetailPage {
                     (false, _) => "durl 单文件",
                 };
                 self.player_note = format!(
-                    "已交给 mpv（pid {pid}）：{} · {} · {}。暂停/进度/字幕都在播放窗口里操作。",
+                    "{prefix}已交给 mpv（pid {pid}）：{} · {} · {}。暂停/进度/字幕都在播放窗口里操作。",
                     plan.quality_label, plan.codecs, track
                 )
                 .into();
             }
             Err(error) => {
-                self.player_note = format!("起播失败：{error}").into();
+                self.player_note = format!("{prefix}起播失败：{error}").into();
             }
         }
     }

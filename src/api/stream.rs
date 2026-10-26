@@ -11,9 +11,11 @@
 //!
 //! `16 | 2048` = DASH + AV1。**没有单独的 HEVC 位**：开了 DASH 之后 `dash.video[]` 里
 //! HEVC/AVC/AV1 一起给，靠 `codecs` 区分（`docs/api-notes.md` 第 5 节）。
-//! 4K/HDR/杜比那几位（128/64/256/512/1024）不开：目标机 i5-6200U 硬解不到，
-//! 而且 `.fourk(false)` 与请求 `qn`（[`request_qn`]，值来自 `config.json` 的 `max_quality`，
-//! 默认与硬上限 116=1080P60）一起把画质封在封顶档以内。
+//! 4K/HDR/杜比那几位（128/64/256/512/1024）里，**只有 4K 这一位跟着设置走**：
+//! `.fourk(封顶 >= 120)`（P13 起设置页能选 4K）。HDR(125)/杜比(126)/8K(127) 仍然不开——
+//! 目标机解不动，而且那三档在 B 站的 `support_formats` 里也不是靠 `fourk` 一位放出来的。
+//! 请求 `qn`（[`request_qn`]，值来自 `config.json` 的 `max_quality`）与 `.fourk` 一起
+//! 决定拿到的流在不在封顶以内；编码优先级由 [`preferred_codec`] 决定（同档内谁先）。
 //!
 //! ## 域名
 //!
@@ -37,14 +39,19 @@ use super::stream_select;
 /// 请求位掩码：DASH + AV1。
 const FNVAL_DASH_AV1: u64 = 16 | 2048;
 
-/// 起播时想要的画质档：**读进程级设置**（运行目录 `config.json` 的 `max_quality`，
-/// 默认与硬上限都是 [`stream_select::MAX_QUALITY_ID`]）。
+/// 起播时想要的画质档：**读进程级设置**（`config.json` 的 `max_quality`，
+/// 默认 116=1080P60，P13 起用户能在设置页选到 4K）。
 ///
 /// 页面不需要知道 `stream_select` 与 config 的存在（分层规则），起播一律用这个函数；
 /// 它同时也是选流的封顶值——见 [`fetch_streams`] 里把同一个数传给
 /// [`pick_video`](crate::api::stream_select::pick_video)，请求档与选择档不会各说一套。
 pub fn request_qn() -> u64 {
     crate::app::config().max_quality
+}
+
+/// 编码偏好（`config.json` 的 `codec`）。同画质档内谁优先由它决定。
+pub fn preferred_codec() -> crate::store::config::CodecPreference {
+    crate::app::config().codec
 }
 
 /// 一个可选清晰度。
@@ -197,11 +204,14 @@ pub fn fetch_streams(
     log::debug!("提交 playurl 到 API runtime：{bvid} cid={cid} 想要 qn={want_qn}");
     spawn_on_api_runtime(async move {
         let started = std::time::Instant::now();
-        let params = VideoPlayUrlParams::from_bvid(Bvid::new(bvid)?, Cid::new(cid)?)
+        let preferred = preferred_codec();
+        let params = VideoPlayUrlParams::from_bvid(Bvid::new(bvid.clone())?, Cid::new(cid)?)
             .quality(want_qn)
             .format_flags(FNVAL_DASH_AV1)
             .high_quality(true)
-            .fourk(false);
+            // 封顶在 4K 以上才把 4K 那位打开：没这个偏好时 B 站压根不给 120 的流，
+            // 打开了也不会让我们要到超出 `want_qn` 的东西（选流那一步仍然按 `want_qn` 夹）。
+            .fourk(want_qn >= crate::store::config::QUALITY_4K);
         let data = client.video().play_url(params).await?;
         let available = quality_options(
             &data.support_formats,
@@ -214,7 +224,8 @@ pub fn fetch_streams(
         if let Some(dash) = data.dash.as_ref() {
             // 封顶值就用本次请求的 `qn`：请求档与选择档是同一个数，
             // 不会出现"要 720P 却选了 1080P"或反过来的两套说法。
-            let video = stream_select::pick_video(&dash.video, want_qn).ok_or_else(|| {
+            // 编码偏好只影响**同一画质档内**选哪一路（HEVC/AVC/AV1），不会越档。
+            let video = stream_select::pick_video(&dash.video, want_qn, preferred).ok_or_else(|| {
                 BpiError::unsupported_response("playurl 的 dash.video 里没有封顶范围内的可用流")
             })?;
             let audio = stream_select::pick_audio(&dash.audio);

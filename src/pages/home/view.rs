@@ -25,6 +25,7 @@ use gpui_kit::component::button::{Button, ButtonVariants};
 use gpui_kit::*;
 
 use crate::api::home::{self, HomeHit};
+use crate::pages::relogin;
 use crate::pages::OpenVideo;
 use crate::ui::scroll::DragScroll;
 use crate::ui::{layout, palette};
@@ -69,6 +70,14 @@ impl HomePage {
         self.load(cx);
     }
 
+    /// 重取当前这一批（不推进批次号）。
+    ///
+    /// 给重登之后刷新用（[`MainShell::reload_after_relogin`](crate::pages::shell::MainShell)）：
+    /// 换一批是"用户想看新的"，重登是"刚才那批根本不该失败"，两者不能混用同一个入口。
+    pub fn reload(&mut self, cx: &mut Context<Self>) {
+        self.load(cx);
+    }
+
     /// 换一批：批次号 +1 后重新取。这一页没有"总页数"，所以永远可以往下换。
     fn next_batch(&mut self, cx: &mut Context<Self>) {
         self.page += 1;
@@ -88,7 +97,7 @@ impl HomePage {
         // 闭包里只捕获副本，不借用 self。
         cx.spawn(async move |this, cx| {
             let outcome = match join.await {
-                Ok(inner) => inner.map_err(|error| error.to_string()),
+                Ok(inner) => inner.map_err(|error| relogin::message(&error)),
                 Err(join_error) => Err(crate::app::describe_join_error(join_error)),
             };
             log::debug!("主页：推荐结果已回到前台（请求 #{seq}）");
@@ -121,6 +130,7 @@ impl HomePage {
                 }
                 cx.notify();
             });
+            relogin::flush(cx);
         })
         .detach();
     }

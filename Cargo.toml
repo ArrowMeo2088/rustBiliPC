@@ -71,9 +71,23 @@ reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.9" }
 unused_must_use = "deny"
 
 [profile.release]
-# 按定稿：现阶段不做 LTO、不 strip，优先编译速度与可排查性。
+# 按定稿：CI 每轮编译用的这一份**不做** LTO、不 strip，优先编译速度与可排查性
+# （本机没有工具链，一轮 3~8 分钟，红一轮要能马上看出是哪一行）。
 lto = "off"
 strip = false
 codegen-units = 16
 # 保留 PDB/调试符号：release 崩溃时 CI 日志里才看得出行号。
 debug = true
+
+[profile.release-dist]
+# 给 `.github/workflows/cd.yml`（发布流水线）用的这一份：继承 release，只把
+# "发给别人的东西"该有的优化加上。**日常编译不走这里**，否则每轮都要付 LTO 的时间。
+# 产物在 `target/<triple>/release-dist/`，UPX 压的就是它。
+inherits = "release"
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+debug = false
+# 不写 `panic = "abort"`：`app::describe_join_error` 靠 tokio 把任务 panic 变成
+# `JoinError` 再取 payload（GUI 宿主没有控制台，那条路是**唯一**能把 panic 说给人看的通道）。
+# abort 会让"某个请求任务崩了"直接变成整个客户端消失。

@@ -34,7 +34,7 @@ use gpui_kit::*;
 use crate::api::favorites::{self, FavItem};
 use crate::pages::{loading, OpenVideo};
 use crate::ui::video_card::{self, VideoCardData};
-use crate::ui::scroll::DragScroll;
+use crate::ui::scroll::{should_auto_page, DragScroll};
 use crate::ui::{layout, palette};
 
 /// 收藏夹内容页根视图。
@@ -58,6 +58,8 @@ pub struct FavFolderPage {
     note: SharedString,
     seq: u32,
     loaded: bool,
+    /// 有没有在途请求（自动连续翻页的第二道闸，见 [`should_auto_page`]）。
+    loading: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -101,6 +103,7 @@ impl FavFolderPage {
             note: "".into(),
             seq: 0,
             loaded: false,
+            loading: false,
             _subscriptions: subscriptions,
         }
     }
@@ -127,6 +130,7 @@ impl FavFolderPage {
     /// 取某一页。`page == 1` 是替换，大于 1 是往后**累加**。
     fn request(&mut self, page: u32, cx: &mut Context<Self>) {
         self.loaded = true;
+        self.loading = true;
         self.seq += 1;
         let seq = self.seq;
         self.note = if page == 1 {
@@ -149,40 +153,44 @@ impl FavFolderPage {
             join,
             |page_state| page_state.seq,
             // `move`：闭包要跨 await 存活（'static），所以 `page` 是搬进来而不是借。
-            move |page_state, outcome| match outcome {
-                Ok(batch) => {
-                    // 名字以接口为准：列表里那个可能是改名前抓的。
-                    if !batch.title.is_empty() {
-                        page_state.title = batch.title.into();
-                    }
-                    page_state.total = batch.total;
-                    page_state.skipped = batch.skipped;
-                    page_state.has_more = batch.has_more;
-                    page_state.page = batch.page;
-                    if batch.page == 1 {
-                        page_state.items = batch.items;
-                    } else {
-                        page_state.items.extend(batch.items);
-                    }
-                    page_state.note = if page_state.items.is_empty() {
-                        if page_state.submitted.is_empty() {
-                            "这个收藏夹还没有能播的内容".into()
-                        } else {
-                            "这个关键词在夹子里没搜到东西".into()
+            move |page_state, outcome| {
+                // 无论成功失败，这一路都到站了：放开自动翻页的那道闸。
+                page_state.loading = false;
+                match outcome {
+                    Ok(batch) => {
+                        // 名字以接口为准：列表里那个可能是改名前抓的。
+                        if !batch.title.is_empty() {
+                            page_state.title = batch.title.into();
                         }
-                    } else {
-                        "".into()
-                    };
-                }
-                Err(message) => {
-                    // 只有第一页失败才清空：翻第 N 页失败时，已经看到的第 1..N-1 页
-                    // 仍然有效，跟着一起清等于把用户的浏览记录砸了（历史页同一条口径）。
-                    if page == 1 {
-                        page_state.items.clear();
-                        page_state.total = 0;
-                        page_state.skipped = 0;
+                        page_state.total = batch.total;
+                        page_state.skipped = batch.skipped;
+                        page_state.has_more = batch.has_more;
+                        page_state.page = batch.page;
+                        if batch.page == 1 {
+                            page_state.items = batch.items;
+                        } else {
+                            page_state.items.extend(batch.items);
+                        }
+                        page_state.note = if page_state.items.is_empty() {
+                            if page_state.submitted.is_empty() {
+                                "这个收藏夹还没有能播的内容".into()
+                            } else {
+                                "这个关键词在夹子里没搜到东西".into()
+                            }
+                        } else {
+                            "".into()
+                        };
                     }
-                    page_state.note = format!("取收藏夹内容失败：{message}").into();
+                    Err(message) => {
+                        // 只有第一页失败才清空：翻第 N 页失败时，已经看到的第 1..N-1 页
+                        // 仍然有效，跟着一起清等于把用户的浏览记录砸了（历史页同一条口径）。
+                        if page == 1 {
+                            page_state.items.clear();
+                            page_state.total = 0;
+                            page_state.skipped = 0;
+                        }
+                        page_state.note = format!("取收藏夹内容失败：{message}").into();
+                    }
                 }
             },
         );
@@ -271,6 +279,13 @@ impl Render for FavFolderPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 每帧登记一次移动/抬起监听（`Window::on_mouse_event` 只覆盖下一帧，见 `ui/scroll.rs`）。
         self.scroll.watch(window, cx.entity_id());
+        // 滚到底就自动接下一页（P13）。翻页沿用**已提交**的关键词（`submitted`），
+        // 输入框里还没回车的那几个字不会被带进去。判据四条见 [`should_auto_page`]。
+        if should_auto_page(&self.scroll, self.has_more, self.items.len(), self.loading) {
+            let next = self.page + 1;
+            log::debug!("收藏夹内容页：滚到底，自动取第 {next} 页");
+            self.request(next, cx);
+        }
         let summary = self.summary();
         let title = self.title.clone();
         let note = self.note.clone();

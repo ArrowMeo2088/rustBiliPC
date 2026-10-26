@@ -41,9 +41,10 @@ use crate::api::space::{
     self, SpacePost, SpaceProfile, SpaceSection, SpaceVideo, VideoFilter, VideoOrder,
     VIDEO_PAGE_SIZE,
 };
+use crate::pages::relogin;
 use crate::pages::{OpenCollection, OpenUser, OpenVideo};
 use crate::ui::video_card::{self, VideoCardData};
-use crate::ui::scroll::DragScroll;
+use crate::ui::scroll::{should_auto_page, DragScroll};
 use crate::ui::{layout, palette};
 
 /// 用户空间页根视图。
@@ -75,6 +76,8 @@ pub struct UserSpacePage {
     post_offset: SharedString,
     post_page: u32,
     post_has_more: bool,
+    /// 图文那一格有没有在途请求（自动连续翻页的第二道闸，见 [`should_auto_page`]）。
+    post_loading: bool,
     post_note: SharedString,
     post_seq: u32,
     post_loaded: bool,
@@ -88,6 +91,8 @@ pub struct UserSpacePage {
     collections: Vec<CollectionBrief>,
     collection_page: u64,
     collection_has_more: bool,
+    /// 合集那一格有没有在途请求（同 `post_loading` 那条）。
+    collection_loading: bool,
     collection_note: SharedString,
     collection_seq: u32,
     collection_loaded: bool,
@@ -118,6 +123,7 @@ impl UserSpacePage {
             post_offset: "".into(),
             post_page: 0,
             post_has_more: false,
+            post_loading: false,
             post_note: "".into(),
             post_seq: 0,
             post_loaded: false,
@@ -128,6 +134,7 @@ impl UserSpacePage {
             collections: Vec::new(),
             collection_page: 0,
             collection_has_more: false,
+            collection_loading: false,
             collection_note: "".into(),
             collection_seq: 0,
             collection_loaded: false,
@@ -177,7 +184,7 @@ impl UserSpacePage {
         let join = space::fetch_profile(Arc::clone(&self.client), self.mid);
         cx.spawn(async move |this, cx| {
             let outcome = match join.await {
-                Ok(inner) => inner.map_err(|error| error.to_string()),
+                Ok(inner) => inner.map_err(|error| relogin::message(&error)),
                 Err(join_error) => Err(crate::app::describe_join_error(join_error)),
             };
             let Some(view) = this.upgrade() else { return };
@@ -193,6 +200,7 @@ impl UserSpacePage {
                 }
                 cx.notify();
             });
+            relogin::flush(cx);
         })
         .detach();
     }
@@ -215,7 +223,7 @@ impl UserSpacePage {
         );
         cx.spawn(async move |this, cx| {
             let outcome = match join.await {
-                Ok(inner) => inner.map_err(|error| error.to_string()),
+                Ok(inner) => inner.map_err(|error| relogin::message(&error)),
                 Err(join_error) => Err(crate::app::describe_join_error(join_error)),
             };
             let Some(view) = this.upgrade() else { return };
@@ -242,6 +250,7 @@ impl UserSpacePage {
                 }
                 cx.notify();
             });
+            relogin::flush(cx);
         })
         .detach();
     }
@@ -249,6 +258,7 @@ impl UserSpacePage {
     /// 图文：**追加**下一页（游标只能往前走，没有"上一页"）。
     fn load_posts(&mut self, cx: &mut Context<Self>) {
         self.post_loaded = true;
+        self.post_loading = true;
         self.post_seq += 1;
         let seq = self.post_seq;
         let next_page = self.post_page + 1;
@@ -259,7 +269,7 @@ impl UserSpacePage {
         let join = space::fetch_posts(Arc::clone(&self.client), self.mid, next_page, offset);
         cx.spawn(async move |this, cx| {
             let outcome = match join.await {
-                Ok(inner) => inner.map_err(|error| error.to_string()),
+                Ok(inner) => inner.map_err(|error| relogin::message(&error)),
                 Err(join_error) => Err(crate::app::describe_join_error(join_error)),
             };
             let Some(view) = this.upgrade() else { return };
@@ -267,6 +277,8 @@ impl UserSpacePage {
                 if view.post_seq != seq {
                     return;
                 }
+                // 到站了（这一路只有自己那次算数）：放开自动翻页那道闸。
+                view.post_loading = false;
                 match outcome {
                     Ok((items, has_more, offset)) => {
                         view.post_page = next_page;
@@ -283,6 +295,7 @@ impl UserSpacePage {
                 }
                 cx.notify();
             });
+            relogin::flush(cx);
         })
         .detach();
     }
@@ -297,7 +310,7 @@ impl UserSpacePage {
         let join = favorites::fetch_folders(Arc::clone(&self.client), self.mid);
         cx.spawn(async move |this, cx| {
             let outcome = match join.await {
-                Ok(inner) => inner.map_err(|error| error.to_string()),
+                Ok(inner) => inner.map_err(|error| relogin::message(&error)),
                 Err(join_error) => Err(crate::app::describe_join_error(join_error)),
             };
             let Some(view) = this.upgrade() else { return };
@@ -320,6 +333,7 @@ impl UserSpacePage {
                 }
                 cx.notify();
             });
+            relogin::flush(cx);
         })
         .detach();
     }
@@ -331,6 +345,7 @@ impl UserSpacePage {
     /// （接口那个 `page.total` 的语义没文档，我们不显示它、也不拿它当"翻完了"的依据）。
     fn load_collections(&mut self, page: u64, cx: &mut Context<Self>) {
         self.collection_loaded = true;
+        self.collection_loading = true;
         self.collection_seq += 1;
         let seq = self.collection_seq;
         self.collection_note = if page == 1 {
@@ -348,27 +363,31 @@ impl UserSpacePage {
             join,
             |view| view.collection_seq,
             // `move` 不能省：闭包要跨 `await` 活下来（`'static`），而它要读外面那个栈上的 `page`。
-            move |view, outcome| match outcome {
-                Ok(list) => {
-                    view.collection_page = list.page;
-                    view.collection_has_more = list.has_more;
-                    if list.page <= 1 {
-                        view.collections = list.items;
-                    } else {
-                        view.collections.extend(list.items);
+            move |view, outcome| {
+                // 到站了：放开自动翻页那道闸。
+                view.collection_loading = false;
+                match outcome {
+                    Ok(list) => {
+                        view.collection_page = list.page;
+                        view.collection_has_more = list.has_more;
+                        if list.page <= 1 {
+                            view.collections = list.items;
+                        } else {
+                            view.collections.extend(list.items);
+                        }
+                        view.collection_note = if view.collections.is_empty() {
+                            "TA 没有公开的合集或系列".into()
+                        } else {
+                            "".into()
+                        };
                     }
-                    view.collection_note = if view.collections.is_empty() {
-                        "TA 没有公开的合集或系列".into()
-                    } else {
-                        "".into()
-                    };
-                }
-                Err(message) => {
-                    // 只有第一页失败才清空：翻下一页失败时把已加载的留着（同收藏夹内容那一页的口径）。
-                    if page == 1 {
-                        view.collections.clear();
+                    Err(message) => {
+                        // 只有第一页失败才清空：翻下一页失败时把已加载的留着（同收藏夹内容那一页的口径）。
+                        if page == 1 {
+                            view.collections.clear();
+                        }
+                        view.collection_note = format!("取合集与系列失败：{message}").into();
                     }
-                    view.collection_note = format!("取合集与系列失败：{message}").into();
                 }
             },
         );
@@ -858,6 +877,31 @@ impl Render for UserSpacePage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 每帧登记一次移动/抬起监听（`Window::on_mouse_event` 只覆盖下一帧，见 `ui/scroll.rs`）。
         self.scroll.watch(window, cx.entity_id());
+        // 滚到底自动接下一页（P13）。这一页只有**追加式**那两格要自动翻：
+        // 图文（游标只能往前）与合集与系列（页码累加）。
+        // 投稿那一格是"整屏换一页"（有筛选/排序与 上一页/下一页），自动续页要先改成追加模式，
+        // 那是另一件事，这一版不动它 —— 按钮还在，手点照旧。
+        match self.section {
+            SpaceSection::Posts => {
+                if should_auto_page(&self.scroll, self.post_has_more, self.posts.len(), self.post_loading) {
+                    log::debug!("空间页：图文滚到底，自动接下一页");
+                    self.load_posts(cx);
+                }
+            }
+            SpaceSection::Collections => {
+                if should_auto_page(
+                    &self.scroll,
+                    self.collection_has_more,
+                    self.collections.len(),
+                    self.collection_loading,
+                ) {
+                    let next = self.collection_page + 1;
+                    log::debug!("空间页：合集滚到底，自动取第 {next} 页");
+                    self.load_collections(next, cx);
+                }
+            }
+            SpaceSection::Videos | SpaceSection::Folders => {}
+        }
         let controls = match self.section {
             SpaceSection::Videos => div()
                 .flex()

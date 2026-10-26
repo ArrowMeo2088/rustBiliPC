@@ -90,11 +90,16 @@ pub fn open_main_and_close_login(
     Ok(())
 }
 
-/// 开登录窗口（只在"本机没有可用凭据"时调用）。
+/// 开登录窗口。`mode` 决定登录成功之后 [`LoginGate`](crate::pages::gate::LoginGate) 怎么走
+/// （启动：开主窗关自己；重登：只关自己，见 `gate.rs` 文件头）。
+///
+/// 返回窗口句柄是给 [`relogin`](crate::pages::relogin) 登记的：那边要知道"现在有一个登录窗了"
+/// 才不会在四五路请求同时吃 `-101` 时开出一排小窗。
 pub fn open_login_window(
     client: Arc<bpi_rs::BpiClient>,
+    mode: crate::pages::gate::GateMode,
     cx: &mut App,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<AnyWindowHandle> {
     let options = window(
         "登录 rustBiliPC",
         LOGIN_WINDOW_WIDTH,
@@ -102,9 +107,9 @@ pub fn open_login_window(
         false,
         cx,
     );
-    gpui_kit::open_window(options, cx, move |window, cx| {
+    let (handle, _gate) = gpui_kit::open_window(options, cx, move |window, cx| {
         let client = Arc::clone(&client);
-        cx.new(|cx| crate::pages::gate::LoginGate::new(window, cx, client))
+        cx.new(|cx| crate::pages::gate::LoginGate::new(window, cx, client, mode))
     })?;
-    Ok(())
+    Ok(handle)
 }

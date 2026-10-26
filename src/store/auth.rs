@@ -1,12 +1,16 @@
-//! 登录凭据落盘：**明文 JSON**，写在可执行文件同目录的 `auth.json`。
+//! 登录凭据落盘：**明文 JSON**，写在 `%APPDATA%/ArrowMeo/rustBiliPC/auth.json`。
 //!
-//! ## 为什么从 `data/cookies.json` 搬到这里（2026-10-26 用户定稿）
+//! ## 位置的两次改动（都不留兼容代码）
 //!
-//! 定稿原话："登录完成后凭据保存到运行同目录的 auth.json，不要再用 data/cookies.json 了。"
-//! 摆放上的好处是**一眼看得见**：运行目录里就 `rustbilipc.exe`、`mpv.exe`、`debug.log`、
-//! `auth.json`、`config.json` 这几样，出问题时不用钻进子目录找。
-//! 旧文件**不删**（[`load`] 只把它当一次性迁移源）：那是他登录一次拿到的现场，
-//! 删掉不可逆，万一迁移判断有误就没退路了。
+//! - 2026-10-26 上午：从 `<exe>/data/cookies.json` 搬到 `<exe>/auth.json`。
+//! - 2026-10-26 下午（P13）：用户原话"config.json/auth.json/debug.json 改为存储到
+//!   `%APPDATA%/ArrowMeo/rustBiliPC` 里，**不要保留任何支持旧位置的 json 文件的代码**"。
+//!   所以 `legacy_path()` 与那套一次性迁移逻辑**整块删掉**了：本模块现在只认这一个路径，
+//!   读不到就是"未登录"，不会去老位置找。
+//!
+//! 换目录顺带解决了一件交付上的麻烦：以前 `publish/` 里既有 exe 也有登录态，
+//! 取产物时"绝不能清空目录"是一条要靠人记住的红线；现在用户数据在 `%APPDATA%` 下，
+//! 构建产物怎么覆盖都碰不到它。
 //!
 //! ## 明文带来的后果（已知且接受）
 //!
@@ -54,15 +58,9 @@ pub struct Auth {
 }
 
 impl Auth {
-    /// 凭据文件路径：`<exe 所在目录>/auth.json`（**不在 `data/` 里**，那是上一版的位置）。
+    /// 凭据文件路径：`<设置目录>/auth.json`（目录见 [`crate::app::settings_dir`]）。
     pub fn path() -> PathBuf {
-        crate::app::exe_dir().join("auth.json")
-    }
-
-    /// 旧位置：`<exe 所在目录>/data/cookies.json`。只作为一次性迁移的来源读取，
-    /// 迁移成功后保留原文件（见文件头那条理由）。
-    pub fn legacy_path() -> PathBuf {
-        crate::app::data_dir().join("cookies.json")
+        crate::app::settings_dir().join("auth.json")
     }
 
     /// 从 JSON 文本解析。坏文本返回 `None`，调用方按"未登录"处理。
@@ -118,45 +116,24 @@ impl Auth {
         }
     }
 
-    /// 覆盖写入 `auth.json`。运行目录一定存在（exe 就在里面），所以不建目录；
+    /// 覆盖写入 `auth.json`（目录不存在会先建——`%APPDATA%/ArrowMeo/rustBiliPC` 首次运行还没有）。
     /// 失败时把路径带进错误信息方便排查权限问题。
     pub fn save(&self) -> Result<PathBuf> {
         let path = Self::path();
+        if let Some(dir) = path.parent() {
+            std::fs::create_dir_all(dir)
+                .with_context(|| format!("创建凭据目录失败: {}", dir.display()))?;
+        }
         let json = serde_json::to_string_pretty(self).context("序列化凭据失败")?;
         std::fs::write(&path, json).with_context(|| format!("写入凭据失败: {}", path.display()))?;
         Ok(path)
     }
 
-    /// 读取已保存的凭据；只有 `auth.json` 读不到时才去看旧文件，并把拿到的那份补写回去。
-    ///
-    /// 迁移判断只看"能不能读、字段够不够"，够格才写新文件——拿一份不合格的旧凭据
-    /// 写到新位置，下次启动就会以为已登录。
+    /// 读取已保存的凭据。读不到/坏了一次性按"未登录"处理——**不再去看任何旧位置**。
     pub fn load() -> Option<Self> {
-        let path = Self::path();
-        if let Some(auth) = std::fs::read_to_string(&path)
+        std::fs::read_to_string(Self::path())
             .ok()
             .and_then(|raw| Self::from_json(&raw))
-        {
-            return Some(auth);
-        }
-
-        let legacy = Self::legacy_path();
-        let migrated = std::fs::read_to_string(&legacy)
-            .ok()
-            .and_then(|raw| Self::from_json(&raw))?;
-        if !migrated.is_complete() {
-            log::info!("旧凭据 {:?} 字段不全，不迁移（当成未登录）", legacy);
-            return None;
-        }
-        log::info!("从 {:?} 迁移凭据到 {:?}（旧文件保留）", legacy, path);
-        match migrated.save() {
-            Ok(_) => Some(migrated),
-            // 写不回去也要让用户能继续用这一份，别让一次 IO 失败把人挡在门外。
-            Err(error) => {
-                log::warn!("迁移后写入 auth.json 失败，本次仍用内存里的凭据: {error}");
-                Some(migrated)
-            }
-        }
     }
 
     /// 删除已保存的凭据（退出登录用）。文件不存在视为成功。

@@ -220,9 +220,44 @@ impl MainShell {
 
         // 主页是默认页：构造完就把第一批推荐取回来，登录后第一眼不该是一片空白。
         shell.home.update(cx, |page, cx| page.ensure_loaded(cx));
+        // 登记给重登协调器（P13）：凭据过期时它要拿这份客户端开扫码窗，
+        // 重登成功后要叫这一个外壳刷新第一屏。用弱句柄，窗口关了它就自动失效。
+        crate::pages::relogin::set_shell(cx.entity().downgrade());
         // 头像是外壳自己的事（不属于任何一页），所以这一路请求在这里发。
         shell.load_account(mid_raw, cx);
         shell
+    }
+
+    /// 重登成功之后刷新：头像/账户那一栏换成新 mid，当前这一格重新取。
+    ///
+    /// 为什么不动下钻栈：栈里那一层（详情页/合集页）可能正挂着我们在放的 mpv，
+    /// 清栈会 drop 那些实体，`DetailPage::Drop` 会 kill 子进程——"重登把视频掐了"是新引入的坏行为。
+    /// 其余格子中，只有"当前看得见的这一格"一定要重取（它就是用户刚看到报错的地方）；
+    /// 切过去时各页仍按自己的 `ensure_loaded` 走。
+    pub fn reload_after_relogin(&mut self, mid_raw: String, cx: &mut Context<Self>) {
+        log::info!(
+            "外壳：重登完成，刷新当前格 {}（mid={mid_raw}）",
+            self.tab.label()
+        );
+        if !mid_raw.trim().is_empty() {
+            self.load_account(mid_raw.clone(), cx);
+        }
+        match self.tab {
+            ShellTab::Home => self.home.update(cx, |page, cx| page.reload(cx)),
+            ShellTab::Favorites => self.favorites.update(cx, |page, cx| {
+                page.set_mid(mid_raw.clone());
+                page.reload(cx);
+            }),
+            ShellTab::History => self.history.update(cx, |page, cx| page.reload(cx)),
+            ShellTab::ToView => self.toview.update(cx, |page, cx| page.reload(cx)),
+            ShellTab::About => self.about.update(cx, |page, cx| {
+                page.set_mid(mid_raw.clone());
+                page.reload(cx);
+            }),
+            // 搜索页要保留用户输入的关键词、下载页没有网络请求：这两格没什么要重取的。
+            ShellTab::Search | ShellTab::Download => {}
+        }
+        cx.notify();
     }
 
     /// 取账户资料，只为左上角那张头像。

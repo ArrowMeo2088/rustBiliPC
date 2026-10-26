@@ -21,8 +21,9 @@ use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::*;
 
 use crate::api::search::{self, PageInfo, SearchSort};
+use crate::pages::relogin;
 use crate::pages::OpenVideo;
-use crate::ui::scroll::DragScroll;
+use crate::ui::scroll::{should_auto_page, DragScroll};
 use crate::ui::{layout, palette};
 use crate::ui::video_card::{self, VideoCardData};
 
@@ -75,7 +76,7 @@ impl SearchPage {
                 // PressEnter 是带字段的 struct 变体（secondary / shift），必须写 `{ .. }`。
                 if matches!(event, InputEvent::PressEnter { .. }) {
                     let keyword = state.read(cx).value().trim().to_string();
-                    this.submit(keyword, 1, this.sort, cx);
+                    this.submit(keyword, 1, this.sort, false, cx);
                 }
             },
         )];
@@ -97,11 +98,16 @@ impl SearchPage {
     }
 
     /// 提交一次搜索。`page` 从 1 开始；空关键词与在途请求直接忽略。
+    ///
+    /// `append` 是给**自动连续翻页**用的：滚到底接着取下一页时要把结果**接到列表尾巴上**，
+    /// 而不是像点"下一页"那样整屏换掉（人还在看第 2 页，列表突然变成第 3 页是最难受的）。
+    /// 手动翻页（上一页/下一页按钮、回车、换排序）一律 `append = false`。
     fn submit(
         &mut self,
         keyword: String,
         page: u32,
         sort: SearchSort,
+        append: bool,
         cx: &mut Context<Self>,
     ) {
         if keyword.is_empty() || self.loading {
@@ -129,7 +135,7 @@ impl SearchPage {
             let outcome = match join.await {
                 Ok(inner) => {
                     log::debug!("搜索页：结果已回到前台执行器（请求 #{seq}）");
-                    inner.map_err(|error| error.to_string())
+                    inner.map_err(|error| relogin::message(&error))
                 }
                 Err(join_error) => Err(crate::app::describe_join_error(join_error)),
             };
@@ -146,9 +152,23 @@ impl SearchPage {
                 match outcome {
                     Ok(outcome) => {
                         this.info = outcome.info.clone();
-                        this.cards = video_card::cards_from(outcome.hits);
+                        let batch = video_card::cards_from(outcome.hits);
+                        if append && page > 1 {
+                            this.cards.extend(batch);
+                        } else {
+                            this.cards = batch;
+                        }
                         this.feedback = if this.cards.is_empty() {
                             "没有匹配的结果".into()
+                        } else if append && page > 1 {
+                            format!(
+                                "共 {} 条，已接到第 {}/{} 页（现在 {} 张卡片）",
+                                this.info.num_results,
+                                this.info.page,
+                                this.info.num_pages,
+                                this.cards.len()
+                            )
+                            .into()
                         } else {
                             format!(
                                 "共 {} 条，第 {}/{} 页",
@@ -158,27 +178,32 @@ impl SearchPage {
                         };
                     }
                     Err(message) => {
-                        this.cards.clear();
+                        // 自动接下一页失败时**不清列表**：已经看到的第 1..N-1 页还是有效的，
+                        // 抹掉等于把用户的浏览记录砸了（历史页、收藏夹内容页同一条口径）。
+                        if !(append && page > 1) {
+                            this.cards.clear();
+                        }
                         this.feedback = format!("搜索失败: {message}").into();
                     }
                 }
                 log::debug!("搜索页：状态已写入，卡片 {} 张", this.cards.len());
                 cx.notify();
             });
+            relogin::flush(cx);
         })
         .detach();
     }
 
-    /// 翻页：沿用已提交的关键词，只改页码。
+    /// 翻页：沿用已提交的关键词，只改页码（手动翻 = 整屏换成那一页）。
     fn goto_page(&mut self, page: u32, cx: &mut Context<Self>) {
         let keyword = self.submitted.to_string();
-        self.submit(keyword, page, self.sort, cx);
+        self.submit(keyword, page, self.sort, false, cx);
     }
 
     /// 切换排序并回到第 1 页。
     fn change_sort(&mut self, sort: SearchSort, cx: &mut Context<Self>) {
         let keyword = self.submitted.to_string();
-        self.submit(keyword, 1, sort, cx);
+        self.submit(keyword, 1, sort, false, cx);
     }
 
     /// 分页按钮组。加载中一律不响应，避免同一页并发请求（判断写在回调里）。
@@ -247,6 +272,15 @@ impl Render for SearchPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // 每帧登记一次移动/抬起监听（`Window::on_mouse_event` 只覆盖下一帧，见 `ui/scroll.rs`）。
         self.scroll.watch(window, cx.entity_id());
+        // 滚到底就把下一页**接到**列表尾巴上（P13 的自动连续翻页）。
+        // "还有下一页"用的是接口给的 `num_pages`（B 站这条给得到），所以手动那排按钮的口径不变。
+        let has_more = (self.page as i64) < self.info.num_pages.max(0);
+        if should_auto_page(&self.scroll, has_more, self.cards.len(), self.loading) {
+            let next = self.page + 1;
+            log::debug!("搜索页：滚到底，自动接第 {next} 页");
+            let keyword = self.submitted.to_string();
+            self.submit(keyword, next, self.sort, true, cx);
+        }
         // 页头右侧那条就是搜索框 + 按钮。宽度取自 palette，落在参考项目 320~500 的区间里
         // （`RootLayout.xaml:74-80` 的 MinWidth/MaxWidth）。
         let search_box = div()
@@ -262,7 +296,7 @@ impl Render for SearchPage {
                     .label("搜索")
                     .on_click(cx.listener(|this, _, _window, cx| {
                         let keyword = this.query.read(cx).value().trim().to_string();
-                        this.submit(keyword, 1, this.sort, cx);
+                        this.submit(keyword, 1, this.sort, false, cx);
                     })),
             );
 

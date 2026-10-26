@@ -11,31 +11,58 @@
 //! ## 排序规则
 //!
 //! 1. 画质档 `id`（即 B 站 qn 代码）降序，且只允许 `<= cap`；
-//! 2. 同档内编码优先级：HEVC(`hev1`/`hvc1`) > AV1(`av01`) > 其它(主要是 `avc1`)；
+//! 2. 同档内**先按用户设置的编码偏好**（`config.json` 的 `codec`），
+//!    偏好那一档没有时才退回默认优先级：HEVC(`hev1`/`hvc1`) > AV1(`av01`) > 其它(主要是 `avc1`)；
 //! 3. 仍并列时取带宽更高的一路。
 //!
 //! `cap` 由调用方给（起播那条路传的就是本次请求的 `qn`，见 [`crate::api::stream::request_qn`]，
-//! 它的值来自运行目录的 `config.json`）。[`MAX_QUALITY_ID`] 是它的**默认值与硬上限**。
+//! 它的值来自 `config.json` 的 `max_quality`）。[`DEFAULT_QUALITY_CAP`] 是那个设置的**默认值**；
+//! 能选到的最高档由 [`crate::store::config::MAX_QUALITY_ID`] 管（P13 起用户能在设置页选到 4K，
+//! "116"不再是红线，只是替目标机做的默认选择）。
 //!
 //! 若过滤后为空（例如响应只给了 4K），退回全集再选一次，保证总能拿到一路。
 
 use bpi_rs::video::videostream_url::DashStream;
 
-/// 画质档默认上限：116 = 1080P 60帧。允许 16/32/64/80/112/116，
-/// 排除 120(4K)/125(HDR)/126(Dolby Vision)/127(8K)。
+use crate::store::config::CodecPreference;
+
+/// 画质档的**默认**上限：116 = 1080P 60帧。
 ///
-/// 这一版它同时是**硬上限**：`config.json` 里的 `max_quality` 会被
-/// [`clamp_quality`](crate::store::config::clamp_quality) 收回到这个值以内，
-/// 因为再高的档目标机解不动、也要大会员。
-pub const MAX_QUALITY_ID: u64 = 116;
+/// 目标机（i5-6200U，Skylake）硬解只到这里：再往上的 120(4K)/125(HDR)/126(杜比)/127(8K)
+/// 要么解不动、要么要大会员。P13 之前它是硬上限，现在只是默认值——用户能在设置页改。
+pub const DEFAULT_QUALITY_CAP: u64 = 116;
+
+/// 编码前缀 → 家族。`codecs` 是 B 站原样返回的 RFC 6381 字符串，例如
+/// `hev1.1.6.L150.90`、`avc1.64.00`、`av01.0.08M.08`。
+fn is_hevc(codecs: &str) -> bool {
+    codecs.starts_with("hev1") || codecs.starts_with("hvc1")
+}
+
+fn is_av1(codecs: &str) -> bool {
+    codecs.starts_with("av01")
+}
+
+fn is_avc(codecs: &str) -> bool {
+    codecs.starts_with("avc1") || codecs.starts_with("avc3")
+}
 
 /// 编码优先级，数值越大越优先。
 ///
-/// `codecs` 是 B 站原样返回的 RFC 6381 字符串，例如 `hev1.1.6.L150.90`、`avc1.64.00`。
-fn codec_score(codecs: &str) -> u8 {
-    if codecs.starts_with("hev1") || codecs.starts_with("hvc1") {
+/// **用户偏好那一档拿 3，其它一律按"省带宽优先"排**（HEVC 2 > AV1 1 > AVC 0）。
+/// 为什么偏好要压过默认顺序：他选 AV1 时就是想看 AV1（哪怕更吃 CPU），
+/// 不该在"同档"里被我们偷偷换成 HEVC，然后界面上还说他用的是 AV1。
+fn codec_score(codecs: &str, preferred: CodecPreference) -> u8 {
+    let matches_preference = match preferred {
+        CodecPreference::Hevc => is_hevc(codecs),
+        CodecPreference::Avc => is_avc(codecs),
+        CodecPreference::Av1 => is_av1(codecs),
+    };
+    if matches_preference {
+        return 3;
+    }
+    if is_hevc(codecs) {
         2
-    } else if codecs.starts_with("av01") {
+    } else if is_av1(codecs) {
         1
     } else {
         0
@@ -49,22 +76,34 @@ pub fn is_quality_allowed(id: u64, cap: u64) -> bool {
 }
 
 /// 三路比较键：(画质档, 编码优先级, 带宽)。
-fn rank(stream: &DashStream) -> (u64, u8, u64) {
-    (stream.id, codec_score(&stream.codecs), stream.bandwidth)
+fn rank(stream: &DashStream, preferred: CodecPreference) -> (u64, u8, u64) {
+    (
+        stream.id,
+        codec_score(&stream.codecs, preferred),
+        stream.bandwidth,
+    )
 }
 
-/// 选出要交给 mpv 的视频流。
+/// 选出要交给 mpv（或下载）的视频流。
 ///
 /// 只用于 `dash.video`；`durl`（FLV/MP4 直链回退路径）现阶段不处理——
 /// 请求里带 DASH 标志后 B 站基本不会再返回 durl，真遇到再补。
-pub fn pick_video(streams: &[DashStream], cap: u64) -> Option<&DashStream> {
+pub fn pick_video(
+    streams: &[DashStream],
+    cap: u64,
+    preferred: CodecPreference,
+) -> Option<&DashStream> {
     let best = streams
         .iter()
         .filter(|stream| is_quality_allowed(stream.id, cap))
-        .max_by(|a, b| rank(a).cmp(&rank(b)));
+        .max_by(|a, b| rank(a, preferred).cmp(&rank(b, preferred)));
 
     // 封顶范围内没有可用流时退回全集，宁可不降级也别播不了。
-    best.or_else(|| streams.iter().max_by(|a, b| rank(a).cmp(&rank(b))))
+    best.or_else(|| {
+        streams
+            .iter()
+            .max_by(|a, b| rank(a, preferred).cmp(&rank(b, preferred)))
+    })
 }
 
 /// 选出要交给 mpv 的音频流。

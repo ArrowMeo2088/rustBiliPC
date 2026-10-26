@@ -97,6 +97,12 @@ impl FavoritesPage {
         self.reload(cx);
     }
 
+    /// 换成本次要用的 mid（重登之后可能换成另一个账号，见
+    /// [`MainShell::reload_after_relogin`](crate::pages::shell::MainShell)）。
+    pub fn set_mid(&mut self, mid_raw: String) {
+        self.mid_raw = mid_raw;
+    }
+
     /// 重新拉收藏夹列表。
     pub fn reload(&mut self, cx: &mut Context<Self>) {
         self.loaded = true;

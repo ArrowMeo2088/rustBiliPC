@@ -1,19 +1,21 @@
 //! rustBiliPC 启动入口。
 //!
 //! 启动顺序是有讲究的，别随意调换：
-//! 1. 日志 —— 写 **exe 同目录**的 `debug.log`（每次启动清空、级别 debug），见 [`rustbilipc::logging`]。
-//! 2. tokio runtime + rustls 默认 provider —— 见 [`rustbilipc::app`] 的说明：API 调用依赖前者，
+//! 1. 读设置 —— `%APPDATA%\ArrowMeo\rustBiliPC\config.json`，见 [`rustbilipc::store::config`]。
+//! 2. 日志 —— 按设置里的"调试模式"决定要不要写同目录的 `debug.log`（每次启动清空、级别 debug），
+//!    见 [`rustbilipc::logging`]。关掉时连文件都不创建。
+//! 3. tokio runtime + rustls 默认 provider —— 见 [`rustbilipc::app`] 的说明：API 调用依赖前者，
 //!    没有后者任何 HTTPS 请求都会在握手处 panic（表现是界面一直停在加载态）。
-//! 3. `with_assets` —— kit 的图标/字体资源，必须在 `init` 之前挂上。
-//! 4. `gpui_kit::init` → 主题覆盖 → **装 HttpClient** → 装进程级设置 → 读凭据 → 开窗。
+//! 4. `with_assets` —— kit 的图标/字体资源，必须在 `init` 之前挂上。
+//! 5. `gpui_kit::init` → 主题覆盖 → **装 HttpClient** → 读凭据 → 开窗。
 //!
-//! 第 4 步里的 HttpClient 不能省：gpui 默认装的是 `NullHttpClient`（`gpui` 的 `app.rs` 里
+//! 第 5 步里的 HttpClient 不能省：gpui 默认装的是 `NullHttpClient`（`gpui` 的 `app.rs` 里
 //! 直接构造），任何网络图片请求都会失败；封面图靠 `ImageAssetLoader` 走
 //! `App::http_client()`，所以必须换成真的 reqwest 客户端。
 //!
 //! ## 开窗这一步现在有两种结局（2026-10-26 用户定稿）
 //!
-//! 运行同目录有可用的 `auth.json` → 只开主窗口；没有 → 只开一个小的扫码登录窗，
+//! settings 目录有可用的 `auth.json` → 只开主窗口；没有 → 只开一个小的扫码登录窗，
 //! 登录成功后由 [`LoginGate`](rustbilipc::pages::gate::LoginGate) 换窗口。
 //! 尺寸与"先开主窗再关登录窗"的理由都写在 [`windows`](rustbilipc::pages::windows) 里。
 //!
@@ -21,28 +23,64 @@
 //!
 //! 起播那条路读的封顶档来自 `config.json`（见 [`stream::request_qn`](rustbilipc::api::stream::request_qn)）。
 //! 装晚了不会崩，但"第一帧就起播"的路径上会读到默认值，界面上说的话和实际请求的参数可能对不上。
+//! 日志也要读它（调试模式），所以设置必须排在最前 —— 这也是 1、2 两步顺序的原因。
+
+// 双击启动不再弹那个黑色控制台窗口（2026-10-26 P13）。
+//
+// 他说"调试模式关闭则启动时不显示控制台"。控制台的存在与否是**链接期**决定的子系统，
+// 不是运行时能开关的，所以这里取"永远不弹"：调试模式只决定要不要写 `debug.log`
+// （关了连文件都不创建）。真想要"调试时弹一个控制台"，得另外做 `AttachConsole`，那没做。
+#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
 
 use std::sync::Arc;
 
 use rustbilipc::app;
 use rustbilipc::logging;
+use rustbilipc::pages::gate::GateMode;
+use rustbilipc::pages::relogin;
 use rustbilipc::pages::windows;
 use rustbilipc::store::auth::Auth;
-use rustbilipc::store::config::Config;
+use rustbilipc::store::config::{Config, LoadOutcome};
 use rustbilipc::theme;
 
 /// 我们对外 HTTP 客户端自报的家门名（User-Agent 的一部分）。
 const HTTP_CLIENT_NAME: &str = "rustbilipc";
 
 fn main() {
-    // 日志必须第一个装：GUI 程序没有控制台，出问题时全靠 exe 同目录的 debug.log。
-    let log_path = logging::init();
+    // 顺序变了（P13）：**先读设置，再装日志**。
+    // 因为"要不要写 debug.log"本身就是设置里的一项，日志必须等知道答案的那一步之后才装。
+    // 读设置这一步不碰网络、不碰 tokio，所以放在最前面是安全的。
+    let (config, outcome) = Config::load_or_create();
+    // 配置文件坏了就用默认值，而默认值是"不写日志"——那样他就既看不到错误、
+    // 也没法打开调试模式（开关就写在那个坏文件里）。所以这一轮强制开日志。
+    let debug_log = config.debug_log || matches!(outcome, LoadOutcome::RecoveredFromBroken);
+    app::init_config(config);
+
+    let log_path = logging::init(debug_log);
     log::info!(
-        "rustBiliPC v{} 启动，工作目录 {:?}",
+        "rustBiliPC v{} 启动，工作目录 {:?}，数据目录 {:?}",
         rustbilipc::VERSION,
-        crate::app::exe_dir()
+        crate::app::exe_dir(),
+        crate::app::settings_dir()
     );
-    log::info!("日志文件 {:?}", log_path);
+    match &log_path {
+        Some(path) => log::info!("日志文件 {:?}", path),
+        None => log::info!("调试模式关闭：本轮不产生 debug.log"),
+    }
+    match outcome {
+        LoadOutcome::Loaded => {}
+        LoadOutcome::Created => log::info!("设置：本次写入了默认的 config.json"),
+        LoadOutcome::RecoveredFromBroken => {
+            log::error!("设置：config.json 读不出来，本次用默认值并强制开启日志")
+        }
+    }
+    log::info!(
+        "设置：max_quality={} codec={} mpv={:?} debug_log={}",
+        app::config().max_quality,
+        app::config().codec.label(),
+        app::config().mpv_path,
+        app::config().debug_log
+    );
 
     // 提前建好 API 用的 runtime，避免第一次网络请求时才初始化带来的不确定性。
     app::runtime();
@@ -55,6 +93,9 @@ fn main() {
         bpi_rs::BpiClient::new().expect("初始化 BpiClient 失败，请检查网络与系统时间"),
     );
     log::info!("BpiClient 就绪");
+    // 重登协调器要拿**同一份**客户端去开扫码窗（凭据过期时就地重登，不必重启）：
+    // 换一份客户端就等于换一个 cookie jar，扫完码主窗口那些页面还是旧的登录态。
+    relogin::set_client(Arc::clone(&client));
 
     // Assets 用 kit 的**完整** Lucide 集（1830 个 svg 全嵌进 exe）。
     // 默认那份 `Assets` 只嵌 106 个，侧栏要的 House/Clock/Bookmark/Download 都不在里面；
@@ -71,16 +112,7 @@ fn main() {
             .expect("初始化 HttpClient 失败");
         cx.set_http_client(Arc::new(http_client));
 
-        // 进程级设置：读运行目录的 config.json，没有就写一份默认的出来。
-        let config = Config::load_or_create();
-        log::info!(
-            "设置就绪：max_quality={}（{:?}）",
-            config.max_quality,
-            Config::path()
-        );
-        app::init_config(config);
-
-        // 凭据：读 auth.json；只有它不合格时才去看一次旧的 data/cookies.json（迁移，见 store::auth）。
+        // 凭据：读 settings 目录的 auth.json（P13 起不再有旧位置的兼容代码，见 store::auth）。
         let auth = Auth::load();
         log::info!(
             "启动判定：凭据文件 {:?}（可读={}，字段完整={:?}）",
@@ -100,7 +132,10 @@ fn main() {
             }
             None => {
                 log::info!("本机没有可用凭据，开扫码登录小窗");
-                windows::open_login_window(Arc::clone(&client), cx)
+                windows::open_login_window(Arc::clone(&client), GateMode::Startup, cx).map(|handle| {
+                    // 登记给重登协调器：这个窗还开着的时候，`-101` 不该再开第二个。
+                    relogin::note_login_window(handle);
+                })
             }
         };
 

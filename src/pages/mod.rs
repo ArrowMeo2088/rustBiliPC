@@ -13,6 +13,7 @@
 //! `download/`、`about/`。
 //!
 //! [`loading`] 是各入口页共用的"一次请求回到实体"样板（序号 + upgrade + update）。
+//! [`relogin`] 是它的配套：样板发现"这错是要登录"时，统一交给那里去清凭据、开重登小窗（P13）。
 //!
 //! 播放期不在这里——进度、暂停、音量、字幕显示都归外置 mpv 自己的 OSC（第 4.3 节）。
 
@@ -26,6 +27,7 @@ pub mod history;
 pub mod home;
 pub mod loading;
 pub mod login;
+pub mod relogin;
 pub mod search;
 pub mod shell;
 pub mod space;

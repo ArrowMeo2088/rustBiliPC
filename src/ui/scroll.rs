@@ -81,6 +81,47 @@ pub fn target_offset(start: Pixels, dy: Pixels, max: Pixels) -> Pixels {
     (start + dy).clamp(px(0.) - max, px(0.))
 }
 
+/// 自动连续翻页的提前量（px）。
+///
+/// 为什么不是"真的滚到底才取下一页"：那样用户每次都要先停住、再等一批发回来、
+/// 再看见新条目，手感是"卡一下"。留 240px（大约两行卡片）就够把等待藏在滚动里。
+pub const AUTO_PAGE_MARGIN: f32 = 240.;
+
+/// 是不是"已经到底部附近"（自动翻页的判据，纯函数，进单测）。
+///
+/// 单位是 `f32` 而不是 `Pixels`：`ScrollHandle::offset()` 给的是**负的**偏移（内容往上移了多少），
+/// `max_offset()` 给的是正的可用行程，两个符号不一样，先取 `as_f32()` 再比较最不容易写错。
+///
+/// 三条边界都要照顾到：
+/// - `max == 0`（内容比视口短，压根没有行程）：按定义就是"在底部" → 会触发翻页。
+///   所以调用方必须自己再问一句"有没有真的可滚/有没有在途请求"，见各页的 `auto_load_more`。
+/// - 还没 paint 过时 `offset == 0` 且 `max == 0`：同上，靠调用方的"列表非空 + 未在途"挡住。
+/// - 拖过头（`offset.abs() > max`）：差值更大，仍然算在底部，不会翻不回来。
+pub fn is_at_bottom(offset: f32, max: f32, margin: f32) -> bool {
+    max - offset.abs() <= margin
+}
+
+/// 自动连续翻页的判据（各列表页在自己的 `render` 里问一句，见 `should_auto_page` 的调用点）。
+///
+/// 四条都得过，缺一条就会出现"看起来在滚但一直在发请求"：
+/// 1. `has_more`：接口说还有下一页（历史那种"没拿到新游标就停"也归这条）；
+/// 2. `items > 0`：空列表时的"到底"是**还没加载**，不是滚到底了，翻页只会原地打转；
+/// 3. `!loading`：**没有在途请求**。少了这条，一帧渲染就能连发五个下一页（请求回来又触发下一帧），
+///    而游标类分页（历史、图文）在途期间游标还没更新，发的其实是同一个请求；
+/// 4. `scroll.scrollable()`：内容比视口短时 [`is_at_bottom`] 按定义给 `true`（零行程），
+///    可那种列表本来就没必要翻页 —— 这一条也顺手挡住了"打开页面就自动捞三页"。
+///
+/// `render` 里读到的偏移来自**上一帧**的布局，所以刚加长列表那一帧可能还没反映新行程；
+/// 效果只是"晚一帧才触发"，不会连发，可以接受。
+pub fn should_auto_page(
+    scroll: &DragScroll,
+    has_more: bool,
+    items: usize,
+    loading: bool,
+) -> bool {
+    has_more && items > 0 && !loading && scroll.scrollable() && scroll.at_bottom(AUTO_PAGE_MARGIN)
+}
+
 /// 一个滚动容器的拖动状态。**每个容器一个**：详情页主列与右栏是两个字段，互不牵连。
 ///
 /// 用法（页面的 `render` 里三处，缺一个就退化成"只能滚轮"）：
@@ -109,6 +150,27 @@ impl DragScroll {
     /// 而句柄内部是 `Rc<RefCell<..>>`，克隆一份也只是同一个偏移的两个名字，没必要。
     pub fn handle(&self) -> &ScrollHandle {
         &self.handle
+    }
+
+    /// 现在离底部还有没有 `margin` 以内（自动连续翻页在 render 里问这一句）。
+    ///
+    /// 读的是**上一帧**的布局：`max_offset()` 由 paint 算出来，所以刚把列表加长的那一帧
+    /// 还可能读到旧的行程。这就是各页的 `auto_load_more` 除了问这一句、还要自己看
+    /// "有没有在途请求"和"列表非空"的原因（否则一帧能连发五个请求）。
+    pub fn at_bottom(&self, margin: f32) -> bool {
+        is_at_bottom(
+            self.handle.offset().y.as_f32(),
+            self.handle.max_offset().y.as_f32(),
+            margin,
+        )
+    }
+
+    /// 这一帧有没有真的可滚的行程（内容比视口短时是 `false`）。
+    ///
+    /// 自动翻页要它当第二个闸：一屏就装得下的列表**不需要**翻下一页，
+    /// 而 [`is_at_bottom`] 在这种"零行程"情况下按定义是给 `true` 的。
+    pub fn scrollable(&self) -> bool {
+        self.handle.max_offset().y.as_f32() > 1.
     }
 
     /// 给滚动容器用：`.on_mouse_down(MouseButton::Left, page.scroll.on_press())`。
