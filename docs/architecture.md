@@ -1950,3 +1950,15 @@ error[E0277]: the trait bound `CommentSortKind: std::default::Default` is not sa
 ④ 历史/收藏内容/搜索/合集内容滚到底自动接下一页，且**不会**看到同一页连发两次
 （`滚到底，自动取第 N 页` 每次 N 递增）；
 ⑤ `mpv.exe` 还在 `publish/` 里也能直接播（运行目录那一档留着是故意的）。
+
+### 第四十八轮（warning 改成机器数）：绿，**0 条**
+
+第四十六/四十七轮的"零 Rust warning"是我从日志里**肉眼**确认的（`cargo build` 命中缓存时不会
+重复报上一轮修掉的 warning，所以肉眼只能看"这轮新出现的"）。第四十八轮把这件事交给 CI 自己数：
+`cargo check --release --all-targets --message-format=json` 强制前端把所有目标重跑一遍，
+再 `grep -c '"level":"warning"'` 写进 summary。**结果：`### Rust warning 条数：0`**，
+`cargo test --release` 仍是 **102 passed / 0 failed**（SHA `e7a337e`，run 40338758130）。
+
+以后每轮的"零 warning"以这一步的数字为准，不再用肉眼结论。
+（`cd.yml` 那份**还没真跑过**：四个目标里只有 win-x64 是长期验证的，另三个连 runner 标签带系统库
+是否齐全都没证据 —— 见风险第 31 条。要不要现在发一个 Release，等他点头。）
