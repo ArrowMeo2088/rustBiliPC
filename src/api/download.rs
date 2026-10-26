@@ -362,7 +362,8 @@ async fn attempt(
         .map_err(|error| Stop::Failed(format!("建临时文件失败: {error}")))?;
     let mut writer = BufWriter::with_capacity(1024 * 1024, file);
     let mut buffer = vec![0u8; CHUNK_SIZE];
-    let mut body = response.body_mut();
+    // `body` 本身是 `&mut AsyncBody`，方法调用时会自己再借用，所以这里不需要 `mut`。
+    let body = response.body_mut();
     let mut written: u64 = 0;
     let mut since_report: u64 = 0;
 

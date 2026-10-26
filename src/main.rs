@@ -24,7 +24,6 @@
 
 use std::sync::Arc;
 
-use gpui_kit::*;
 use rustbilipc::app;
 use rustbilipc::logging;
 use rustbilipc::pages::windows;
