@@ -4,9 +4,13 @@
 
 ## 现有文档
 
-- [architecture.md](architecture.md)：硬约束、选型与版本锁、模块布局与分层规则、四个关键机制
-  （异步桥 / 码流选择 / 外置 mpv / 凭据）、阶段进度表、风险清单、维护规则。
-- [api-notes.md](api-notes.md)：bpi-rs 已核实的接口形状（登录/搜索/详情/playurl/fnval/画质档）、
+- [architecture.md](architecture.md)：硬约束、选型与版本锁、模块布局与分层规则、关键机制
+  （第 4.1–4.21 节：异步桥 / 码流选择 / 外置 mpv / 凭据 / 失败可见 / Task 与序号 / 三路并发 /
+  封面 URL / 起播与选流 / 视觉度量 / 主页 / 评论区 / 用户空间 / **窗口与登录时序 4.19** /
+  **窄侧栏与七入口 4.20** / **auth.json 与 config.json 4.21**）、阶段进度表、风险清单（22 条）、
+  第 8 节的逐轮 CI 实测记录、维护规则。
+- [api-notes.md](api-notes.md)：bpi-rs 已核实的接口形状（第 1–13 节：登录 / 搜索 / 详情 /
+  playurl 与 fnval / 画质档 / 主页推荐 / 评论区 / 用户空间与图文 / **待看**）、
   需要我们补齐的空白、mpv 选项证据、Bili.Copilot 的视觉度量。
 
 ## 约定
