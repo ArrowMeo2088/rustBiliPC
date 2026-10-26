@@ -34,11 +34,14 @@ use gpui_kit::*;
 use crate::api::favorites::{self, FavItem};
 use crate::pages::{loading, OpenVideo};
 use crate::ui::video_card::{self, VideoCardData};
+use crate::ui::scroll::DragScroll;
 use crate::ui::{layout, palette};
 
 /// 收藏夹内容页根视图。
 pub struct FavFolderPage {
     client: Arc<bpi_rs::BpiClient>,
+    /// 单指/按住拖动的滚动状态（与本页那个滚动容器一一对应，见 `ui/scroll.rs`）。
+    scroll: DragScroll,
     /// 接口那边叫 `media_id`。
     media_id: u64,
     /// 页头标题：先用列表带过来的名字，回来后以接口的 `info.title` 为准。
@@ -84,6 +87,7 @@ impl FavFolderPage {
         )];
 
         Self {
+            scroll: DragScroll::default(),
             client,
             media_id,
             title: title.into(),
@@ -264,7 +268,9 @@ impl FavFolderPage {
 impl EventEmitter<OpenVideo> for FavFolderPage {}
 
 impl Render for FavFolderPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 每帧登记一次移动/抬起监听（`Window::on_mouse_event` 只覆盖下一帧，见 `ui/scroll.rs`）。
+        self.scroll.watch(window, cx.entity_id());
         let summary = self.summary();
         let title = self.title.clone();
         let note = self.note.clone();
@@ -289,6 +295,8 @@ impl Render for FavFolderPage {
                     .w_full()
                     .min_w(px(0.))
                     .overflow_y_scroll()
+                    .track_scroll(self.scroll.handle())
+                    .on_mouse_down(MouseButton::Left, self.scroll.on_press())
                     .child(
                         div()
                             .flex()

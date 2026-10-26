@@ -26,6 +26,7 @@ use gpui_kit::*;
 
 use crate::api::home::{self, HomeHit};
 use crate::pages::OpenVideo;
+use crate::ui::scroll::DragScroll;
 use crate::ui::{layout, palette};
 use crate::ui::video_card::{self, VideoCardData};
 
@@ -33,6 +34,8 @@ use crate::ui::video_card::{self, VideoCardData};
 pub struct HomePage {
     /// 复用一份客户端；请求要 clone 成 `Arc` 投给 tokio。
     client: Arc<bpi_rs::BpiClient>,
+    /// 单指/按住拖动的滚动状态（`ui::scroll::DragScroll`，与下面那个滚动容器一一对应）。
+    scroll: DragScroll,
     hits: Vec<HomeHit>,
     /// 加载状态与失败原因（空串 = 正常）。错误必须上界面，不许只进日志（第 4.7 节）。
     note: SharedString,
@@ -48,6 +51,7 @@ impl HomePage {
     /// 建页，但**不**发请求：这一页随外壳一起构造，首屏请求由 `ensure_loaded` 触发。
     pub fn new(client: Arc<bpi_rs::BpiClient>) -> Self {
         Self {
+            scroll: DragScroll::default(),
             client,
             hits: Vec::new(),
             note: "".into(),
@@ -154,7 +158,9 @@ impl HomePage {
 impl EventEmitter<OpenVideo> for HomePage {}
 
 impl Render for HomePage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 每帧登记一次移动/抬起监听（`Window::on_mouse_event` 只覆盖下一帧，见 `ui/scroll.rs`）。
+        self.scroll.watch(window, cx.entity_id());
         // 页头右侧那颗按钮对应参考项目的"刷新"位（`PopularMainHeader.xaml:38-49`）。
         let trailing = div()
             .flex()
@@ -209,6 +215,8 @@ impl Render for HomePage {
                     .w_full()
                     .min_w(px(0.))
                     .overflow_y_scroll()
+                    .track_scroll(self.scroll.handle())
+                    .on_mouse_down(MouseButton::Left, self.scroll.on_press())
                     .px(px(palette::CARD_TEXT_PADDING_X))
                     .child(body),
             )

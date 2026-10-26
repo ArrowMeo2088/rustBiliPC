@@ -30,6 +30,7 @@ use gpui_kit::*;
 use crate::api::history::{self, HistoryCursor, HistoryItem};
 use crate::pages::{loading, matches_keyword, OpenVideo};
 use crate::ui::video_card::{self, VideoCardData};
+use crate::ui::scroll::DragScroll;
 use crate::ui::{layout, palette};
 
 /// 一次取多少条历史。库里的 `ps` 只拒绝 0（`params.rs:136-143`），
@@ -39,6 +40,8 @@ const HISTORY_LIMIT: u32 = 30;
 /// 历史页根视图。
 pub struct HistoryPage {
     client: Arc<bpi_rs::BpiClient>,
+    /// 单指/按住拖动的滚动状态（与本页那个滚动容器一一对应，见 `ui/scroll.rs`）。
+    scroll: DragScroll,
     items: Vec<HistoryItem>,
     /// 下一页的起点；`None` = 翻到头了（或还没取过）。
     cursor: Option<HistoryCursor>,
@@ -73,6 +76,7 @@ impl HistoryPage {
         )];
 
         Self {
+            scroll: DragScroll::default(),
             client,
             items: Vec::new(),
             cursor: None,
@@ -224,7 +228,9 @@ impl HistoryPage {
 impl EventEmitter<OpenVideo> for HistoryPage {}
 
 impl Render for HistoryPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 每帧登记一次移动/抬起监听（`Window::on_mouse_event` 只覆盖下一帧，见 `ui/scroll.rs`）。
+        self.scroll.watch(window, cx.entity_id());
         let summary = self.summary();
         let note = self.note.clone();
         let empty_hint = !note.is_empty() && self.shown().is_empty();
@@ -249,6 +255,8 @@ impl Render for HistoryPage {
                     .w_full()
                     .min_w(px(0.))
                     .overflow_y_scroll()
+                    .track_scroll(self.scroll.handle())
+                    .on_mouse_down(MouseButton::Left, self.scroll.on_press())
                     .child(
                         div()
                             .flex()

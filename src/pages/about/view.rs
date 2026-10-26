@@ -27,11 +27,14 @@ use crate::api::profile::{self, ProfileSummary};
 use crate::pages::loading;
 use crate::store::auth::Auth;
 use crate::store::config;
+use crate::ui::scroll::DragScroll;
 use crate::ui::{layout, palette};
 
 /// 设置页根视图。
 pub struct AboutPage {
     client: Arc<bpi_rs::BpiClient>,
+    /// 单指/按住拖动的滚动状态（`ui::scroll::DragScroll`，与下面那个滚动容器一一对应）。
+    scroll: DragScroll,
     /// 凭据里的 mid（字符串）。
     mid_raw: String,
     account: Option<ProfileSummary>,
@@ -44,6 +47,7 @@ impl AboutPage {
     /// 建页但不发请求（懒加载）。
     pub fn new(client: Arc<bpi_rs::BpiClient>, mid_raw: String) -> Self {
         Self {
+            scroll: DragScroll::default(),
             client,
             mid_raw,
             account: None,
@@ -155,7 +159,9 @@ impl AboutPage {
 }
 
 impl Render for AboutPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 每帧登记一次移动/抬起监听（`Window::on_mouse_event` 只覆盖下一帧，见 `ui/scroll.rs`）。
+        self.scroll.watch(window, cx.entity_id());
         let rows = self
             .account_rows()
             .into_iter()
@@ -175,6 +181,8 @@ impl Render for AboutPage {
                     .w_full()
                     .min_w(px(0.))
                     .overflow_y_scroll()
+                    .track_scroll(self.scroll.handle())
+                    .on_mouse_down(MouseButton::Left, self.scroll.on_press())
                     .child(
                         div()
                             .flex()

@@ -51,6 +51,7 @@ use crate::api::detail::{self, PageInfo, SubtitleBrief, VideoDetailInfo};
 use crate::api::stream::{self, StreamChoice};
 use crate::pages::{OpenUser, OpenVideo};
 use crate::store::auth::Auth;
+use crate::ui::scroll::DragScroll;
 use crate::ui::{cover, layout, palette};
 use crate::ui::video_card::{self, VideoCardData};
 
@@ -87,6 +88,10 @@ pub struct DetailPage {
     comment_note: SharedString,
     /// 评论自己的请求序号：换排序或翻页时，旧结果回来要自己让位（第 4.9 节）。
     comment_seq: u32,
+    /// 主列那个滚动容器的拖动状态（`ui/scroll.rs`）。
+    scroll: DragScroll,
+    /// 右栏（选集与相关推荐）是第二个容器，必须单独一个：共用会让两边互相把对方的偏移抢走。
+    side_scroll: DragScroll,
 }
 
 /// 详情页退出时必须带走自己拉起的 mpv：外壳把这一层 pop 掉（或整个窗口关掉）时，
@@ -105,6 +110,8 @@ impl DetailPage {
     /// 建页并发起主体请求。
     pub fn new(client: Arc<bpi_rs::BpiClient>, bvid: String, cx: &mut Context<Self>) -> Self {
         let mut this = Self {
+            scroll: DragScroll::default(),
+            side_scroll: DragScroll::default(),
             client,
             bvid: bvid.into(),
             detail: None,
@@ -948,6 +955,8 @@ impl DetailPage {
                     .w_full()
                     .min_h(px(0.))
                     .overflow_y_scroll()
+                    .track_scroll(self.side_scroll.handle())
+                    .on_mouse_down(MouseButton::Left, self.side_scroll.on_press())
                     .child(layout::section_title("选集"))
                     .child(self.pages_body(cx))
                     .child(layout::section_title("相关推荐"))
@@ -964,7 +973,11 @@ impl EventEmitter<OpenVideo> for DetailPage {}
 impl EventEmitter<OpenUser> for DetailPage {}
 
 impl Render for DetailPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 两个容器各自登记一次（`Window::on_mouse_event` 只覆盖下一帧，见 `ui/scroll.rs`）。
+        let view = cx.entity_id();
+        self.scroll.watch(window, view);
+        self.side_scroll.watch(window, view);
         // 两条分支的元素类型不同，各自转成 AnyElement 后交给同一个外层 div。
         let (head_subtitle, body): (Option<SharedString>, AnyElement) = match self.detail.clone() {
             Some(info) => {
@@ -981,6 +994,8 @@ impl Render for DetailPage {
                             .h_full()
                             .min_w(px(0.))
                             .overflow_y_scroll()
+                            .track_scroll(self.scroll.handle())
+                            .on_mouse_down(MouseButton::Left, self.scroll.on_press())
                             .child(self.content(&info, cx)),
                     )
                     .child(self.side_column(cx))

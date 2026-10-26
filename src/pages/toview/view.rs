@@ -26,11 +26,14 @@ use gpui_kit::*;
 use crate::api::toview::{self, ToViewItem};
 use crate::pages::{loading, matches_keyword, OpenVideo};
 use crate::ui::video_card::{self, VideoCardData};
+use crate::ui::scroll::DragScroll;
 use crate::ui::{layout, palette};
 
 /// 待看页根视图。
 pub struct ToViewPage {
     client: Arc<bpi_rs::BpiClient>,
+    /// 单指/按住拖动的滚动状态（与本页那个滚动容器一一对应，见 `ui/scroll.rs`）。
+    scroll: DragScroll,
     items: Vec<ToViewItem>,
     /// 接口报的总条数（`count`），与 [`items`](Self::items) 的长度的差值要显示给用户看。
     total: u32,
@@ -68,6 +71,7 @@ impl ToViewPage {
         )];
 
         Self {
+            scroll: DragScroll::default(),
             client,
             items: Vec::new(),
             total: 0,
@@ -181,7 +185,9 @@ impl ToViewPage {
 impl EventEmitter<OpenVideo> for ToViewPage {}
 
 impl Render for ToViewPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 每帧登记一次移动/抬起监听（`Window::on_mouse_event` 只覆盖下一帧，见 `ui/scroll.rs`）。
+        self.scroll.watch(window, cx.entity_id());
         let summary = self.summary();
         let note = self.note.clone();
         let cards = self.cards(cx);
@@ -204,6 +210,8 @@ impl Render for ToViewPage {
                     .w_full()
                     .min_w(px(0.))
                     .overflow_y_scroll()
+                    .track_scroll(self.scroll.handle())
+                    .on_mouse_down(MouseButton::Left, self.scroll.on_press())
                     .child(
                         // 提示在前、列表在后：解析失败时列表本来就是空的，两件事都不藏。
                         div()

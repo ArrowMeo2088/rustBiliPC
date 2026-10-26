@@ -332,22 +332,36 @@ impl MainShell {
         self._subscriptions.push(on_user);
     }
 
-    /// 切入口页：没取过的块在这里补取。
+    /// 切入口页：**先清掉下钻栈**，再补取没取过的块。
+    ///
+    /// 为什么必须清栈（2026-10-26 用户报的缺陷）：上一版只改 `tab`，而渲染时"栈非空就显示栈顶"，
+    /// 于是人在详情页/空间页/收藏夹内容里点左侧任何一个入口都**看起来没反应**，
+    /// 只能先点"返回"把栈弹空。深层级点侧栏应当直接换页——这才是侧栏导航的语义，
+    /// "返回"留给逐层退，两件事各归各。
+    ///
+    /// 一个必须知道的后果：清栈会 drop 掉那些页的实体，而 `DetailPage` 在自己 `Drop` 里
+    /// `kill()` 它拉起的 mpv（QODER.md"子进程必须有归宿"那条定稿）。
+    /// 所以**看着视频时点侧栏换页，会把那个 mpv 实例关掉**——与一路点"返回"退到空是同一行为，
+    /// 不是这里新引入的。要不要改成"换页不动播放"是另一个决定，没问之前不动它。
     fn select_tab(&mut self, tab: ShellTab, cx: &mut Context<Self>) {
-        if self.tab == tab {
-            return;
-        }
+        let jumped = self.tab != tab;
         self.tab = tab;
-        match tab {
-            ShellTab::Home => self.home.update(cx, |page, cx| page.ensure_loaded(cx)),
-            ShellTab::Favorites => {
-                self.favorites.update(cx, |page, cx| page.ensure_loaded(cx))
+        if !self.stack.is_empty() {
+            log::debug!("外壳：切入口页 {}，清掉深度 {} 的下钻栈", tab.label(), self.stack.len());
+            self.stack.clear();
+        }
+        if jumped {
+            match tab {
+                ShellTab::Home => self.home.update(cx, |page, cx| page.ensure_loaded(cx)),
+                ShellTab::Favorites => {
+                    self.favorites.update(cx, |page, cx| page.ensure_loaded(cx))
+                }
+                ShellTab::History => self.history.update(cx, |page, cx| page.ensure_loaded(cx)),
+                ShellTab::ToView => self.toview.update(cx, |page, cx| page.ensure_loaded(cx)),
+                ShellTab::About => self.about.update(cx, |page, cx| page.ensure_loaded(cx)),
+                // 搜索页自己管输入与请求；下载页这一版没有网络请求。
+                ShellTab::Search | ShellTab::Download => {}
             }
-            ShellTab::History => self.history.update(cx, |page, cx| page.ensure_loaded(cx)),
-            ShellTab::ToView => self.toview.update(cx, |page, cx| page.ensure_loaded(cx)),
-            ShellTab::About => self.about.update(cx, |page, cx| page.ensure_loaded(cx)),
-            // 搜索页自己管输入与请求；下载页这一版没有网络请求。
-            ShellTab::Search | ShellTab::Download => {}
         }
         cx.notify();
     }

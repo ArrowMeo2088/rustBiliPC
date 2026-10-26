@@ -27,11 +27,14 @@ use gpui_kit::*;
 
 use crate::api::favorites::{self, FavFolder};
 use crate::pages::{OpenFolder, loading, matches_keyword};
+use crate::ui::scroll::DragScroll;
 use crate::ui::{layout, palette};
 
 /// 收藏页根视图。
 pub struct FavoritesPage {
     client: Arc<bpi_rs::BpiClient>,
+    /// 单指/按住拖动的滚动状态（与本页那个滚动容器一一对应，见 `ui/scroll.rs`）。
+    scroll: DragScroll,
     /// 凭据里的 mid（字符串形式）。
     mid_raw: String,
     folders: Vec<FavFolder>,
@@ -73,6 +76,7 @@ impl FavoritesPage {
         )];
 
         Self {
+            scroll: DragScroll::default(),
             client,
             mid_raw,
             folders: Vec::new(),
@@ -214,7 +218,9 @@ impl FavoritesPage {
 impl EventEmitter<OpenFolder> for FavoritesPage {}
 
 impl Render for FavoritesPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 每帧登记一次移动/抬起监听（`Window::on_mouse_event` 只覆盖下一帧，见 `ui/scroll.rs`）。
+        self.scroll.watch(window, cx.entity_id());
         let summary = self.summary();
         div()
             .flex()
@@ -234,6 +240,8 @@ impl Render for FavoritesPage {
                     .w_full()
                     .min_w(px(0.))
                     .overflow_y_scroll()
+                    .track_scroll(self.scroll.handle())
+                    .on_mouse_down(MouseButton::Left, self.scroll.on_press())
                     .child(self.body(cx)),
             )
     }

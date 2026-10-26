@@ -78,6 +78,15 @@
   ② 历史与待看**没有**服务端 `keyword`（api-notes 第 14 节把 grep 结论写全了），所以那两页的搜索是
   **本地过滤已加载的条目**，界面上必须把范围说出来（"筛选已加载的历史"、"筛出 N / 已加载 M"），
   要扩范围就手动"再加载"。**不许**做一个看起来像全站搜索、其实只搜了一页的输入框。
+- **触摸屏 = 按住拖动，别去找触摸 API**（2026-10-26 核实；细节在 `docs/architecture.md` 第 4.23 节与
+  `src/ui/scroll.rs` 文件头）：gpui 0.3.9 的 Windows 平台层不接 `WM_TOUCH`/`WM_POINTER*`，
+  核心里那套触摸管线只有 macOS 后端在喂，Windows 上永久闲置。手指能动是 Windows 把触点注入成鼠标消息，
+  所以"单指上下滚"的实现就是 `ScrollHandle::set_offset` + `MouseMoveEvent::dragging()`。三条硬规矩：
+  ① `Window::on_mouse_event` 的监听**只活一帧**，必须在 `render` 里每帧登记；
+  ② 改完偏移要 `cx.notify(entity_id)` 才有人重绘；③ 移动处理里 `stop_propagation()`，
+  否则拖出一段文本选中高亮而不是内容在动。**不要**为了"支持触摸"去引新库、写 `unsafe` 或自己抓 Win32 消息。
+  另一件别当 bug 修：手指**没有 hover**，只靠 hover 表达的层级在触摸屏上看不见（选中态另有底色+边框，不影响可用）。
+
 - **视觉必须照 `ref/Bili.Copilot`，且度量要抄数字不要凭感觉**（用户原话："GUI 样式要参考
   ref/Bili.Copilot，你这个太丑了"）：颜色与尺寸常量只从 `src/ui/palette.rs` 取，
   复用件只从 `src/ui/layout.rs` 取，页面里不许出现 `rgba(0x…)` / `px(56.)` 这类字面量；

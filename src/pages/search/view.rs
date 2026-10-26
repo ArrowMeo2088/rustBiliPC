@@ -22,6 +22,7 @@ use gpui_kit::*;
 
 use crate::api::search::{self, PageInfo, SearchSort};
 use crate::pages::OpenVideo;
+use crate::ui::scroll::DragScroll;
 use crate::ui::{layout, palette};
 use crate::ui::video_card::{self, VideoCardData};
 
@@ -29,6 +30,8 @@ use crate::ui::video_card::{self, VideoCardData};
 pub struct SearchPage {
     /// 关键词输入框状态。kit 的 `InputState` 内部是 Rope，中文 IME 合成已可用。
     query: Entity<InputState>,
+    /// 单指/按住拖动的滚动状态（`ui::scroll::DragScroll`，与下面那个滚动容器一一对应）。
+    scroll: DragScroll,
     /// 复用一份客户端；请求要 clone 成 `Arc` 投给 tokio。
     client: Arc<bpi_rs::BpiClient>,
     /// 当前展示的卡片。
@@ -78,6 +81,7 @@ impl SearchPage {
         )];
 
         Self {
+            scroll: DragScroll::default(),
             query,
             client,
             cards: Vec::new(),
@@ -240,7 +244,9 @@ impl SearchPage {
 impl EventEmitter<OpenVideo> for SearchPage {}
 
 impl Render for SearchPage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 每帧登记一次移动/抬起监听（`Window::on_mouse_event` 只覆盖下一帧，见 `ui/scroll.rs`）。
+        self.scroll.watch(window, cx.entity_id());
         // 页头右侧那条就是搜索框 + 按钮。宽度取自 palette，落在参考项目 320~500 的区间里
         // （`RootLayout.xaml:74-80` 的 MinWidth/MaxWidth）。
         let search_box = div()
@@ -305,6 +311,8 @@ impl Render for SearchPage {
                     .w_full()
                     .min_w(px(0.))
                     .overflow_y_scroll()
+                    .track_scroll(self.scroll.handle())
+                    .on_mouse_down(MouseButton::Left, self.scroll.on_press())
                     .px(px(palette::CARD_TEXT_PADDING_X))
                     .child(video_card::grid(
                         self.cards

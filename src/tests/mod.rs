@@ -453,6 +453,37 @@ mod profile_tests {
 }
 
 #[cfg(test)]
+mod touch_scroll_tests {
+    use crate::ui::scroll::target_offset;
+    use gpui_kit::{Pixels, px};
+
+    // 约定与 gpui 一致：`offset` 是负值（0 = 顶），`max` 是正的可用行程，`dy` 是手指位移
+    // （往下为正）。方向反了不会编译失败，只会在真机上"手指往上、内容往下"，所以钉死。
+    #[test]
+    fn dragging_down_reveals_content_above_and_stops_at_the_top() {
+        let zero: Pixels = px(0.);
+        // 已经停在顶部还继续往下拖：留在 0，不许拖出正偏移（那会露出内容上方的一片空白）。
+        assert_eq!(target_offset(zero, px(50.), px(500.)), zero);
+        // 从中段往下拖 30：往"顶"的方向回 30，但不越过 0。
+        assert_eq!(target_offset(px(-10.), px(30.), px(500.)), zero);
+        assert_eq!(target_offset(px(-100.), px(30.), px(500.)), px(-70.));
+    }
+
+    #[test]
+    fn dragging_up_scrolls_towards_the_end_and_stops_at_the_bottom() {
+        // 手指往上走 = 往下看：偏移跟着变负。
+        assert_eq!(target_offset(px(-50.), px(-10.), px(100.)), px(-60.));
+        // 已经到底还继续往上拖：停在 `0 - max`，攒不出"要往回走一大段才动"的死区。
+        assert_eq!(target_offset(px(-100.), px(-50.), px(100.)), px(-100.));
+    }
+
+    #[test]
+    fn no_movement_keeps_the_offset() {
+        assert_eq!(target_offset(px(-42.), px(0.), px(100.)), px(-42.));
+    }
+}
+
+#[cfg(test)]
 mod cover_tests {
     use crate::ui::cover;
 

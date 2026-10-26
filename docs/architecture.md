@@ -115,6 +115,7 @@ src/
 │   ├── layout.rs      页头/分隔线/区块标题/侧栏项/圆头像/统计行/卡片容器
 │   ├── qr.rs          二维码：qrcode-generator 出布尔矩阵，div 网格绘制
 │   ├── cover.rs       封面显示前必过：补协议 + hdslb 图床 `@{w}w_{h}h.jpg` 缩略图后缀
+│   ├── scroll.rs      滚动容器的"按住拖动滚动"（Windows 上 gpui 没有触摸管线，靠注入的鼠标消息；见第 4.23 节）
 │   └── video_card.rs  竖卡 232×238 与侧栏横卡 104（flex_wrap 当 UniformGrid 用、时长角标、hover、可点击）
 └── tests/             单元测试集中地（纯逻辑）
 ```
@@ -756,6 +757,44 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 - 收藏列表页与内容页的**行/卡片都是交互元素**，所以新增了 `layout::clickable_row`
   （与 `list_row` 共用同一组度量常量，差别只在 `id`/`on_click`/hover：gpui 的 hover 只存在于 `Stateful<Div>`）。
 
+### 4.23 触摸屏：单指滚动与侧栏换页（P10，2026-10-26）
+
+**这一版没有任何"触摸事件"可用**。核实结果（`ref/gpui/gpui_windows/src` 全文 grep）：
+没有 `WM_TOUCH`、没有 `WM_POINTERDOWN/UP/UPDATE`、没有 `RegisterPointerInputTarget`/`EnableMouseInPointer`，
+窗口过程只处理 `WM_MOUSEMOVE`（`events.rs:112`）、`WM_LBUTTONDOWN/UP`（`:136/:142`）、`WM_MOUSEWHEEL`（`:148`），
+其余交给 `DefWindowProcW`。gpui 核心的触摸通路（`TouchEvent`/`TouchPhase`/`dispatch_touch_event`
+`window.rs:5810`、pan→`ScrollWheelEvent` `:5851`）都在，但喂它的是 macOS 后端，
+Windows 上这条管线**永久闲置**（`PlatformGestures` 的默认实现是 `None`，`platform.rs:484`）。
+
+**那手指为什么还能动**：Windows 会把触点注入成鼠标消息——按住拖动是一条带 `MK_LBUTTON` 的
+`WM_MOUSEMOVE`，落到 gpui 是 `MouseMoveEvent { pressed_button: Some(Left), .. }` 且
+`event.dragging()` 为真。所以"单指上下滚"只能做成**按住把内容拖着走**（`ui/scroll.rs`），
+顺带给了鼠标用户"按住左键拖列表"。三个必须记住的实现事实：
+
+1. **偏移要走 `ScrollHandle`**：`.track_scroll(&handle)` 之后 div 的 paint 偏移与句柄是同一个
+   `Rc<RefCell<..>>`；`ScrollHandle` 上**没有** `scroll_by`（那个只在 `ListState` 上），只能
+   `set_offset`；`offset()` 是负值、顶是 `0`、底是 `0 - max_offset()`。方向与夹取抽成
+   纯函数 `target_offset` 进单测——这两处写反都不会编译失败。
+2. **监听每帧重登记**：`Window::on_mouse_event` 的文档原文是"register … for the next frame …
+   the listener will be cleared"（`window.rs:5427-5445`），所以 `scroll.watch(window, view)`
+   必须在 `render` 里调；挪进 `new()` 只有头一帧收得到移动。改完偏移用 `cx.notify(entity_id)`
+   催重绘，与 kit 滚动条的 `notify_drag` 同一做法（`base/src/scrollbar.rs:517-533`）。
+3. **移动里 `cx.stop_propagation()`**：不停会顺带开始选中文本，看到的是"拖出一段高亮"而不是内容在动
+   （kit 滚动条在同一处也停）。按下只记起点、不吞事件，所以点击与按钮照旧；
+   从一张卡片起步拖到别处也不会误触——gpui 的点击要求同一个元素自己的 `pending_mouse_down` 配对
+   （`elements/div.rs:3609-3622`）。
+
+**已知做不到的**：手指按下后**没有 hover**（触摸不产生"悬停"），所以凡是只靠 hover 表达的层级
+（例如导航项 hover 加深底色）在触摸屏上看不见——选中态本来就另有底色+边框，不影响可用性。
+`ScrollBounce`（kit 的橡皮筋回弹）在 Windows 上是关的（`base/src/scroll_bounce.rs:172` 的
+`enabled_by_default()` 只在 ios/android/macos 为真），所以拖到边界是硬停，不回弹。
+
+**侧栏换页必须先清栈**（同一轮修的缺陷）：上一版 `select_tab` 只改 `tab`，而渲染规则是
+"栈非空就显示栈顶"，于是人在详情页/空间页/收藏夹内容里点侧栏**看起来没反应**，只能先点"返回"。
+现在 `select_tab` 先 `stack.clear()` 再切页——"返回"退回只负责逐层退。代价写进代码注释了：
+清栈会 drop 详情页，而它在 `Drop` 里 kill 自己拉起的 mpv，所以**看着视频点侧栏换页会关掉那个实例**
+（与一路点"返回"退到空是同一行为，要不要改成"换页不动播放"是另一个决定）。
+
 ## 5. 阶段进度
 
 
@@ -775,6 +814,7 @@ BuvidData { buvid3, buvid4 }`）。所以 `api/login.rs::poll_qr` 在 `code==0` 
 | P7 | 用户空间：点详情页 UP 主 → 资料卡 + 投稿（带分区筛选）/ 图文 / 收藏（第 4.18 节） | **编译与测试已绿**（第三十二轮 54 passed、零 Rust warning，产物 `40f556d`，md5 `86297ed0…`）；待真机看：第 4.18 节那 6 条 |
 | P8 | 外壳重构（2026-10-26 用户定稿）：登录改独立小窗 + 侧栏 80 宽七入口（收藏/历史/待看/下载/设置）+ 左上角账号头像 + 落盘改 `auth.json`/`config.json` + 待看接口（第 4.19、4.20、4.21 节） | **编译与测试已绿**（第三十五轮 60 passed、零 Rust warning，产物 `0d659a8`，md5 `b2687551…`）；待真机看：第 4.19–4.21 节 + 该轮记录里那 5 条 |
 | P9 | 收藏夹下钻 + 三种搜索（第 4.22 节）：收藏列表可展开成内容页、卡片进详情页；内容页服务端关键词搜索 + 加载更多；历史本地过滤 + 游标"再加载 30 条"；待看本地过滤 | **编译与测试已绿**（第三十八轮 62 passed、零 Rust warning，产物 `22c2f87`，md5 `b7aeeaa1…`）；待真机看：第 4.22 节那三条搜索口径 + 该轮记录 |
+| P10 | 触摸屏优化（单指上下滚动 = 按住拖动平移内容，11 个滚动容器全接）+ 侧栏入口点击直接换页（先清下钻栈）（第 4.23 节） | 代码完成，等编译与真机 |
 
 ## 6. 已知风险与待验证
 

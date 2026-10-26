@@ -42,11 +42,14 @@ use crate::api::space::{
 };
 use crate::pages::{OpenUser, OpenVideo};
 use crate::ui::video_card::{self, VideoCardData};
+use crate::ui::scroll::DragScroll;
 use crate::ui::{layout, palette};
 
 /// 用户空间页根视图。
 pub struct UserSpacePage {
     client: Arc<bpi_rs::BpiClient>,
+    /// 单指/按住拖动的滚动状态（`ui::scroll::DragScroll`，与下面那个滚动容器一一对应）。
+    scroll: DragScroll,
     /// 空间主人的 mid。三块接口都要它。
     mid: u64,
     /// 从上一页带过来的昵称：资料卡回来之前也要有名字可显示。
@@ -86,6 +89,7 @@ impl UserSpacePage {
     /// 图文与收藏在第一次切到那个页签时才取。
     pub fn new(client: Arc<bpi_rs::BpiClient>, mid: u64, name: String) -> Self {
         Self {
+            scroll: DragScroll::default(),
             client,
             mid,
             name: name.into(),
@@ -706,7 +710,9 @@ impl EventEmitter<OpenVideo> for UserSpacePage {}
 impl EventEmitter<OpenUser> for UserSpacePage {}
 
 impl Render for UserSpacePage {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // 每帧登记一次移动/抬起监听（`Window::on_mouse_event` 只覆盖下一帧，见 `ui/scroll.rs`）。
+        self.scroll.watch(window, cx.entity_id());
         let controls = match self.section {
             SpaceSection::Videos => div()
                 .flex()
@@ -734,6 +740,8 @@ impl Render for UserSpacePage {
                     .w_full()
                     .min_w(px(0.))
                     .overflow_y_scroll()
+                    .track_scroll(self.scroll.handle())
+                    .on_mouse_down(MouseButton::Left, self.scroll.on_press())
                     .child(self.body(cx)),
             )
     }
