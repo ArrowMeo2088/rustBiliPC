@@ -351,8 +351,9 @@ async fn attempt(
         .send(request)
         .await
         .map_err(|error| Stop::Failed(format!("请求失败: {error}")))?;
-    // `StatusCode` 是 `Copy`，这里先把状态码拿走再看响应体：后面 `body_mut()` 要独占这个响应。
-    let status = *response.status();
+    // `Response::status()` 返回的是 `StatusCode` 本身（它 `Copy`），不是引用：
+    // 先拿走状态码再看响应体，后面 `body_mut()` 要独占这个响应。
+    let status = response.status();
     if !status.is_success() {
         return Err(Stop::Failed(format!("HTTP {status}")));
     }

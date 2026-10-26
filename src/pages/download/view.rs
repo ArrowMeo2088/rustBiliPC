@@ -81,6 +81,11 @@ pub struct DownloadPage {
     scroll: DragScroll,
     /// "用 mpv 打开"拉起的实例（同详情页的规矩：留着才 kill 得掉）。
     player: Option<std::process::Child>,
+    /// 这一页自己那一路动作的提示（打开成品成功/失败）。空串表示没话要说。
+    ///
+    /// 为什么要有它：`launch()` 失败只会写进日志，而**日志是给人查的、不是给人看的**
+    /// （第 4.7 节"失败必须看得见"），点完按钮界面上没反应就等于没告诉用户为什么没窗口。
+    note: SharedString,
     _subscription: Subscription,
 }
 
@@ -113,6 +118,7 @@ impl DownloadPage {
             queue,
             scroll: DragScroll::default(),
             player: None,
+            note: "".into(),
             _subscription: subscription,
         }
     }
@@ -137,13 +143,18 @@ impl DownloadPage {
 
         match crate::player::launch(&video_text, audio_text.as_deref(), &[]) {
             Ok(child) => {
+                let pid = child.id();
                 log::info!("已用 mpv 打开成品：{video_text}");
+                // 句柄必须留下：`Child` 的 drop 不杀子进程，留下的就是"声音还在、没人能关"。
                 self.player = Some(child);
+                self.note = format!("已交给 mpv（pid {pid}）：{video_text}").into();
             }
             Err(error) => {
                 log::error!("用 mpv 打开失败: {error}");
+                self.note = format!("打开失败：{error}").into();
             }
         }
+        cx.notify();
     }
 
     /// 一行任务。
@@ -313,14 +324,14 @@ impl Render for DownloadPage {
             (rows, running, finished)
         };
 
-        let subtitle = if rows.is_empty() {
+        // 显式标类型：这一条 `if/else` 的 `None` 分支要靠后面的 `header` 才推得出来，
+        // 不写就是 E0282（第三十轮那两条歧义 collect 是同一类错）。
+        let subtitle: Option<SharedString> = if rows.is_empty() {
             None
         } else {
-            Some(
-                format!("共 {} 条 · 进行中 {running}", rows.len()).into(),
-            )
+            Some(format!("共 {} 条 · 进行中 {running}", rows.len()).into())
         };
-        let trailing = if finished > 0 {
+        let trailing: Option<AnyElement> = if finished > 0 {
             Some(
                 Button::new("download-clear")
                     .label("清掉已完成")
@@ -383,11 +394,26 @@ impl Render for DownloadPage {
                 .into_any_element()
         };
 
+        // 提示那一行：没话就画一个空 div（少一个 `when_some` 的导入，也让布局层数恒定）。
+        let note_line = if self.note.is_empty() {
+            div().into_any_element()
+        } else {
+            div()
+                .w_full()
+                .px(px(palette::CARD_TEXT_PADDING_X))
+                .py(px(palette::CARD_TEXT_ROW_GAP))
+                .text_size(px(palette::FONT_CAPTION))
+                .text_color(palette::text_secondary())
+                .child(self.note.clone())
+                .into_any_element()
+        };
+
         div()
             .flex()
             .flex_col()
             .size_full()
             .child(layout::header("下载", subtitle, trailing))
+            .child(note_line)
             .child(
                 div()
                     .id("download-body")

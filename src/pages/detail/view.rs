@@ -415,11 +415,15 @@ impl DetailPage {
         let queue = self.queue.clone();
         self.player_note = format!("等待选目录…（{}）", request.file_stem).into();
         cx.spawn(async move |this, cx| {
+            // 这一串剥的是三层壳：`await` 给 `Result<平台结果, RecvError>`，
+            // 平台结果是 `Result<Option<Vec<PathBuf>>, anyhow::Error>`，
+            // 最里面的 `None` 才是"用户按了取消"。任何一层失败都当"没选目录"处理。
             let picked = receiver
                 .await
                 .ok()
+                .and_then(|inner| inner.ok())
                 .flatten()
-                .and_then(|paths| paths.and_then(|mut paths| paths.pop()));
+                .and_then(|mut paths| paths.pop());
             let Some(dir) = picked else {
                 let Some(view) = this.upgrade() else { return };
                 view.update(cx, |view, cx| {
