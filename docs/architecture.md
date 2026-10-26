@@ -929,7 +929,7 @@ div().text_size(..).text_color(..)                       // 样式仍留在父 d
 | P9 | 收藏夹下钻 + 三种搜索（第 4.22 节）：收藏列表可展开成内容页、卡片进详情页；内容页服务端关键词搜索 + 加载更多；历史本地过滤 + 游标"再加载 30 条"；待看本地过滤 | **编译与测试已绿**（第三十八轮 62 passed、零 Rust warning，产物 `22c2f87`，md5 `b7aeeaa1…`）；待真机看：第 4.22 节那三条搜索口径 + 该轮记录 |
 | P10 | 触摸屏优化（单指上下滚动 = 按住拖动平移内容，11 个滚动容器全接）+ 侧栏入口点击直接换页（先清下钻栈）（第 4.23 节） | **完成**（第三十九轮 65 passed、零 Rust warning，产物 `014b71c`，md5 `4c813442…`；他真机确认拖动滚动"这个好了"，侧栏换页同轮通过） |
 
-| P11 | 详情页与评论区文字**可选中可复制**（第 4.25 节）+ **下载**（第 4.24 节：双文件 `.m4v`+`.m4a`、每次弹框选目录、只下当前 P、进度与取消、备用域名、打开所在目录/用 mpv 打开）+ 顺手修掉 roadmap R0 的两条（清晰度按钮按封顶过滤、`src/README.md` 里那条已经不存在的 `--input-ipc-server` 说法） | **代码已写完，第四十轮 CI 编译中**；绿了之后再真机看：选字与拖动滚动的分界（风险第 24 条）、弹框能不能正常选到目录、403/时效表现（风险第 25 条） |
+| P11 | 详情页与评论区文字**可选中可复制**（第 4.25 节）+ **下载**（第 4.24 节：双文件 `.m4v`+`.m4a`、每次弹框选目录、只下当前 P、进度与取消、备用域名、打开所在目录/用 mpv 打开）+ 顺手修掉 roadmap R0 的两条（清晰度按钮按封顶过滤、`src/README.md` 里那条已经不存在的 `--input-ipc-server` 说法） | **编译与测试已绿**（第四十二轮 75 passed、零 Rust warning，产物 `4338445`，md5 `dd020f45…`；第四十轮红一次、第四十一轮绿但剩两条 warning，见第 8 节）；待真机看：选字与拖动滚动的分界（风险第 24 条）、弹框能不能正常选到目录、403/时效表现（风险第 25 条） |
 
 ## 6. 已知风险与待验证
 
@@ -1588,3 +1588,64 @@ error[E0277]: the trait bound `CommentSortKind: std::default::Default` is not sa
 
 上一版（第三十五轮）同一段日志结尾那四行 `无效的窗口句柄` 在这次没再出现，
 也就是说它确实是退出瞬间的销毁噪音，不是功能问题。
+
+### 第四十轮（P11 选中复制 + 下载）：红，两条错都在"我以为我知道这个 API"
+
+| 项 | 值 |
+| --- | --- |
+| run | 40293890622（SHA `de58bc0`） |
+| 结果 | **failure**，红在 `Build (release)` 的 lib 阶段 |
+
+编译器原话与根因（**都不是设计问题，是把两个 API 的形状记错了**）：
+
+1. `E0614: type StatusCode cannot be dereferenced`（`src/api/download.rs:355`）。
+   我写的是 `let status = *response.status();`，理由是"http 的 `status()` 返回引用"——那是 **http 0.2 的印象**，
+   `http 1.5` 里它按值返回 `StatusCode`（本身 `Copy`）。**记错版本 = 白跑一轮**，
+   而这轮本来已经在注释里写了"先拿走状态码再看响应体"，说明意图对、事实错。
+2. `E0599: no method named flatten found for Option<Result<Option<Vec<PathBuf>>, anyhow::Error>>`
+   （`src/pages/detail/view.rs:421`）。`prompt_for_paths` 的结果是**三层壳**：
+   `await` 的 `Result<_, RecvError>` → 平台的 `Result<_, anyhow::Error>` → 最里的 `Option`（用户按取消）。
+   我按两层写了 `.ok().flatten()`，而 `flatten` 只对 `Option<Option<_>>` 存在，对 `Option<Result<_,_>>` 不存在。
+   改成 `.ok().and_then(|inner| inner.ok()).flatten()` 再 `pop()`。
+3. `warning: unused variable: cx`（`src/pages/download/view.rs:124`）——**这条不是笔误，是功能缺口**：
+   「用 mpv 打开」失败时只写了日志，界面上点完什么都没发生。按第 4.7 节"失败必须看得见"补了下载页自己的提示位。
+   顺手修掉一个真 bug：原来 `self.player = Some(child);` 被漏掉了（`Child` 的 drop 不杀子进程，
+   漏掉它就会留下关不掉的 mpv），而且 `child.id()` 写在 move 之后会编译失败——**pid 要在 move 前取**。
+
+这一轮还留下一条**没被编译器抓到、只能靠真机**的事：`TextSelection::is_selectable_at` 用的是"当前作用域"里
+登记的 `text_bounds`（第 4.25 节），我们把它放在 div 自己的 `on_mouse_down` 里问。如果那一瞬间作用域不对，
+它会恒返回 `false`，症状是"在标题上划字时页面也跟着滚"。列在风险表第 24 条，别当已验证。
+
+### 第四十一轮：绿了，75 passed、Cargo.lock 零差异，但还剩两条 warning
+
+| 项 | 值 |
+| --- | --- |
+| run | 40297103213（SHA `8ef7cfe`） |
+| 结果 | **success**，09:07:07 → 09:10:35（**3 分 28 秒**） |
+| 测试 | `75 passed; 0 failed`（第三十九轮 65 → `download_tests` 十条 + `quality_options` 封顶一条） |
+| warning | **2 条**：`src/api/download.rs:365` `unused_mut`、`src/main.rs:27` `unused_imports: gpui_kit` |
+| Cargo.lock | **零差异**——这一轮往 `Cargo.toml` 加了 `futures`（只为 `AsyncReadExt`），
+  lock 里那条依赖边是我手写的，CI 不用 `--locked` 重解之后取回来 diff 是 0 行，说明手写的那条正好就是答案 |
+
+`main.rs` 那条 glob 为什么现在才冒出来：**它属于 bin 目标**，而第四十轮在 lib 阶段就红了、根本没编到 bin。
+教训是"零 warning"这个口径只有**整轮全绿**才作数——只看 lib 那几行会漏掉 bin 与 test 两个目标。
+
+### 第四十二轮（P11 交付）：绿了，75 passed、零 Rust warning
+
+| 项 | 值 |
+| --- | --- |
+| run | 40298364353（SHA `4338445`） |
+| 结果 | **success**，09:17:11 → 09:20:17（**3 分 06 秒**） |
+| 测试 | `75 passed; 0 failed` |
+| warning | Rust 侧 **0 条**（日志里 `warning:` 一处也没有） |
+| 产物 | `rustbilipc.exe` **36,417,024** 字节，md5 `dd020f45…`（上一版 36,099,072 / `4c813442…`，+317 KB，与"下载整条链路 + 选中文本元素 + 队列实体"相称）；已只覆盖 `publish/rustbilipc.exe`，`debug.log`/`auth.json`/`config.json`/`mpv.exe`/`vulkan-1.dll` 都没动 |
+| Cargo.lock | 零差异（同第四十一轮） |
+
+**待他真机验的三条**（按好不好验排序）：① 选字与拖动滚动的分界（风险第 24 条，
+如果不划算，改的是 `ui/scroll.rs::on_press` 那一句判据，不是选择功能）；
+② 弹框能不能正常选到目录 + 一次完整下载（看 `提交下载到 API runtime` / `下载完成` 两段日志；
+`HTTP 403` 就是时效或 cookie，风险第 25 条）；③ 触摸屏上那颗「复制选中」（选中一段评论再点它，应能粘出中文）。
+
+顺带记一条省事的 gpui 事实：**`App::spawn` 内部是 `boxed_local()`，不要求 future 是 `Send`**
+（`ref/gpui/gpui/src/app.rs:2297-2306`），所以下载队列可以在 gpui 的任务里直接 await
+`tokio::sync::mpsc::UnboundedReceiver`（它 `Send` 但不 `Sync`）——不用为"跨线程"再造一层通道。
