@@ -496,3 +496,41 @@ Howard Hinnant 的 `civil_from_days` 先把 `+8h` 再换算，边界进单测：
 "凌晨发布的稿件集体少一天"就是这条偏移存在的理由）、`1709164800 → 2024-02-29`（闰日）、
 `1672504200 → 2023-01-01`（跨年）。相对时间那一套（评论区）另有口径，见第 11 节。
 
+
+## 18. 登录失效的判定与直链的可达性（P13，已核对到行号）
+
+两条都是"我们据以做决定"的证据，所以行号写死在这里，别凭记忆改。
+
+**① 什么样的错误算"要重新登录"**：`ref/bpi-rs/src/err/error.rs:310-313`
+
+```rust
+pub fn requires_login(&self) -> bool {
+    matches!(self.code(), Some(-101) | Some(-401) | Some(800501007))
+        || matches!(self.http_status(), Some(401))
+}
+```
+
+`pages/relogin.rs` **只调这个方法**，不在我们这边再列一遍数字：库改口径时我们跟着改，
+而不是两处各写一份、以后对不上。相关两条：`is_permission_error()`（`-403`/`-4`/HTTP 403，
+那是"没权限"不是"没登录"，**不许**触发重登）、`requires_vip()`（`-106`/`-650`）。
+`-101` 的现场含义：`SESSDATA` 过期或被风控 —— 这时候把凭据留在盘上只有坏处，
+因为下载与 CDN 探测是直接读 `auth.json` 拼 `Cookie` 的（`api/probe.rs::cdn_headers`），
+留着等于每次起播都带一条死 cookie 去撞 403，所以处置的第一步是 `Auth::clear()`。
+
+**② 直链的可达性怎么问**：这不是 bpi-rs 的接口，是我们对 B 站 CDN 的一个用法假设，记在这里免得日后当事实：
+`baseUrl` 之外库里还给了 `backupUrl: Vec<String>`（`ref/bpi-rs/src/video/videostream_url.rs:40-68`
+的 `DashStream`，`backupUrl` 带 `#[serde(default)]` + `deserialize_vec_or_default`，
+所以"没给"和"给空数组"都是空列表，不会是 `None`）。我们**用 `Range: bytes=0-0` 问一句**，
+判据是 2xx/3xx 都算能播：
+
+- **206** 是正常回答；**200 也算**——有的边缘节点不认 Range 就直接给全量，
+  我们只读状态码、立刻丢弃响应体（不落盘、不等实体下载完）。
+- **403 要换域名而不是当"没权限"**：B 站某个 CDN 节点抽风时回 403，换一个节点常常就好了；
+  真·没权限那种（会员档）换完所有域名还是不通，这时按第 4.28 节最后一条**仍把主地址交给 mpv**。
+- **416** 是 Range 不被接受（不是"没这个文件"），按不通处理但也不炸。
+- 探测请求的头必须与交给 mpv / 交给下载的**同一组**（`Referer: https://www.bilibili.com` +
+  桌面 Chrome UA + `Cookie`）：`src/player/mod.rs` 那两个常量是唯一出处。
+  头不一致就会出现"我们探到 403、mpv 却能播"这种对不上号的结论。
+- bpi-rs 的 `BpiClient::get()` 只在主机名以 `bilibili.com` 结尾时才带它自己 cookie jar 里的那条
+  （`ref/bpi-rs/src/client.rs:647-652`），而 m4s 直链在 `*.bilivideo.com` / `*.mcdn.bilivideo.cn` 上，
+  **走它拿不到 cookie**，所以探测不用 `BpiClient::get`，用我们自己的 `HttpClient` + 自己拼的头。
