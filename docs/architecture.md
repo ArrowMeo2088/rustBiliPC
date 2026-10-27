@@ -2119,13 +2119,28 @@ error[E0277]: the trait bound `CommentSortKind: std::default::Default` is not sa
 1. **连推三个提交、编的是同一份源码**：后两个只改 `cd.yml`，`ci.yml` 却照样全量编译，
    等于为同一个结论烧了三次 runner。修法是 `ci.yml` 加 `paths-ignore` + `concurrency`
    （第 4.28 节 ④ 那两条），动手前该想到——**"改了 workflow 也要编一遍"这条默认值在这里没有价值**。
-2. **动态矩阵连踩三次**：① `strategy.matrix.include: ${{ fromJson(needs.plan.outputs.matrix) }}`、
-   ② `matrix: ${{ fromJson(... '{"include":[...]}' ) }}`（官方那份写法）、
-   ③ 一个数组维装对象 `matrix.leg`（每项是一整个目标对象）。
-   三次的现象都不是报错而是 **`build` 作业根本不存在**：`plan` 绿（日志里交出去的 JSON 完全正确）、
+2. **动态矩阵连踩三次——但先别信我的第一版归因，那是错的**：三次红分别是
+   ① `strategy.matrix.include: ${{ fromJson(needs.plan.outputs.matrix) }}`、
+   ② `matrix: ${{ fromJson('{"include":[…] }') }}`（官方那份写法）、
+   ③ `matrix.leg`（一整个数组维装对象）。
+   现象都不是报错而是 **`build` 作业根本不存在**：`plan` 绿、日志里交出去的 JSON 完全正确、
    `release` 正确跳过、run 结论 failure、jobs 列表里只有两个、check-run 与日志零错误。
-   归纳出来的两条限制：**`include` 不能来自表达式**；**矩阵的值只能是标量，不能是一整个对象**
-   （而我们的四个字段必须成组，所以标量数组那条路要么笛卡尔积、要么把对象塞进字符串再解，都不值当）。
+   **第五十二轮用五组探针（`p-*`/`q-*`/`x-*`/`u-*`/`y-*`，全在 `cd.yml` 里，几分钟一组）验完了**，
+   结论与我最先写进文档的两条**相反**，特此改口：
+   - **`include: ${{ fromJson(...) }}` 能用**（`q-build`、`p-inc`、`x-build-a/b` 全展开成功）；
+   - **矩阵的维度可以是对象数组**（`p-obj-legs` 成功；官方 `workflow-syntax.md` 第 1294 行本来就允许）；
+   - **`actions/cache` + `hashFiles` 也不是凶手**（`u-win-cache` 带着它出现了）。
+   真正的原因在**生产者那一侧**：`r-plan` 的 `Complete job` 里**没有 `Set output 'matrix'` 这一行**，
+   同一作业里回看 `steps.pick.outputs.matrix` 是**空**——也就是那一步的
+   `echo "matrix=$matrix" >> "$GITHUB_OUTPUT"` **压根没被记成作业输出**；
+   `fromJson('')` → 零条腿 → **零条腿的作业在作业列表里就是不出现**（连 `skipped` 都不是），
+   而 run 因为"整个作业没了"判 failure，且不给任何错误文本。
+   探针里 `q-plan`/`x-plan-a`/`x-plan-b` 与 `r-plan` 写的是**同一份 JSON**、只差脚本细节
+   （`actions/checkout` 与两处 `$GITHUB_STEP_SUMMARY` 写入**单独去掉都正常**），
+   所以这是"输出没记上"这一类问题，**跟矩阵形状无关**。
+   **值得记的两件事**：① "没跑"比"红了"难查一个数量级，判据是看作业列表里那条腿**有没有出现**、
+   以及生产者作业的 `Complete job` 有没有 `Set output 'X'`；② **我当时把两次失败归纳成了"平台限制"，
+   还写进了 QODER.md 与记忆**——归纳之前该做的探针只花几分钟，我晚了五组才做。
    **值得记的是失效模式**："没跑"比"红了"难查一个数量级——以后凡是动态矩阵，
    第一个动作是看作业列表里那条腿**有没有出现**，而不是翻日志找错误。
 3. **体积数字改口**：图标那组数字（"1830 个文件 / 2.8 MB"、"我们这份 171 KB / 省 2.6 MB"）

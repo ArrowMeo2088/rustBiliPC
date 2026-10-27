@@ -296,6 +296,42 @@ jobs:
     steps:
       - run: echo "y-build 这条腿出现了：${{ toJSON(matrix) }}"
 
+  # A/B 只改一处：**给作业一个短 `name:`**（不写时 GitHub 会用 `id (v1, v2, …)` 自动拼，
+  # 我们那份矩阵有 7 个键，自动名 100 多字符）。内容、生产者、os 全同 y-build。
+  y2-build:
+    if: ${{ inputs.targets == 'probe' }}
+    needs: y-plan
+    name: y2
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.y-plan.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: echo "y2-build（带短 name）这条腿出现了：${{ toJSON(matrix) }}"
+
+  # 第二个 A/B：仍然不写 `name:`，但生产者只交**两个键**（name/os），自动名就短了。
+  z-plan:
+    if: ${{ inputs.targets == 'probe' }}
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - id: pick
+        shell: bash
+        run: echo 'matrix=[{"name":"win-x64","os":"windows-latest"}]' >> "$GITHUB_OUTPUT"
+
+  z-build:
+    if: ${{ inputs.targets == 'probe' }}
+    needs: z-plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.z-plan.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: echo "z-build（两键、无 name）这条腿出现了：${{ toJSON(matrix) }}"
+
   # 两种写法各写一遍，再用**两条腿分别消费**：哪条腿出现，就说明哪种写法真把输出交出去了。
   # 差别只可能在 `echo "名=值" >>` 与 `名<<分隔符 … 分隔符` 这两种写法本身。
   u-plan:
