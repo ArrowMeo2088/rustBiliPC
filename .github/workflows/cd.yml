@@ -324,8 +324,6 @@ jobs:
     steps:
       - run: echo "多行写法这条腿出现了：${{ toJSON(matrix) }}"
 
-  p-static:
-
   r-build:
     if: ${{ inputs.targets == 'probe' }}
     needs: r-plan
