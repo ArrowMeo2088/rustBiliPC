@@ -22,14 +22,14 @@ Direct3D11 + DirectComposition + DirectWrite 原生绘制；视频播放交给�
 **凭据 `-101` → 自动开扫码登录小窗**（重登只关小窗并刷新当前格，绝不再开一个主窗口），
 **滚到底自动连续翻页**（历史、收藏夹内容、合集内容、搜索、空间的图文与合集）；
 ③ **落盘搬到 `%APPDATA%/ArrowMeo/rustBiliPC`，旧位置代码清零**；
-④ **工作流拆成 `ci.yml`（push 自动）与 `cd.yml`（手动多平台 + LTO/strip + UPX + Release，只打 exe；步骤抽进 `build-exe.yml`，`publish` 默认关）**。
+④ **工作流拆成 `ci.yml`（push 自动）与 `cd.yml`（手动：一条作业 + 静态四腿矩阵同时编四平台，LTO/strip + UPX，`publish` 开关控制是否发 Release，只打 exe）**。
 见第 4.27、4.28 节 |
 
 ## 大概的文件结构
 
 ```
 rustBiliPC/
-├── .github/workflows/   `ci.yml`（push 自动：win x64 release + 单测）+ `cd.yml`（手动：四个静态作业调 `build-exe.yml`，release-dist + UPX，`publish` 开关控制是否发 GitHub Release）
+├── .github/workflows/   `ci.yml`（push 自动：win x64 release + 单测）+ `cd.yml`（手动：一条 build 作业 + 静态 include 四腿矩阵，release-dist + UPX，`publish` 开关控制是否发 GitHub Release）+ `../scripts/check_workflows.py`（推 workflow 改动前的本地校验）
 ├── src/                 项目源代码（单元测试在 src/tests/）
 │   ├── main.rs lib.rs app.rs theme.rs logging.rs
 │   ├── api/             bpi-rs 封装 + DASH 码流选择 + 播控取地址 + 下载 + 起播前地址探测
@@ -60,12 +60,17 @@ rustBiliPC/
   这是"改动还能不能编过"的证据通道（本机没有 Rust 工具链，每一轮都要靠它）。
   两道闸（第五十二轮加的）：`paths-ignore` 让**全是文档/只动 `cd.yml` 的提交不触发编译**
   （`ci.yml` 自己除外），`concurrency` + `cancel-in-progress` 让同分支同事件只留最新一次。
-- **`cd.yml`**：Actions → CD → **Run workflow**（手动）。输入五个：`targets`（四条腿或 `all`，
-  默认 `win-x64`）、**`publish`（默认关：只编译取产物，不建 Release）**、`tag`、`prerelease`、`upx`。
-  四个目标 win-x64 / win-arm64 / linux-x64 / linux-arm64 是**四个静态作业**，每条调同一份
-  `build-exe.yml`（`release-dist`：LTO + `codegen-units=1` + strip，再 UPX 压，压失败就出未压缩那份）。
-  **不用动态矩阵**：`fromJson` + `include` / 对象值实测都让作业凭空消失（架构文档第 8 节第五十二轮）。
-  要发 Release 就把 `publish` 打开并给 tag。**资产只有可执行文件本身**（不带 dll、不带 mpv、不带文档）。
+- **`cd.yml`**：Actions → CD → **Run workflow**（手动）。输入：`publish`（**默认关：只编译取产物、
+  不建 Release**）、`tag`、`prerelease`、`replace_tag`、`upx`。四个目标 win-x64 / win-arm64 /
+  linux-x64 / linux-arm64 是**一条 `build` 作业 + 静态 `include` 四腿矩阵**，四条**同时开跑**
+  （`fail-fast: false`，一个红不带走其余三个），用 `release-dist`（LTO + `codegen-units=1` + strip）编，
+  再 UPX 压（版本钉死；压不动的目标出未压缩那份）。Linux 钉 `ubuntu-22.04` 卡 glibc 下限。
+  要发 Release 就把 `publish` 打开并给 tag（发之前会先查同名标签指向哪次提交）。
+  **资产只有可执行文件本身**（不带 dll、不带 mpv、不带文档）。
+- **改 workflow 之前先跑** `python .github/scripts/check_workflows.py`：`yaml.safe_load` 查不出
+  重复键、`needs` 悬空、未声明的 `inputs.*`，尤其查不出 **`${{ steps.<id>.* }}` 指到一个没写 `id:`
+  的步骤**——那条求值为空串且不报错，能让一个作业在作业列表里**凭空消失**（第五十二轮连红三次的真因，
+  全过程在架构文档第 8 节）。
 - 日常产物：Artifacts `rustbilipc-win-x64-release` / 本机 `build.bat` 归集到 `publish/` 根。
 - 缓存：`~/.cargo` 与 `target/` 按 profile 分 key；首次冷编译约 25–45 分钟属预期。
 - 为什么是 release 而不是 debug：gpui 的 Windows 后端在 debug 下**运行时**从编译机路径读 HLSL 源，

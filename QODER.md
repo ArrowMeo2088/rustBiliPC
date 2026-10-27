@@ -21,18 +21,31 @@
   - **`ci.yml`**：**push / PR 自动跑**，只做 **Windows x64 release** 编译 + `cargo test`。
     这条是"改动还能不能编过"的证据通道，所以刻意不做多平台、不压 UPX（矩阵一次 20 分钟起，
     放在 push 上会让人不敢推）。**2026-10-27 加了两道闸**：`paths-ignore`（`docs/**`、`*.md`、
-    `QODER.md`、`cd.yml`、`build-exe.yml` 这些单独提交不触发编译——一轮的文档同步是规矩，
+    `QODER.md`、`cd.yml` 这些单独提交不触发编译——一轮的文档同步是规矩，
     但全 `.md` 的提交编出来跟上一版一模一样）与 `concurrency` + `cancel-in-progress`
     （同分支同事件只留最新一次）。**`ci.yml` 自己不在 ignore 里**；同一提交里只要带源码就照常编。
-  - **`cd.yml`**：**手动触发**（`workflow_dispatch`），`targets` 挑一条或 all（默认 `win-x64`）、
-    **`publish` 默认关**（关掉就只编译取产物、不建 Release —— 发 Release 是公开动作，要他点头）。
-    结构是**四个静态作业各调 `.github/workflows/build-exe.yml`**（步骤只有一份），用
-    `[profile.release-dist]`（LTO + `codegen-units=1` + `strip`）编，UPX 压。
-    **这里不要用矩阵**：动态矩阵（作业输出 + `fromJson`）实测两种写法都让 `build` 作业凭空消失
-    （`include` 不能来自表达式、矩阵值不能是对象），第五十二轮连踩两次，记在第 8 节。
+  - **`cd.yml`**：**手动触发**（`workflow_dispatch`），**一条 `build` 作业 + 静态 `include` 四腿矩阵**
+    （`win-x64`/`win-arm64`/`linux-x64`/`linux-arm64` 同时编，`fail-fast: false`，每腿
+    `name: ${{ matrix.rid }}`）；用 `[profile.release-dist]`（LTO + `codegen-units=1` + `strip`）编，
+    UPX 压（**版本钉 `UPX_VERSION`**，Windows 用官方 zip、Linux 走 apt —— arm64 runner 上不能解
+    amd64 那份）；Linux 目标**钉 `ubuntu-22.04`**（glibc 2.35 当地板）。
+    **`publish` 默认关**：关掉就只编译取产物、不建 Release（发 Release 是公开动作，要他点头）；
+    打开时先查同名标签指向哪次提交，不在本次提交上就明确失败（除非勾 `replace_tag`）。
     **资产只有 exe 本身**（用户定稿："注意只需要打包 exe，不要打包其他东西"）：
     不塞 dll、不塞 mpv、不塞 README。
+    形状照 **`ref/ocfree/workflows/cd.yml`** 抄——那份一直是对的：矩阵写死在文件里就行，
+    **不要 `plan` 作业 + `fromJson` 那套动态矩阵**（我为"按输入挑一条腿"绕过去，连红三次，
+    真因见下面那条陷阱；四个目标一起编本来就是要的）。
   - 旧的单文件 `build.yml` 已删除；不要再往"手动一条路什么都干"的方向合回去。
+  - **改 `.github/workflows/*` 之前先跑 `python .github/scripts/check_workflows.py`**，
+    推之前也再跑一次。`yaml.safe_load` 只证明"能读"，读不出这几类：重复键（GitHub 报
+    `'x' is already defined`，Python 静默取最后一个）、`needs` 指向不存在的作业、用了没声明的
+    `inputs.*`、矩阵 `include` 各项键不一致，以及最坑的一条——**`${{ steps.<id>.* }}` 指到一个
+    没写 `id:` 的步骤**：它**求值为空串且不报错**，于是作业输出永远为空、下游
+    `fromJson(空)` 得到**零条矩阵腿**、那个作业**在作业列表里直接不出现**（连 `skipped` 都不是），
+    run 结论红而日志与 annotations 零错误。第五十二轮在这上面连红三次、绕了一大圈才定位，
+    全过程与判据（看 `Complete job` 有没有 `Set output 'X'`；`cat -A "$GITHUB_OUTPUT"` 必须在
+    **写它的那同一步**里，每个步骤各有自己的 `set_output_<uuid>` 文件）记在 `docs/architecture.md` 第 8 节。
 - **不要改成 debug**：gpui 的 Windows 后端（`gpui-pre-windows 0.3.9`）在 `cfg(debug_assertions)` 下
   于运行时用 `D3DCompileFromFile(env!("CARGO_MANIFEST_DIR")/src/shaders.hlsl)` 编译着色器，
   路径被烧进二进制，CI 产出的 debug exe 在别的机器上无法开窗。`runtime_shaders` 特性只管 macOS。

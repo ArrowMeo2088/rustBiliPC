@@ -1097,15 +1097,17 @@ div().text_size(..).text_color(..)                       // 样式仍留在父 d
 四个目标里 win-x64 是长期验证过的，另三个是这一版**新配上、还没跑过**的（风险表第 31 条）。
 
 **这两条在第五十二轮各改了一处结构**（都因为踩过）：
-- `ci.yml` 加 `paths-ignore`（`docs/**`、`*.md`、`QODER.md`、`cd.yml`、`build-exe.yml`）
+- `ci.yml` 加 `paths-ignore`（`docs/**`、`*.md`、`QODER.md`、`cd.yml`）
   与 `concurrency: ci-<事件>-<ref>` + `cancel-in-progress: true`。
   起因很实在：那一轮连着推三个提交、编的是同一份源码，CI 起了三次（后两次纯改 `cd.yml`）。
   **`ci.yml` 自己不在 ignore 里**（动它仍跑一轮），同一提交里只要带源码也照常全编。
-- `cd.yml` 从"一条动态矩阵"改成**四个静态作业 + `if` 挑目标，步骤抽进
-  `.github/workflows/build-exe.yml`（`workflow_call`，步骤只有一份）**。
-  `publish` 默认关：**先量体积不建 Release**。`release` 那条的 `if` 要写
-  `!failure() && !cancelled()`——默认 `success()` 会因为有 needs 是 `skipped` 而连带跳过，
-  那样"只挑一条腿 + 要发布"就永远发不出去。
+- `cd.yml` 定成**一条 `build` 作业 + 静态 `include` 四腿矩阵**（照 `ref/ocfree/workflows/cd.yml`：
+  `fail-fast: false`、每腿 `name: ${{ matrix.rid }}`、Linux 钉 `ubuntu-22.04` 卡 glibc 地板、
+  UPX 版本钉死、release 先查标签指向再 `create`/回退 `upload --clobber` 再 `edit`）。
+  `publish` 默认关：**先量体积不建 Release**。
+  中途为"按输入挑一条腿"试过动态矩阵（`plan` + `fromJson`），连红三次——
+  **真因是我漏写步骤 `id`，不是平台限制**（判据与取证全在第 8 节第五十二轮）；
+  为挡这类引用错新加了 `.github/scripts/check_workflows.py`，推 workflow 改动前先跑它。
 
 ### 4.29 全面审之后的优化：图标表、crypto provider、下载排队与退出收尾（P14，2026-10-27）
 
@@ -1193,9 +1195,7 @@ P13 交完之后按"设计缺陷 / 依赖 / 性能 / 占用 / 体积 / 稳定"�
 
 | P12 | 空间页第四格**合集与系列** + 点进去的**内容页**（分页）+ 详情页右栏**分集**那一节（分段 chips、跨段连续行号、`N P` 角标、"本集的分 P"）（第 4.26 节） | **编译与测试已绿**（第四十三轮一次过：82 passed、零 Rust warning、Cargo.lock 零差异，产物 `858d275`，md5 `a591abdf…`）；待真机看：他那两个合集（含 189 集那个）能不能列全、分段切换、点一集进去还能不能正常播/下 |
 | P13 | 设置页**四项真能改**（MPV 位置 / 默认画质 / 默认编码 / 调试模式，第 4.27 节）+ 三件补齐（起播前探地址换 `backupUrl`、`-101` 自动开重登小窗、滚到底自动翻页，第 4.28 节）+ 落盘搬到 `%APPDATA%/ArrowMeo/rustBiliPC`（旧位置代码清零）+ CI/CD 拆成 `ci.yml`/`cd.yml`（多平台 + LTO/strip + UPX + Release，资产只有 exe） | **编译与测试已绿**（第四十四轮红 5 条、第四十五轮红 1 条，第四十六轮 `85ef8ff` 绿：**102 passed、零 Rust warning、Cargo.lock 零差异**；第四十七轮 `12ce966` 补上本轮 exe 的 artifact 并交付，产物 md5 `efb03a94…`，见第 8 节三段）；待真机看：设置页四项改完是不是真的生效（尤其编码偏好与 4K 档）、`-101` 那一路会不会自己弹出小窗、滚到底翻页顺不顺、`%APPDATA%` 里三个文件长得对不对 |
-| P14 | 全面审之后的优化（第 4.29 节）：八条修正（**panic 钩子 + `crash.log` 永远写**、设置页不再每帧扫磁盘、重登不再先删凭据、探测并行 + 收预算、**下载进度不再倒退**、日志不写完整直链、自动翻页加 240 条软闸、去掉没人用的 `tokio/macros`）+ 三件要动体积与依赖的（图标只嵌 110 个 / `rustls` 换 `ring` / 下载同时限 3 条与退出收尾） | **第五十一轮已绿**（`fcf9329`，107 passed / 0 warning / Cargo.lock 零差异，产物 **36,053,504** 字节、比第四十七轮**小 927,232**，已覆盖 `publish/rustbilipc.exe`，md5 `3197f5c9…`）。三条兑现度不同：① 图标兑现（改口的实测数字见第 4.29 节）；② provider **只兑现一半**——`aws-lc-sys` 去不掉，要它的是 `quinn-proto`（随 reqwest 进来），运行时确实走 ring；③ 下载排队待他真机点五条验。**第五十二轮**改两条流水线：`cd.yml` 的目标挑选**放弃动态矩阵**，改四个静态作业调
-`.github/workflows/build-exe.yml`（`publish` 默认关，**先量 `release-dist`+UPX 的真实体积，别先公开**）；
-`ci.yml` 加 `paths-ignore` + `concurrency`（那一轮为同一个结论编了三次）。账在第 8 节第五十二轮 |
+| P14 | 全面审之后的优化（第 4.29 节）：八条修正（**panic 钩子 + `crash.log` 永远写**、设置页不再每帧扫磁盘、重登不再先删凭据、探测并行 + 收预算、**下载进度不再倒退**、日志不写完整直链、自动翻页加 240 条软闸、去掉没人用的 `tokio/macros`）+ 三件要动体积与依赖的（图标只嵌 110 个 / `rustls` 换 `ring` / 下载同时限 3 条与退出收尾） | **第五十一轮已绿**（`fcf9329`，107 passed / 0 warning / Cargo.lock 零差异，产物 **36,053,504** 字节、比第四十七轮**小 927,232**，已覆盖 `publish/rustbilipc.exe`，md5 `3197f5c9…`）。三条兑现度不同：① 图标兑现（实测数字见第 4.29 节）；② provider **只兑现一半**——`aws-lc-sys` 去不掉，要它的是 `quinn-proto`（随 reqwest 进来），运行时确实走 ring；③ 下载排队待他真机点五条验。**第五十二轮**改两条流水线：`cd.yml` 定成一条 `build` 作业 + 静态 `include` 四腿矩阵（照 `ref/ocfree/workflows/cd.yml`，`publish` 默认关，先量 `release-dist`+UPX 的真实体积、别先公开）；`ci.yml` 加 `paths-ignore` + `concurrency`（那一轮为同一个结论编了三次），并新增 `.github/scripts/check_workflows.py`。真因与全程在第 8 节第五十二轮 |
 
 ## 6. 已知风险与待验证
 
@@ -2125,22 +2125,32 @@ error[E0277]: the trait bound `CommentSortKind: std::default::Default` is not sa
    ③ `matrix.leg`（一整个数组维装对象）。
    现象都不是报错而是 **`build` 作业根本不存在**：`plan` 绿、日志里交出去的 JSON 完全正确、
    `release` 正确跳过、run 结论 failure、jobs 列表里只有两个、check-run 与日志零错误。
-   **第五十二轮用五组探针（`p-*`/`q-*`/`x-*`/`u-*`/`y-*`，全在 `cd.yml` 里，几分钟一组）验完了**，
-   结论与我最先写进文档的两条**相反**，特此改口：
+   **第五十二轮用七组探针（`p-*`/`q-*`/`x-*`/`u-*`/`y-*`/`z-*`，都在 `cd.yml` 里，几分钟一组）验完了**，
+   结论与我最先写进文档的那两条**相反**，特此改口，并给出真因：
    - **`include: ${{ fromJson(...) }}` 能用**（`q-build`、`p-inc`、`x-build-a/b` 全展开成功）；
    - **矩阵的维度可以是对象数组**（`p-obj-legs` 成功；官方 `workflow-syntax.md` 第 1294 行本来就允许）；
-   - **`actions/cache` + `hashFiles` 也不是凶手**（`u-win-cache` 带着它出现了）。
-   真正的原因在**生产者那一侧**：`r-plan` 的 `Complete job` 里**没有 `Set output 'matrix'` 这一行**，
-   同一作业里回看 `steps.pick.outputs.matrix` 是**空**——也就是那一步的
-   `echo "matrix=$matrix" >> "$GITHUB_OUTPUT"` **压根没被记成作业输出**；
-   `fromJson('')` → 零条腿 → **零条腿的作业在作业列表里就是不出现**（连 `skipped` 都不是），
-   而 run 因为"整个作业没了"判 failure，且不给任何错误文本。
-   探针里 `q-plan`/`x-plan-a`/`x-plan-b` 与 `r-plan` 写的是**同一份 JSON**、只差脚本细节
-   （`actions/checkout` 与两处 `$GITHUB_STEP_SUMMARY` 写入**单独去掉都正常**），
-   所以这是"输出没记上"这一类问题，**跟矩阵形状无关**。
-   **值得记的两件事**：① "没跑"比"红了"难查一个数量级，判据是看作业列表里那条腿**有没有出现**、
-   以及生产者作业的 `Complete job` 有没有 `Set output 'X'`；② **我当时把两次失败归纳成了"平台限制"，
-   还写进了 QODER.md 与记忆**——归纳之前该做的探针只花几分钟，我晚了五组才做。
+   - **`actions/cache` + `hashFiles` 也不是凶手**（`u-win-cache` 带着它出现了）；
+   - **自动生成的作业名也不是凶手**（`z-build` 不写 `name:`、os=windows-latest，照样出现）。
+   **真因是一个我自己的引用错**：那三版的 `plan` 作业里，写 `$GITHUB_OUTPUT` 的那个步骤
+   **只有 `name:`、漏了 `id: pick`**，而作业输出映射写的是 `outputs.matrix: ${{ steps.pick.outputs.matrix }}`
+   —— 引用一个不存在的步骤，**求值为空串、GitHub 不报错**。于是
+   `fromJson('')` → **零条矩阵腿** → 那个作业**在作业列表里根本不出现**（连 `skipped` 都不是），
+   run 结论 failure，日志与 annotations 零错误。
+   取证过程里最直的三条：生产者 `Complete job` 缺 `Set output 'matrix'` 那一行；
+   同作业内回看 `SEEN` 为空；`cat -A "$GITHUB_OUTPUT"`（**必须在写它的那同一步里**——
+   每个步骤各有自己的 `set_output_<uuid>` 文件，步结束即回收，我第一版在别的步骤 cat 到的是空文件，
+   那次取证无效）显示那一行**完好在文件里、单行、无 CR** —— 写对了，是被引用错了。
+   **两条要记住的**：
+   ① "没跑"比"红了"难查一个数量级，判据是**作业列表里那条腿有没有出现** +
+   生产者作业的 `Complete job` 有没有 `Set output 'X'`；
+   ② 这类"引用了不存在的步骤 id"本地一条静态检查就能挡住，所以加了
+   **`.github/scripts/check_workflows.py`**（重复键、`steps.<id>` 悬空、`needs` 悬空、
+   未声明的 `inputs.*`、矩阵 `include` 键不一致），**推 workflow 改动之前先跑它**；
+   拿 `2d1354b` 那份红的文件喂它，它报的就是这一条。
+   最终形状照 `ref/ocfree/workflows/cd.yml`：**矩阵写死在 `cd.yml` 里（静态 `include` 四腿、
+   `fail-fast: false`、每条给 `name: ${{ matrix.rid }}`），不要 `plan` 作业、不要 `fromJson`**。
+   "按输入挑一条腿"这个需求不值得那套动态矩阵——四个目标一起编本来就是想要的样子，
+   要控制"发不公开"用 `publish` 开关就够了。
    **值得记的是失效模式**："没跑"比"红了"难查一个数量级——以后凡是动态矩阵，
    第一个动作是看作业列表里那条腿**有没有出现**，而不是翻日志找错误。
 3. **体积数字改口**：图标那组数字（"1830 个文件 / 2.8 MB"、"我们这份 171 KB / 省 2.6 MB"）
@@ -2150,8 +2160,14 @@ error[E0277]: the trait bound `CommentSortKind: std::default::Default` is not sa
    `main.rs`、`ui/assets.rs`、`assets_tests` 的注释**全部按实测重写**，并补了一句机制：
    **磁盘字节 ≠ 二进制成本**（每个条目要对齐，挂上整目录那一轮 exe 涨 1.33 MB 而原始文件只 0.75 MB）。
 
-`cd.yml` 现在的形状：`targets`（默认 win-x64）/ `publish`（默认关）/ `tag` / `prerelease` / `upx` 五个输入，
-四个静态作业（`win-x64` `win-arm64` `linux-x64` `linux-arm64`）各调
-`.github/workflows/build-exe.yml`（`workflow_call`，收 name/os/target/exe/asset/windows/nasm/upx），
-没选中的那条是干净的 `skipped`；`release` 用 `if: inputs.publish && !failure() && !cancelled()`。
-`.github/cd-matrix.json` 已删（那套"目标表在 JSON 里"的思路依赖动态矩阵，行不通）。
+`cd.yml` 最终形状（照 `ref/ocfree/workflows/cd.yml`）：一条 `build` 作业 + **静态 `include` 四腿**
+（`win-x64`/`win-arm64`/`linux-x64`/`linux-arm64`，`fail-fast: false`，每腿 `name: ${{ matrix.rid }}`，
+步骤就在同一份定义里），`--profile release-dist` 编、UPX（**版本钉 `UPX_VERSION=5.2.1`**，
+Windows 下官方 zip、Linux 走 apt——arm64 runner 上不能解 amd64 那份）压、
+**只 stage 可执行文件**并 `sha256sum`；`release` 作业由 **`publish` 开关**控制（默认关，所以这一版
+先只量体积），发之前先查同名标签指向哪次提交（不在本次提交上就明确失败，除非勾 `replace_tag`），
+`gh release create` 失败回退 `upload --clobber`、再 `edit` 把标题/说明/指向刷新，并生成 `SHA256SUMS.txt`。
+Linux 目标**钉 `ubuntu-22.04`**（glibc 2.35 当地板，24.04 的 2.39 拿到老系统会报 `GLIBC_2.39 not found`）。
+`.github/cd-matrix.json` 与 `.github/workflows/build-exe.yml` 都已删（前者那套动态矩阵思路整个作废，
+后者是为了绕开当时的错结论才抽出来的）。新增 **`.github/scripts/check_workflows.py`**：
+推 workflow 改动之前先跑它。

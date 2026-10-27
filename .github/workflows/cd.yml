@@ -1,37 +1,21 @@
 name: CD
 
-# 手动触发的**发布**流水线：多平台 + `release-dist`（LTO / codegen-units=1 / strip）
-# + UPX 压缩 + 发 GitHub Release。
-# 2026-10-26（P13）与 `ci.yml` 分工：那条管"推的东西还能不能编过、测试是不是全绿"，
-# 这条管"给人下载的产物"。**只打包 exe**——不塞 dll、不塞 mpv、不塞 README
+# 手动触发的**发布**流水线：四个平台同时编（一条作业 + 静态 `include` 矩阵，`fail-fast: false`，
+# 一个目标红不带走其余三个），用 `[profile.release-dist]`（LTO / codegen-units=1 / strip）编，
+# UPX 压，**资产只有可执行文件**——不塞 dll、不塞 mpv、不塞 README
 # （用户定稿："注意只需要打包 exe，不要打包其他东西"；本项目本来就是单 exe + 外置 mpv.exe）。
+# 形状照 `ref/ocfree/workflows/cd.yml` 抄：矩阵写死在文件里，**不要 `plan` 作业、不要 `fromJson`**
+# （第五十二轮为"按输入挑目标"绕了一圈动态矩阵，红三次，真因是我自己漏写步骤 `id`，见架构第 8 节）。
 #
-# 结构：四个静态作业，每条腿调同一份 `.github/workflows/build-exe.yml`（步骤只有一份）。
-# 为什么不用矩阵 + `fromJson` 的动态目标表：**那条路实测不通**（第五十二轮连踩两次，
-# `build` 作业凭空消失、run 红、日志零错误；`include` 不能来自表达式，矩阵值也不能是对象）。
-# 现在挑目标靠作业级 `if` 判 `targets`，没选中的那条就是干净的 `skipped`。
-#
-# `publish` 默认关：**先量 `release-dist` + UPX 的真实体积，不建 Release**（发 Release 是公开动作）。
-# 四个目标里只有 win-x64 是 `ci.yml` 天天在跑的，另三条一次都没真跑过
-# （runner 标签、系统库齐不齐都没证据 —— 风险清单第 31 条）。跑完把结论回填第 2 节与风险清单。
+# `publish` 默认关：这一条第一件事是**量真实体积**（`release-dist` + UPX 那四份取回来就行），
+# 建 Release 是公开动作，要点头。四个目标里只有 win-x64 是 `ci.yml` 天天在跑的，
+# 另三条一次都没真跑过（runner 标签、系统库齐不齐都没证据 —— 风险清单第 31 条）。
 
 on:
   workflow_dispatch:
     inputs:
-      targets:
-        description: "编哪个目标（先挑一条把流水线跑通，再选 all）"
-        type: choice
-        required: true
-        default: "win-x64"
-        options:
-          - win-x64
-          - win-arm64
-          - linux-x64
-          - linux-arm64
-          - all
-          - probe
       publish:
-        description: "把这些 exe 发成 GitHub Release（关掉 = 只编译取产物，不动 Release）"
+        description: "把这四份 exe 发成 GitHub Release（关掉 = 只编译取产物，不动 Release）"
         type: boolean
         required: false
         default: false
@@ -45,524 +29,209 @@ on:
         type: boolean
         required: false
         default: true
+      replace_tag:
+        description: "同名标签已存在且不在本次提交上时，删掉旧 release 与标签重建"
+        type: boolean
+        required: false
+        default: false
       upx:
         description: "用 UPX 压缩（--lzma --best）"
         type: boolean
         required: false
         default: true
 
-# `contents: write` 是 `release` 作业要的（建 release、传资产）；四个 build 作业用不到写权限，
-# 但 workflow 级的 `secrets: inherit` 会把这份带下去，所以调用侧再显式收紧不如在这里说清。
+# `contents: write` 是 `release` 作业要的（建 release、传资产）。
 permissions:
   contents: write
 
+env:
+  CARGO_TERM_COLOR: always
+  # UPX 版本钉死：`choco install upx` 给的是"当时最新"，某天换个版本压出来的东西不一样。
+  # Windows 用官方 zip（choco 那条路也留着当回退），Linux 用 apt 的包——**不能**在 arm64 runner 上
+  # 解压 amd64 的 UPX，那是跑不起来的。
+  UPX_VERSION: 5.2.1
+
 jobs:
-  win-x64:
-    if: ${{ inputs.targets == 'all' || inputs.targets == 'win-x64' }}
-    uses: ./.github/workflows/build-exe.yml
-    with:
-      name: win-x64
-      os: windows-latest
-      target: x86_64-pc-windows-msvc
-      exe: rustbilipc.exe
-      asset: rustbilipc-win-x64.exe
-      windows: "true"
-      nasm: "true"
-      upx: ${{ inputs.upx }}
-
-  win-arm64:
-    if: ${{ inputs.targets == 'all' || inputs.targets == 'win-arm64' }}
-    uses: ./.github/workflows/build-exe.yml
-    with:
-      name: win-arm64
-      os: windows-latest
-      target: aarch64-pc-windows-msvc
-      exe: rustbilipc.exe
-      asset: rustbilipc-win-arm64.exe
-      windows: "true"
-      nasm: "true"
-      upx: ${{ inputs.upx }}
-
-  linux-x64:
-    if: ${{ inputs.targets == 'all' || inputs.targets == 'linux-x64' }}
-    uses: ./.github/workflows/build-exe.yml
-    with:
-      name: linux-x64
-      os: ubuntu-latest
-      target: x86_64-unknown-linux-gnu
-      exe: rustbilipc
-      asset: rustbilipc-linux-x64
-      windows: "false"
-      nasm: "false"
-      upx: ${{ inputs.upx }}
-
-  # 为什么用 arm runner 而不是在 x86 runner 上交叉编译：gpui 的 Linux 后端要链接一串系统库
-  # （X11/wayland/fontconfig/ALSA/vulkan），交叉编译得先搭一个带这些 .so 与头文件的 arm64 sysroot，
-  # 比直接用 arm runner 贵得多。`ubuntu-24.04-arm` 这个标签是否存在**也还没验过**。
-  linux-arm64:
-    if: ${{ inputs.targets == 'all' || inputs.targets == 'linux-arm64' }}
-    uses: ./.github/workflows/build-exe.yml
-    with:
-      name: linux-arm64
-      os: ubuntu-24.04-arm
-      target: aarch64-unknown-linux-gnu
-      exe: rustbilipc
-      asset: rustbilipc-linux-arm64
-      windows: "false"
-      nasm: "false"
-      upx: ${{ inputs.upx }}
-
-  # ─────────────────────────────────────────────────────────────────────────────
-  # **临时探针（第五十二轮）**：`targets=probe` 时才跑，四个 echo 作业，一条 ubuntu 几秒钟。
-  # 要判的事很具体：那三次红里 `build` 作业**根本不存在**（run 红、日志零错误），
-  # 到底是"动态矩阵不支持"还是"我某处写法有问题"。官方 `workflow-syntax.md` 第 1294 行
-  # 明确写着矩阵的某个维度**可以是对象数组**，所以我先前那条"值只能是标量"是错的归纳。
-  # 判据不是日志而是**作业列表里出现几条腿**：某形状完全没出现＝那条形状在这份文件里就是展开不出来。
-  # p-static 是对照组（纯静态 include），如果连它都不出现，问题就不在 fromJson。
-  # 结论拿到后这一整段删掉。
-  # ─────────────────────────────────────────────────────────────────────────────
-  p-plan:
-    if: ${{ inputs.targets == 'probe' }}
-    runs-on: ubuntu-latest
-    outputs:
-      arr: ${{ steps.m.outputs.arr }}
-      obj: ${{ steps.m.outputs.obj }}
-      real: ${{ steps.m.outputs.real }}
-      realwin: ${{ steps.m.outputs.realwin }}
-    steps:
-      - id: m
-        shell: bash
-        run: |
-          echo 'arr=[{"name":"A","os":"ubuntu-latest"},{"name":"B","os":"ubuntu-latest"}]' >> "$GITHUB_OUTPUT"
-          echo 'obj={"include":[{"name":"C","os":"ubuntu-latest"},{"name":"D","os":"ubuntu-latest"}]}' >> "$GITHUB_OUTPUT"
-          # **那三次红时交出去的内容原样**（键、布尔值、`target`/`exe`/`asset` 都在），
-          # 只把 `os` 换成 ubuntu-latest 让这一跑只花几秒钟。p-bool 用来判"是不是布尔值/这些键出问题"。
-          echo 'real=[{"name":"win-x64","os":"ubuntu-latest","target":"x86_64-pc-windows-msvc","exe":"rustbilipc.exe","asset":"rustbilipc-win-x64.exe","windows":true,"nasm":true},{"name":"linux-x64","os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","exe":"rustbilipc","asset":"rustbilipc-linux-x64","windows":false,"nasm":false}]' >> "$GITHUB_OUTPUT"
-          # 第三条：**连 runner 标签都与当时一致**（windows-latest），只跑 echo，不编任何东西。
-          echo 'realwin=[{"name":"win-x64","os":"windows-latest","target":"x86_64-pc-windows-msvc","exe":"rustbilipc.exe","asset":"rustbilipc-win-x64.exe","windows":true,"nasm":true}]' >> "$GITHUB_OUTPUT"
-
-  p-bool:
-    if: ${{ inputs.targets == 'probe' }}
-    needs: p-plan
-    name: p-bool-${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
+  build:
+    name: ${{ matrix.rid }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.p-plan.outputs.real) }}
-    steps:
-      - name: 布尔值当 if 条件（当时就是这么写的）
-        if: matrix.nasm
-        run: echo "nasm=true 这一腿：${{ toJSON(matrix) }}"
-      - name: 反向条件
-        if: ${{ !matrix.windows }}
-        run: echo "windows=false 这一腿也走得到"
-      - name: 用 matrix 的值拼路径
-        run: echo "cargo build --profile release-dist --target ${{ matrix.target}} -> ${{ matrix.exe }} as ${{ matrix.asset }}"
-
-  p-win:
-    if: ${{ inputs.targets == 'probe' }}
-    needs: p-plan
-    name: p-win-${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.p-plan.outputs.realwin) }}
-    steps:
-      - run: echo "windows-latest 这条腿出现了：${{ toJSON(matrix) }}"
-
-  # 第二组对照：**唯一还没试过的两个差别** —— ① 输出那个键就叫 `matrix`（当时写的是
-  # `outputs.matrix` + `fromJson(needs.plan.outputs.matrix)`）；② 值是脚本用 `jq` 拼出来后
-  # 写进 `$GITHUB_OUTPUT` 的（探针第一组是单引号字面量）。
-  # `q-build` 第一步先把拿到的原始输出打出来：如果那条腿出现了但内容是空的，
-  # 就说明红的原因在输出传递上，而不是矩阵展开（**零条腿的作业在作业列表里就是不出现**）。
-  q-plan:
-    if: ${{ inputs.targets == 'probe' }}
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.pick.outputs.matrix }}
-    steps:
-      - id: pick
-        shell: bash
-        run: |
-          set -e
-          json='[{"name":"win-x64","os":"ubuntu-latest","target":"x86_64-pc-windows-msvc","exe":"rustbilipc.exe","asset":"rustbilipc-win-x64.exe","windows":true,"nasm":true}]'
-          matrix=$(jq -c . <<<"$json")
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-          echo "q-plan 交出去的：$matrix"
-
-  q-build:
-    if: ${{ inputs.targets == 'probe' }}
-    needs: q-plan
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.q-plan.outputs.matrix) }}
-    runs-on: ${{ matrix.os }}
-    steps:
-      - env:
-          RAW: ${{ needs.q-plan.outputs.matrix }}
-          LEG: ${{ toJSON(matrix) }}
-        run: |
-          echo "拿到的原始输出=[$RAW]"
-          echo "长度=$(wc -c <<<"$RAW") 条数=$(jq -r 'length' <<<"$RAW")"
-          echo "这一腿的 matrix=[$LEG]"
-
-  # 第三组：**把当时那份 `plan`/`build` 的剩余差别补齐** —— plan 里有 `actions/checkout`、
-  # 值是从一个 JSON 文件 `jq` 出来的（这里由步骤自己写出该文件，内容就是当初的 `.github/cd-matrix.json`），
-  # build 里带一个真 `actions/cache` 步骤（`hashFiles('Cargo.lock')` 当 key 的一部分）。
-  # 如果 r-build 的腿照样出现，那三次红就**不是这份文件的内容能解释的**（平台侧或当时的某种状态），
-  # 我就按矩阵那份定稿，并把"这三次红的成因至今没复现出来"如实写进文档，不编一个解释。
-  r-plan:
-    if: ${{ inputs.targets == 'probe' }}
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.pick.outputs.matrix }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Pick matrix legs
-        shell: bash
-        env:
-          TARGETS: win-x64
-        run: |
-          set -e
-          # 不用 heredoc：YAML 块标量里的缩进会让结束标记前面的空格把 bash 卡住（这里只要内容一致，排版不重要）。
-          cat > ./cd-matrix.json <<JSON
-          [{"name":"win-x64","os":"windows-latest","target":"x86_64-pc-windows-msvc","exe":"rustbilipc.exe","asset":"rustbilipc-win-x64.exe","windows":true,"nasm":true},{"name":"linux-x64","os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","exe":"rustbilipc","asset":"rustbilipc-linux-x64","windows":false,"nasm":false}]
-          JSON
-          matrix=$(jq -c --arg n "$TARGETS" '[.[] | select(.name == $n)]' ./cd-matrix.json)
-          if [ "$(jq -c '. | length' <<<"$matrix")" = "0" ]; then
-            echo "目标不存在"; exit 1
-          fi
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-          echo "### 这次要编的目标" >> "$GITHUB_STEP_SUMMARY"
-          jq -r '.[].name' <<<"$matrix" >> "$GITHUB_STEP_SUMMARY"
-          echo "publish=false tag=v0.1.0" >> "$GITHUB_STEP_SUMMARY"
-          echo "r-plan 交出去：$matrix"
-          # **同一步内**才看得到本步骤自己的输出文件（每个步骤一个 set_output_<uuid>，步结束即回收，
-          # 所以上一轮在另一个步骤里 cat 到的是空文件，那次取证无效）。
-          echo "----- r-plan 本步骤 GITHUB_OUTPUT 的原始字节 -----"
-          cat -A "$GITHUB_OUTPUT"
-          echo "----- 结束（行数 $(wc -l < "$GITHUB_OUTPUT")）-----"
-
-      # 同作业内回看：`steps.pick.outputs.matrix` 有没有真被记上。
-      # 空 → 丢在写入/解析那一侧（跟矩阵、跟消费方都无关）；非空 → 丢在跨作业传递那一步。
-      - name: 回看 pick 步骤的输出
-        shell: bash
-        env:
-          SEEN: ${{ steps.pick.outputs.matrix }}
-        run: |
-          echo "SEEN 的长度=${#SEEN}"
-          echo "SEEN=[$SEEN]"
-
-  # 还有一处没单独验过：r-plan 里那段"挑空了就 exit 1"的守卫（用了 `<<<` here-string 套 jq）。
-  # y-plan 与 r-plan 只差这一段，去掉它 —— 如果腿回来，凶手就是这段守卫所在的执行路径。
-  y-plan:
-    if: ${{ inputs.targets == 'probe' }}
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.pick.outputs.matrix }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Pick matrix legs
-        shell: bash
-        env:
-          TARGETS: win-x64
-        run: |
-          set -e
-          cat > ./cd-matrix.json <<JSON
-          [{"name":"win-x64","os":"windows-latest","target":"x86_64-pc-windows-msvc","exe":"rustbilipc.exe","asset":"rustbilipc-win-x64.exe","windows":true,"nasm":true},{"name":"linux-x64","os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","exe":"rustbilipc","asset":"rustbilipc-linux-x64","windows":false,"nasm":false}]
-          JSON
-          matrix=$(jq -c --arg n "$TARGETS" '[.[] | select(.name == $n)]' ./cd-matrix.json)
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-          echo "### 这次要编的目标" >> "$GITHUB_STEP_SUMMARY"
-          jq -r '.[].name' <<<"$matrix" >> "$GITHUB_STEP_SUMMARY"
-          echo "publish=false tag=v0.1.0" >> "$GITHUB_STEP_SUMMARY"
-          echo "y-plan 交出去：$matrix"
-
-  y-build:
-    if: ${{ inputs.targets == 'probe' }}
-    needs: y-plan
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.y-plan.outputs.matrix) }}
-    runs-on: ${{ matrix.os }}
-    steps:
-      - run: echo "y-build 这条腿出现了：${{ toJSON(matrix) }}"
-
-  # A/B 只改一处：**给作业一个短 `name:`**（不写时 GitHub 会用 `id (v1, v2, …)` 自动拼，
-  # 我们那份矩阵有 7 个键，自动名 100 多字符）。内容、生产者、os 全同 y-build。
-  y2-build:
-    if: ${{ inputs.targets == 'probe' }}
-    needs: y-plan
-    name: y2
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.y-plan.outputs.matrix) }}
-    runs-on: ${{ matrix.os }}
-    steps:
-      - run: echo "y2-build（带短 name）这条腿出现了：${{ toJSON(matrix) }}"
-
-  # 第二个 A/B：仍然不写 `name:`，但生产者只交**两个键**（name/os），自动名就短了。
-  z-plan:
-    if: ${{ inputs.targets == 'probe' }}
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.pick.outputs.matrix }}
-    steps:
-      - id: pick
-        shell: bash
-        run: echo 'matrix=[{"name":"win-x64","os":"windows-latest"}]' >> "$GITHUB_OUTPUT"
-
-  z-build:
-    if: ${{ inputs.targets == 'probe' }}
-    needs: z-plan
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.z-plan.outputs.matrix) }}
-    runs-on: ${{ matrix.os }}
-    steps:
-      - run: echo "z-build（两键、无 name）这条腿出现了：${{ toJSON(matrix) }}"
-
-  # 两种写法各写一遍，再用**两条腿分别消费**：哪条腿出现，就说明哪种写法真把输出交出去了。
-  # 差别只可能在 `echo "名=值" >>` 与 `名<<分隔符 … 分隔符` 这两种写法本身。
-  u-plan:
-    if: ${{ inputs.targets == 'probe' }}
-    runs-on: ubuntu-latest
-    outputs:
-      eq: ${{ steps.w.outputs.eq }}
-      heredoc: ${{ steps.w.outputs.heredoc }}
-      win: ${{ steps.w.outputs.win }}
-    steps:
-      - id: w
-        shell: bash
-        run: |
-          set -e
-          v='[{"name":"win-x64","os":"ubuntu-latest","target":"x86_64-pc-windows-msvc","exe":"rustbilipc.exe","asset":"rustbilipc-win-x64.exe","windows":true,"nasm":true}]'
-          echo "eq=$v" >> "$GITHUB_OUTPUT"
-          echo "heredoc<<EOF" >> "$GITHUB_OUTPUT"
-          echo "$v" >> "$GITHUB_OUTPUT"
-          echo "EOF" >> "$GITHUB_OUTPUT"
-          w='[{"name":"win-x64","os":"windows-latest","target":"x86_64-pc-windows-msvc","exe":"rustbilipc.exe","asset":"rustbilipc-win-x64.exe","windows":true,"nasm":true}]'
-          echo "win=$w" >> "$GITHUB_OUTPUT"
-
-  # 两条 windows-latest 的腿：**内容、os、矩阵写法全都一样**，只差"有没有那个 actions/cache 步骤"。
-  # 当时三次红的 build 作业里唯一比探针多出来的东西就是这个缓存步骤（`hashFiles('Cargo.lock')`）。
-  u-win-plain:
-    if: ${{ inputs.targets == 'probe' }}
-    needs: u-plan
-    name: u-win-plain-${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.u-plan.outputs.win) }}
-    steps:
-      - run: echo "没有缓存步骤的 windows 腿：${{ toJSON(matrix) }}"
-
-  u-win-cache:
-    if: ${{ inputs.targets == 'probe' }}
-    needs: u-plan
-    name: u-win-cache-${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.u-plan.outputs.win) }}
-    steps:
-      - name: Cache cargo home and target
-        uses: actions/cache@v4
-        with:
-          save-always: true
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ matrix.name }}-${{ hashFiles('Cargo.lock') }}
-      - run: echo "带缓存步骤的 windows 腿：${{ toJSON(matrix) }}"
-
-  u-build-eq:
-    if: ${{ inputs.targets == 'probe' }}
-    needs: u-plan
-    name: u-build-eq-${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.u-plan.outputs.eq) }}
-    steps:
-      - run: echo "echo 写法这条腿出现了：${{ toJSON(matrix) }}"
-
-  u-build-heredoc:
-    if: ${{ inputs.targets == 'probe' }}
-    needs: u-plan
-    name: u-build-heredoc-${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.u-plan.outputs.heredoc) }}
-    steps:
-      - run: echo "多行写法这条腿出现了：${{ toJSON(matrix) }}"
-
-  r-build:
-    if: ${{ inputs.targets == 'probe' }}
-    needs: r-plan
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.r-plan.outputs.matrix) }}
-    runs-on: ${{ matrix.os }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Cache cargo home and target
-        uses: actions/cache@v4
-        with:
-          save-always: true
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: cargo-${{ matrix.name }}-${{ hashFiles('**/README.md') }}
-
-      - name: Echo（不编东西）
-        env:
-          LEG: ${{ toJSON(matrix) }}
-        run: |
-          echo "r-build 这条腿出现了：[$LEG]"
-          echo "cargo build --profile release-dist --target ${{ matrix.target }}"
-
-  # 二分：`r-plan` 与 `u-plan` 只差两处 —— ① 前面有一个 `actions/checkout`，
-  # ② 写完输出后又往 `$GITHUB_STEP_SUMMARY` 写了两行。各去掉一处，看哪条腿回来。
-  # 值统一用 ubuntu-latest（`u-win-*` 已证明 os 取 windows-latest 没问题）。
-  x-plan-a:
-    if: ${{ inputs.targets == 'probe' }}
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.pick.outputs.matrix }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-      - id: pick
-        shell: bash
-        env:
-          TARGETS: win-x64
-        run: |
-          set -e
-          cat > ./m.json <<JSON
-          [{"name":"win-x64","os":"ubuntu-latest","target":"x86_64-pc-windows-msvc","exe":"rustbilipc.exe","asset":"rustbilipc-win-x64.exe","windows":true,"nasm":true}]
-          JSON
-          matrix=$(jq -c --arg n "$TARGETS" '[.[] | select(.name == $n)]' ./m.json)
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-          echo "A 组（有 checkout、无 summary 写入）：$matrix"
-
-  x-build-a:
-    if: ${{ inputs.targets == 'probe' }}
-    needs: x-plan-a
-    name: x-build-a-${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.x-plan-a.outputs.matrix) }}
-    steps:
-      - run: echo "A 组这条腿出现了：${{ toJSON(matrix) }}"
-
-  x-plan-b:
-    if: ${{ inputs.targets == 'probe' }}
-    runs-on: ubuntu-latest
-    outputs:
-      matrix: ${{ steps.pick.outputs.matrix }}
-    steps:
-      - id: pick
-        shell: bash
-        env:
-          TARGETS: win-x64
-        run: |
-          set -e
-          cat > ./m.json <<JSON
-          [{"name":"win-x64","os":"ubuntu-latest","target":"x86_64-pc-windows-msvc","exe":"rustbilipc.exe","asset":"rustbilipc-win-x64.exe","windows":true,"nasm":true}]
-          JSON
-          matrix=$(jq -c --arg n "$TARGETS" '[.[] | select(.name == $n)]' ./m.json)
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
-          echo "### 这次要编的目标" >> "$GITHUB_STEP_SUMMARY"
-          jq -r '.[].name' <<<"$matrix" >> "$GITHUB_STEP_SUMMARY"
-          echo "publish=false tag=v0.1.0" >> "$GITHUB_STEP_SUMMARY"
-          echo "B 组（无 checkout、有 summary 写入）：$matrix"
-
-  x-build-b:
-    if: ${{ inputs.targets == 'probe' }}
-    needs: x-plan-b
-    name: x-build-b-${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.x-plan-b.outputs.matrix) }}
-    steps:
-      - run: echo "B 组这条腿出现了：${{ toJSON(matrix) }}"
-
-  p-static:
-    if: ${{ inputs.targets == 'probe' }}
-    runs-on: ${{ matrix.os }}
-    strategy:
       matrix:
         include:
-          - name: S1
-            os: ubuntu-latest
-          - name: S2
-            os: ubuntu-latest
-    steps:
-      - run: echo "对照组 p-static 出现了：${{ toJSON(matrix) }}"
+          - rid: win-x64
+            runner: windows-latest
+            target: x86_64-pc-windows-msvc
+            exe: rustbilipc.exe
+            asset: rustbilipc-win-x64.exe
+            windows: true
+            # aws-lc-sys 在 MSVC 上要 NASM（第五十一轮查明它随 quinn-proto 进来、去不掉）。
+            nasm: true
+            # gpui 的 build.rs 在 release 下要 fxc.exe 编 HLSL，只有 Windows 目标需要探它。
+            need_fxc: true
 
-  p-inc:
-    if: ${{ inputs.targets == 'probe' }}
-    needs: p-plan
-    name: p-inc-${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include: ${{ fromJson(needs.p-plan.outputs.arr) }}
-    steps:
-      - run: echo "include 来自表达式：${{ toJSON(matrix) }}"
+          - rid: win-arm64
+            runner: windows-latest
+            target: aarch64-pc-windows-msvc
+            exe: rustbilipc.exe
+            asset: rustbilipc-win-arm64.exe
+            windows: true
+            nasm: true
+            need_fxc: true
 
-  p-whole:
-    if: ${{ inputs.targets == 'probe' }}
-    needs: p-plan
-    name: p-whole-${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix: ${{ fromJson(needs.p-plan.outputs.obj) }}
-    steps:
-      - run: echo "整份 matrix 对象来自表达式：${{ toJSON(matrix) }}"
+          - rid: linux-x64
+            # 钉 22.04 而不是 ubuntu-latest：Linux 产物链的是 runner 本机 glibc，
+            # 24.04（glibc 2.39）编出来的二进制拿到老系统会报 `GLIBC_2.39 not found`。
+            runner: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            exe: rustbilipc
+            asset: rustbilipc-linux-x64
+            windows: false
+            nasm: false
+            need_fxc: false
 
-  p-obj-legs:
-    if: ${{ inputs.targets == 'probe' }}
-    needs: p-plan
-    name: p-obj-legs-${{ matrix.leg.name }}
-    runs-on: ${{ matrix.leg.os }}
-    strategy:
-      matrix:
-        leg: ${{ fromJson(needs.p-plan.outputs.arr) }}
+          - rid: linux-arm64
+            # 用 ARM 型 Linux runner，而不是在 x86 runner 上交叉编译：gpui 的 Linux 后端要链接
+            # 一串系统库（X11/wayland/fontconfig/ALSA/vulkan），交叉得先搭一个带这些 .so 与头文件的
+            # arm64 sysroot，比直接用 arm runner 贵得多。这个标签存在与否**也还没验过**。
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            exe: rustbilipc
+            asset: rustbilipc-linux-arm64
+            windows: false
+            nasm: false
+            need_fxc: false
+
     steps:
-      - run: echo "对象数组当一维：${{ toJSON(matrix.leg) }}"
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install NASM (for aws-lc-sys on MSVC)
+        if: matrix.nasm
+        shell: bash
+        run: choco install nasm --no-progress -y
+
+      # gpui 的 Linux 后端要 X11/wayland/fontconfig/ALSA/vulkan 这些开发包；包名按 gpui 自己 CI 那份列
+      # （缺一个就是 link 阶段一大串 undefined）。
+      - name: Install Linux system dependencies
+        if: ${{ !matrix.windows }}
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libx11-xcb-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libclang-dev \
+            libvulkan1 libfontconfig1-dev libexpat1-dev fonts-noto-color-emoji \
+            libwayland-dev wayland-protocols libxcursor-dev libxcb1-dev \
+            pkg-config
+
+      # gpui 的 build.rs 在 release 下要编译 HLSL 着色器，需要 Windows SDK 里的 fxc.exe。
+      # 找不到时只提示、不挡住：gpui 的 build.rs 自己也会搜一遍（第四轮起就这么活的）。
+      - name: Locate fxc.exe (gpui compiles HLSL at build time in release)
+        if: matrix.need_fxc
+        shell: pwsh
+        run: |
+          $sdk = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+          $fxc = Get-ChildItem -Path $sdk -Recurse -Filter fxc.exe -ErrorAction SilentlyContinue |
+                 Where-Object { $_.FullName -match 'x64' } |
+                 Sort-Object FullName -Descending |
+                 Select-Object -First 1
+          if ($fxc) {
+            "GPUI_FXC_PATH=$($fxc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "fxc: $($fxc.FullName)"
+          } else {
+            "fxc.exe 未找到；gpui 的 build.rs 会自行搜索，若失败请检查 Windows SDK"
+          }
+
+      - name: Cache cargo home and target
+        uses: actions/cache@v4
+        with:
+          save-always: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            C:/Users/runneradmin/.cargo/registry
+            C:/Users/runneradmin/.cargo/git
+            target
+          key: cargo-${{ matrix.rid }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ matrix.rid }}-
+
+      # `release-dist` 是 Cargo.toml 里为发布单独加的配置：LTO + codegen-units=1 + strip + 无 debug 信息。
+      # **不写 `panic = "abort"`**：`app::describe_join_error` 靠 tokio 把任务 panic 变成 `JoinError`
+      # 才能把崩溃原因说给人看。输出目录是 `target/<triple>/release-dist/`。
+      - name: Build (release-dist, ${{ matrix.target }})
+        shell: bash
+        run: cargo build --profile release-dist --target ${{ matrix.target }}
+
+      - name: Install UPX (Windows)
+        if: ${{ inputs.upx && matrix.windows }}
+        shell: pwsh
+        run: |
+          $v = $env:UPX_VERSION
+          Invoke-WebRequest -Uri "https://github.com/upx/upx/releases/download/v$v/upx-$v-win64.zip" -OutFile upx.zip
+          Expand-Archive -Path upx.zip -DestinationPath upx -Force
+          "$PWD/upx/upx-$v-win64" | Out-File -FilePath $env:GITHUB_PATH -Append
+
+      - name: Install UPX (Linux)
+        if: ${{ inputs.upx && !matrix.windows }}
+        # arm64 上的 `upx` 包在某些源里叫 `upx-ufl`（免费版），装不上就退一份。
+        run: sudo apt-get update && (sudo apt-get install -y upx || sudo apt-get install -y upx-ufl)
+
+      - name: Compress with UPX
+        if: inputs.upx
+        shell: bash
+        run: |
+          set -u
+          bin="target/${{ matrix.target }}/release-dist/${{ matrix.exe }}"
+          if [ ! -f "$bin" ]; then echo "找不到产物：$bin"; exit 1; fi
+          before=$(wc -c < "$bin")
+          summary="压缩前 $before 字节"
+          # 不覆盖原文件：先压到临时名，成功了才换回去（压失败时至少还有一个能用的 exe）。
+          # UPX 对 PE/ARM64 与 ELF/ARM64 都支持，但 **Rust 产物压缩后偶尔会在运行期出问题**，
+          # 所以这一步失败不挡住发布：未压缩的那一份照样出。
+          if upx -9 --lzma "$bin" -o "$bin.upx"; then
+            mv "$bin.upx" "$bin"
+            after=$(wc -c < "$bin")
+            pct=$(awk -v a="$after" -v b="$before" 'BEGIN{printf "%.1f", a*100/b}')
+            echo "UPX：$before → $after 字节（原体积的 $pct%）"
+            summary="UPX 完成：$before → $after 字节（$pct%）"
+          else
+            echo "UPX 失败，交付未压缩的那一份（$before 字节）"
+            summary="UPX 失败，交付未压缩那份（$before 字节）"
+            rm -f "$bin.upx"
+          fi
+          echo "$summary"
+          echo "- ${{ matrix.rid }}：$summary，最终 $(wc -c < "$bin") 字节" >> "$GITHUB_STEP_SUMMARY"
+
+      # **只 stage 可执行文件本身**，名字带平台与架构（Release 上看得懂）。
+      - name: Stage asset (only the executable)
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release-dist/${{ matrix.exe }}" "dist/${{ matrix.asset }}"
+          chmod +x "dist/${{ matrix.asset }}"
+          ls -l dist | tee -a "$GITHUB_STEP_SUMMARY"
+          sha256sum "dist/${{ matrix.asset }}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload staged asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: asset-${{ matrix.rid }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 30
 
   release:
-    needs: [win-x64, win-arm64, linux-x64, linux-arm64]
-    # 两层门槛：① `publish` 关掉就整个跳过（默认关）；
-    # ② `!failure() && !cancelled()` —— 默认的 `success()` 会因为"有 needs 是 skipped"而连带跳过，
-    # 而只挑一条腿时另外三条**必然**是 skipped，那样 `targets=win-x64 + publish=true` 就永远发不出去。
-    if: ${{ inputs.publish && !failure() && !cancelled() }}
+    needs: build
+    # 两层门槛：① `publish` 关掉就整条跳过（默认关）；
+    # ② 这里不需要 `!failure()`——四个目标都跑，任一红就不该发。
+    if: inputs.publish
     runs-on: ubuntu-latest
     steps:
       - name: Require a tag when publishing
@@ -582,37 +251,93 @@ jobs:
       - name: Collect assets
         uses: actions/download-artifact@v4
         with:
-          # 只收这次真跑过的那几条 exe（每条腿一个 `asset-<name>`），别的 artifact 不混进来。
+          # 只收这四份 exe（每条腿一个 `asset-<rid>`），别的 artifact（Cargo.lock 那类）不混进来。
           pattern: asset-*
           path: release-files
           merge-multiple: true
 
-      - name: Show what will be published
-        run: ls -l release-files
+      - name: Checksums and manifest
+        shell: bash
+        run: |
+          ls -l release-files
+          # 四条腿都在（少一份就是矩阵少跑了一条，那种情况不该发出去）。
+          test "$(find release-files -maxdepth 1 -type f | wc -l)" -ge 4
+          (cd release-files && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
 
-      - name: Create or refresh the GitHub Release
+      # 标签指向哪要先查清楚：v0.1.0 那次踩过"标签已在别的提交上，create 失败后回退 upload，
+      # 产物换了新的、标题与说明却还是旧内容"（抄自 `ref/ocfree/workflows/cd.yml` 的这段）。
+      # 不一致就明确失败，除非勾了 `replace_tag`。
+      - name: Check where the tag points
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+          REPLACE: ${{ inputs.replace_tag }}
+        run: |
+          obj=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" \
+            --jq '.object | "\(.type):\(.sha)"' 2>/dev/null || true)
+          case "${obj%%:*}" in
+            commit) sha="${obj#*:}" ;;
+            tag) sha=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/${obj#*:}" --jq .object.sha) ;;
+            *) sha="" ;;
+          esac
+          if [ -z "$sha" ]; then
+            echo "标签 $TAG 不存在，本次新建。"
+          elif [ "$sha" = "$GITHUB_SHA" ]; then
+            echo "标签 $TAG 已指向本次提交。"
+          elif [ "$REPLACE" = "true" ]; then
+            echo "标签 $TAG 指向 ${sha:0:7}，按 replace_tag 删旧 release 与标签后重建。"
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
+          else
+            {
+              echo "## 标签已存在且不在本次提交"
+              echo ""
+              echo "- \`$TAG\` → \`${sha:0:7}\`"
+              echo "- 本次构建 → \`${GITHUB_SHA:0:7}\`"
+              echo ""
+              echo "直接发布会把产物挂在旧提交名下、说明也不刷新。"
+              echo "勾 \`replace_tag\` 重跑可删旧重建，或者换新版本号。"
+            } >> "$GITHUB_STEP_SUMMARY"
+            echo "::error::$TAG 指向 ${sha:0:7} 而非本次提交；要覆盖请勾 replace_tag 或换版本号。"
+            exit 1
+          fi
+
+      - name: Write release notes
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          {
+            echo "rustBiliPC（Rust + GPUI 的 Bilibili 桌面客户端）。"
+            echo
+            echo '每个资产都是**单个可执行文件**，不带 dll、不带 mpv——'
+            echo '播放用的是外置 mpv（放在 PATH 里，或在设置页指给它）。'
+            echo
+            echo '登录凭据与设置写在 `%APPDATA%/ArrowMeo/rustBiliPC`（Linux 是 `~/.config/ArrowMeo/rustBiliPC`）。'
+            echo
+            echo '经 UPX 压缩的 exe 容易被杀软误报，遇到拦截请加白名单。校验和见 `SHA256SUMS.txt`。'
+            echo
+            echo "构建提交：\`${GITHUB_SHA::7}\`"
+          } > notes.md
+          cat notes.md
+
+      - name: Create or fix up the GitHub Release
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ inputs.tag }}
           PRERELEASE: ${{ inputs.prerelease }}
         run: |
-          set -e
-          notes="rustBiliPC（Rust + GPUI 的 Bilibili 桌面客户端）。"
-          notes="$notes 每个资产都是**单个可执行文件**，不带 dll、不带 mpv——"
-          notes="$notes 播放用的是外置 mpv（放在 PATH 里，或在设置页指给它）。"
-          notes="$notes 登录凭据与设置写在 %APPDATA%/ArrowMeo/rustBiliPC（Linux 是 ~/.config/ArrowMeo/rustBiliPC）。"
-          notes="$notes 经过 UPX 压缩的 exe 容易被杀软误报，遇到拦截请加白名单。"
-          # 同 tag 重跑时只 `--clobber` 同名文件：改名或减少目标会留下上一轮的孤儿资产，
-          # 所以真要清干净请先把 release 删掉再跑。
-          if gh release view "$TAG" >/dev/null 2>&1; then
-            for f in release-files/*; do
-              gh release upload "$TAG" "$f" --clobber
-            done
-          else
-            args=(release-files/* --title "$TAG" --notes "$notes")
-            if [ "$PRERELEASE" = "true" ]; then args+=(--prerelease); fi
-            gh release create "$TAG" "${args[@]}"
+          args=(--title "rustBiliPC $TAG" --target "$GITHUB_SHA" --notes-file notes.md)
+          if [ "$PRERELEASE" = "true" ]; then args+=(--prerelease); fi
+          if ! gh release create "$TAG" --repo "$GITHUB_REPOSITORY" "${args[@]}" release-files/* 2>/tmp/create.err; then
+            # 同 tag 重跑时 create 会失败，改成覆盖上传，避免手动删 release。
+            cat /tmp/create.err
+            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" release-files/* --clobber
           fi
-          echo "### 发布内容" >> "$GITHUB_STEP_SUMMARY"
-          ls -l release-files >> "$GITHUB_STEP_SUMMARY"
-          gh release view "$TAG" --json tagName,assets,url >> "$GITHUB_STEP_SUMMARY"
+          # create 成功时 edit 是无害的自我覆盖；走 upload 回退时这一步才把标题、说明、指向提交纠正过来。
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --title "rustBiliPC $TAG" --target "$GITHUB_SHA" --notes-file notes.md
+          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --json tagName,name,targetCommitish,publishedAt,url,assets \
+            --jq '"\(.tagName) → \(.targetCommitish[0:7])  \(.publishedAt)  \(.url)  \([.assets[].name] | join(", "))"' | tee -a "$GITHUB_STEP_SUMMARY"

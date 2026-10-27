@@ -27,3 +27,7 @@ cookies.json
 **/.DS_Store
 Thumbs.db
 *.log
+
+# Python 校验脚本跑出来的字节码
+__pycache__/
+*.pyc

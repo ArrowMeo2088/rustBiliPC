@@ -15,6 +15,12 @@ name: CI
 # 只为新依赖解析）。加了 `--locked` 后任何一次新增依赖都会先把 CI 卡死，而本机没有 cargo
 # 没法预先刷新 lock。每轮把 lock 作为 artifact 取回来入库，所以仍然有 diff 可查。
 #
+# **推送前先跑 `python .github/scripts/check_workflows.py`**（2026-10-27）：它专抓
+# `yaml.safe_load` 抓不到、GitHub 又不一定报错的那几类——重复键、`needs` 指向不存在的作业、
+# 未声明的 `inputs.*`、矩阵 `include` 各项键不一致，尤其是 **`steps.<id>.*` 指到一个没写 `id:`
+# 的步骤**（那条求值为空串、不报错，第五十二轮的三次红就是它：作业输出永远为空 → 下游
+# `fromJson(空)` 得到零条矩阵腿 → 那个作业在作业列表里直接不出现，日志零错误）。
+#
 # **`paths-ignore`（2026-10-27 用户定稿）**：纯文档与 `cd.yml` 那一组文件的提交**不再重编**。
 # 理由：一轮的"文档同步"是规矩（改了哪个目录就同一提交更新它的 README/docs），
 # 但一次提交里全是 `.md` 时编译证据与上一版一模一样——第五十二轮就因为这一点连烧三次 CI。
@@ -34,7 +40,6 @@ on:
       - "**/README.md"
       - "QODER.md"
       - ".github/workflows/cd.yml"
-      - ".github/workflows/build-exe.yml"
   pull_request:
     paths-ignore:
       - "docs/**"
@@ -42,7 +47,6 @@ on:
       - "**/README.md"
       - "QODER.md"
       - ".github/workflows/cd.yml"
-      - ".github/workflows/build-exe.yml"
   # 保留手动入口：想在没改动时也验一轮（比如刚换过 runner 镜像），
   # 或某轮全是文档却仍想要一次编译证据时，直接 dispatch。
   workflow_dispatch:
