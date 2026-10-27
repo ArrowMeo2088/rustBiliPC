@@ -57,7 +57,7 @@
   32 bpp）由包根 `build.rs` 生成一句 `1 ICON "<绝对路径>"` 的 `.rc`，交 **Windows SDK 的 `rc.exe`**
   编成 `.res`，再 `cargo:rustc-link-arg=<.res>` 链进产物。三条规矩：
   ① **不要用 `/ICON:`** —— MSVC 的 `link.exe` **没有**这个选项，第五十五轮用了它，只得到
-  `LINK : warning LNK4044 … ignored`，编译照绿而产物**连 `.rsrc` 段都没有**；
+  `LINK : warning LNK4044 … ignored`，编译照绿而产物里**没有图标资源**（`.rsrc` 只剩 `RT_MANIFEST`）；
   ② 资源 ID 必须是 **1**（gpui `gpui_windows/src/platform.rs:1633` 的 `load_icon()` 加载的就是 ID 1 的
   `IMAGE_ICON`，窗口与任务栏那颗靠它）；
   ③ **不要为此加 `winresource`/`embed-resource`** —— `rc.exe` 与 gpui 本来就要的 `fxc.exe`

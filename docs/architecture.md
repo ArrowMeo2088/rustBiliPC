@@ -1179,8 +1179,10 @@ P13 交完之后按"设计缺陷 / 依赖 / 性能 / 占用 / 体积 / 稳定"�
 - **`/ICON:` 是条死路，实测过**：第五十五轮先写的是
   `cargo:rustc-link-arg-bins=/ICON:…/res/icon.ico`，CI 里得到的是
   `LINK : warning LNK4044: unrecognized option '/ICON:…'; ignored` —— **MSVC 的 `link.exe` 没有这个选项**，
-  它被丢掉而编译照绿。扫二进制才看出来：那份 exe **连 `.rsrc` 段都没有**
-  （gpui 的 `load_icon()` 于是走 `unwrap_or_default()` 拿空句柄，一直用默认图标）。
+  它被丢掉而编译照绿。扫二进制看到的是：那份产物的 `.rsrc` **存在，但里面只有 `RT_MANIFEST`**，
+  没有 `RT_ICON`/`RT_GROUP_ICON` —— 也就是 gpui 的 `load_icon()` 一直 `unwrap_or_default()` 拿空句柄。
+  （**第五十八轮更正**：这里原本写的是"连 `.rsrc` 都没有"，那是校验脚本自己的 bug 给的假结论，
+  见下面那条与第 8 节第五十八轮。）
 - **现在的做法**：`build.rs` 在 `OUT_DIR` 里生成一句 `1 ICON "<绝对路径>"` 的 `.rc`，
   用 **Windows SDK 的 `rc.exe`** 编成 `.res`，再 `cargo:rustc-link-arg=<那个 .res>` 交给链接器当输入文件。
   `rc.exe` 是按 `%WindowsSdkDir%\bin\<版本>\x64\rc.exe` 与
@@ -1192,6 +1194,14 @@ P13 交完之后按"设计缺陷 / 依赖 / 性能 / 占用 / 体积 / 稳定"�
   `LoadImageW(hModule, PCWSTR(1), IMAGE_ICON, LR_DEFAULTSIZE | LR_SHARED)` —— 它找的就是 ID 1，
   所以 `.rc` 里那句写死 `1 ICON …`，让 exe 图标与窗口/任务栏那颗是同一份。
   **窗口那颗是否真跟着变还没经他确认**（这一条是读源码定的编号，`ci.yml` 的校验只看资源在不在）。
+- **`check_icon.py` 自己也曾是错的**（第五十八轮）：它把 `winver.exe`、`git-bash.exe` 这种
+  **一定有图标**的文件判成"没有 `.rsrc`"，两个坑叠在一起——① 资源目录是数据目录的**索引 2**、
+  每项 8 字节，偏移该是 `+16`，写成了 `+32`；② 段表起点是 `pe + 24 + SizeOfOptionalHeader`
+  （签名 4 + COFF 头 20），写成了 `pe + 20 + …`，而 Windows 系统二进制常把 `SizeOfOptionalHeader`
+  写成 0，得按 PE32/PE32+ 用默认值（`0xF0`/`0xE0`）兜底。
+  **现在它会把解析到的头信息打出来**（`--verbose`：PE 头、段表、资源 RVA、目录偏移、顶层条目），
+  这类"工具自己骗人"的 bug 一眼就能看出来。另外它只看**数字 ID** 的顶层条目：用 MUI 备用资源对
+  （`notepad.exe` 那种 `MUI` 命名条目）的程序会被判成"没图标"，我们的产物是普通 `1 ICON`，不受影响。
 - **找不到 `rc.exe` 时不挡住编译**：只发 `cargo:warning` 并跳过 —— 但为了让这种事**不再静默**，
   `ci.yml` 有一步 `Verify the exe carries its icon`（跑 `.github/scripts/check_icon.py` 扫 `.rsrc` 顶层，
   缺 `RT_ICON`/`RT_GROUP_ICON` 就**红**），`cd.yml` 的 Windows 腿也扫一次，但只写进 summary（不为图标卡发布）。
@@ -2222,3 +2232,22 @@ gpui 那边也核过了：`gpui_windows/src/platform.rs:1633` 的 `load_icon()` 
 - 给他的两份实验体：这次 dispatch 用 `upx=false` + `diagnostic=true`，于是 win-arm64 有
   **未压缩的正常版**（单独验假设 1）与**控制台诊断版**（验假设 2/3，并直接产出 `debug.log`）；
   `crash.log` 那一路（P14 装的 panic 钩子）与调试模式无关，两处都该看。
+
+### 第五十八轮（校验脚本自己骗了我一次：更正"产物连 .rsrc 都没有"）
+
+`ci.yml` 那步 `Verify the exe carries its icon` 连着红两次，两次的真相都不是"没图标"这么简单：
+
+| 轮次 | 现象 | 真相 |
+| --- | --- | --- |
+| 第五十七轮 | 校验步 `Traceback … UnicodeEncodeError: charmap codec can't encode characters in position 0-6` | **脚本死在打印中文上**：Windows 上 Python 的 stdout 用控制台码页。本机 Git Bash 只是花屏、不炸，所以本地试不出来。修在脚本里（`reconfigure(encoding="utf-8")`）+ 两份 workflow 显式 `PYTHONIOENCODING=utf-8` |
+| 第五十八轮 | 校验报"没有 `.rsrc` 资源目录" | **扫描器自己错了**：数据目录偏移写成 `+32`（资源是索引 2、每项 8 字节，该 `+16`），段表起点少算 4 字节（`pe+20+optsz` 应为 `pe+24+optsz`），而且系统二进制的 `SizeOfOptionalHeader` 常为 0 需要兜底。拿 `winver.exe`/`git-bash.exe` 当对照一试就看出来了——它们当然有图标 |
+
+修好之后对第五十五轮那份产物（`/ICON:` 那次）的**正确结论**是：`.rsrc` 存在，里面只有 `RT_MANIFEST`，
+没有 `RT_ICON`/`RT_GROUP_ICON` —— 图标确实没进去（`LNK4044` 那句是真的），但"连 `.rsrc` 都没有"
+这句话是我的坏工具给的，已把 `build.rs` 注释与第 4.30 节一并更正。
+
+**这一步现在挪到 artifact 上传之后**：就算它红了，那天的 exe 也已经传上去了，能拿回本地重扫；
+同时它会把 `rc.exe` 那一路的现场打出来（`target/release/build/rustbilipc-*/out/` 里有没有 `.rc`/`.res`、
+`where.exe rc.exe`、SDK 目录树里 `*/x64/rc.exe`），**不再靠猜**。
+另外扫描器现在支持 `--verbose`，把 PE 头、段表、资源 RVA、目录偏移、顶层条目全打出来——
+这次的教训就是：**校验工具本身也要能被校验**。

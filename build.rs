@@ -5,7 +5,7 @@
 //! **MSVC 的 `link.exe` 没有 `/ICON:` 这个选项**。第五十五轮先试过直接
 //! `cargo:rustc-link-arg-bins=/ICON:…/res/icon.ico`，CI 里的现场是
 //! `LINK : warning LNK4044: unrecognized option '/ICON:…'; ignored`——
-//! 选项被丢掉、产物里**连 `.rsrc` 段都没有**（用 `.github/scripts/check_icon.py` 扫出来的），
+//! 选项被丢掉、产物里**没有图标资源**（`.rsrc` 在，但只有 `RT_MANIFEST`），
 //! 而编译照样绿。图标是资源，只能先由 SDK 的 `rc.exe` 把 `.rc` 编成 `.res`，再让链接器吃进去。
 //!
 //! ## 为什么自己调 `rc.exe` 而不加 `winresource`/`embed-resource`

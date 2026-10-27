@@ -120,15 +120,6 @@ jobs:
       # 交付口径是"N passed / 零 warning"，所以这里单独跑一次 check 把 warning 数出来：
       # `cargo build` 命中缓存时**不会重复报**旧的 warning，只有 `--message-format=json` 重新
       # 过一遍前端才数得准。
-      # 第五十五轮的教训：`link.exe` 不认 `/ICON:` 时只丢一句 `LNK4044 … ignored`，
-      # 编译照绿、产物照没图标。**光看编译成不成功查不出这件事**，所以直接扫二进制。
-      # 这一条放在 ci.yml 而不是 cd.yml：日常这条快、红了立刻知道；发布那条只写 summary（不为图标卡发布）。
-      - name: Verify the exe carries its icon
-        shell: bash
-        env:
-          PYTHONIOENCODING: utf-8
-        run: python .github/scripts/check_icon.py target/release/rustbilipc.exe
-
       - name: Test (pure logic only, no window needed)
         shell: bash
         run: cargo test --release
@@ -158,6 +149,25 @@ jobs:
           name: rustbilipc-win-x64-release
           path: target/release/rustbilipc.exe
           if-no-files-found: error
+
+      # 第五十五轮的教训：`link.exe` 不认 `/ICON:` 时只丢一句 `LNK4044 … ignored`，
+      # 编译照绿、产物照没图标——**光看构建成功查不出这件事**，所以扫二进制。
+      # 这一步放在 artifact 上传**之后**：就算它红了，那天的 exe 也已经传上去了，能拿回本地再扫一遍。
+      # 顺带把 `rc.exe` 那一路的现场打出来（第五十八轮就是这么定位的，别再靠猜）。
+      - name: Verify the exe carries its icon
+        shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
+        run: |
+          echo "=== 构建脚本的输出目录（.rc / .res 在不在这里）==="
+          ls -l target/release/build/rustbilipc-*/out/ 2>/dev/null || echo "（没有 out 目录）"
+          echo "=== PATH 上的 rc.exe ==="
+          where.exe rc.exe 2>/dev/null || echo "PATH 上没有 rc.exe"
+          echo "=== SDK 里的 rc.exe ==="
+          ls "/c/Program Files (x86)/Windows Kits/10/bin" 2>/dev/null | head -5
+          ls "/c/Program Files (x86)/Windows Kits/10/bin"/*/x64/rc.exe 2>/dev/null | head -3 || echo "那棵树里没找到 rc.exe"
+          echo "=== 扫产物 ==="
+          python .github/scripts/check_icon.py target/release/rustbilipc.exe --verbose
 
       - name: Upload Cargo.lock
         if: always()
