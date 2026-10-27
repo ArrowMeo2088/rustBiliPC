@@ -14,16 +14,48 @@ name: CI
 # 为什么不加 `--locked`：Cargo.lock 在这里只当"版本种子"用（cargo 沿用它已记录的版本，
 # 只为新依赖解析）。加了 `--locked` 后任何一次新增依赖都会先把 CI 卡死，而本机没有 cargo
 # 没法预先刷新 lock。每轮把 lock 作为 artifact 取回来入库，所以仍然有 diff 可查。
+#
+# **`paths-ignore`（2026-10-27 用户定稿）**：纯文档与 `cd.yml` 那一组文件的提交**不再重编**。
+# 理由：一轮的"文档同步"是规矩（改了哪个目录就同一提交更新它的 README/docs），
+# 但一次提交里全是 `.md` 时编译证据与上一版一模一样——第五十二轮就因为这一点连烧三次 CI。
+# 三条口径要记牢：
+# ① **`ci.yml` 自己不在 ignore 里**：动它就跑一轮，至少证明构建没被谁改坏
+#    （但它自己的 YAML 语法错误只有 GitHub 报，这一条挡不住）；
+# ② 只要同一次提交**还带了代码**，ignore 不生效、照常全量编译（这是"提交里有没有源码"的判据，
+#    不是"文档单独提交"的判据）；
+# ③ `Cargo.toml` / `Cargo.lock` / `.rs` 一律不在 ignore 里，改依赖必然要编译。
 
 on:
   push:
     branches: ["**"]
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+      - "**/README.md"
+      - "QODER.md"
+      - ".github/workflows/cd.yml"
+      - ".github/workflows/build-exe.yml"
   pull_request:
-  # 保留手动入口：想在没改动时也验一轮（比如刚换过 runner 镜像）。
+    paths-ignore:
+      - "docs/**"
+      - "*.md"
+      - "**/README.md"
+      - "QODER.md"
+      - ".github/workflows/cd.yml"
+      - ".github/workflows/build-exe.yml"
+  # 保留手动入口：想在没改动时也验一轮（比如刚换过 runner 镜像），
+  # 或某轮全是文档却仍想要一次编译证据时，直接 dispatch。
   workflow_dispatch:
 
 permissions:
   contents: read
+
+# 同一分支/同一事件只要留最新一次：**第五十二轮连着推了三个提交，CI 就并排起了三个作业，
+# 而三次编的是同一份源码**（后两个只改 `cd.yml`）。`paths-ignore` 挡掉"全是文档"的那一类，
+# 这一条挡掉"短时间内连推"的那一类。分组带上事件名，避免 push 把同 ref 的 PR 检查顶掉。
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   CARGO_TERM_COLOR: always

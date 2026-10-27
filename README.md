@@ -22,14 +22,14 @@ Direct3D11 + DirectComposition + DirectWrite 原生绘制；视频播放交给�
 **凭据 `-101` → 自动开扫码登录小窗**（重登只关小窗并刷新当前格，绝不再开一个主窗口），
 **滚到底自动连续翻页**（历史、收藏夹内容、合集内容、搜索、空间的图文与合集）；
 ③ **落盘搬到 `%APPDATA%/ArrowMeo/rustBiliPC`，旧位置代码清零**；
-④ **工作流拆成 `ci.yml`（push 自动）与 `cd.yml`（手动多平台 + LTO/strip + UPX + Release，只打 exe）**。
+④ **工作流拆成 `ci.yml`（push 自动）与 `cd.yml`（手动多平台 + LTO/strip + UPX + Release，只打 exe；步骤抽进 `build-exe.yml`，`publish` 默认关）**。
 见第 4.27、4.28 节 |
 
 ## 大概的文件结构
 
 ```
 rustBiliPC/
-├── .github/workflows/   `ci.yml`（push 自动：win x64 release + 单测）+ `cd.yml`（手动：多平台 release-dist + UPX + GitHub Release）
+├── .github/workflows/   `ci.yml`（push 自动：win x64 release + 单测）+ `cd.yml`（手动：四个静态作业调 `build-exe.yml`，release-dist + UPX，`publish` 开关控制是否发 GitHub Release）
 ├── src/                 项目源代码（单元测试在 src/tests/）
 │   ├── main.rs lib.rs app.rs theme.rs logging.rs
 │   ├── api/             bpi-rs 封装 + DASH 码流选择 + 播控取地址 + 下载 + 起播前地址探测
@@ -58,10 +58,14 @@ rustBiliPC/
 - 仓库：https://github.com/ArrowMeo2088/rustBiliPC （公开）
 - **`ci.yml`**：push / PR **自动跑**，只编 Windows x64 release + `cargo test`。
   这是"改动还能不能编过"的证据通道（本机没有 Rust 工具链，每一轮都要靠它）。
-- **`cd.yml`**：Actions → CD → **Run workflow**（手动），填 tag（如 `v0.1.0`）。
-  四个目标 win-x64 / win-arm64 / linux-x64 / linux-arm64，用 `release-dist`
-  （LTO + `codegen-units=1` + strip）编、UPX 压（失败就发未压缩那份），
-  然后发 GitHub Release。**资产只有可执行文件本身**（不带 dll、不带 mpv、不带文档）。
+  两道闸（第五十二轮加的）：`paths-ignore` 让**全是文档/只动 `cd.yml` 的提交不触发编译**
+  （`ci.yml` 自己除外），`concurrency` + `cancel-in-progress` 让同分支同事件只留最新一次。
+- **`cd.yml`**：Actions → CD → **Run workflow**（手动）。输入五个：`targets`（四条腿或 `all`，
+  默认 `win-x64`）、**`publish`（默认关：只编译取产物，不建 Release）**、`tag`、`prerelease`、`upx`。
+  四个目标 win-x64 / win-arm64 / linux-x64 / linux-arm64 是**四个静态作业**，每条调同一份
+  `build-exe.yml`（`release-dist`：LTO + `codegen-units=1` + strip，再 UPX 压，压失败就出未压缩那份）。
+  **不用动态矩阵**：`fromJson` + `include` / 对象值实测都让作业凭空消失（架构文档第 8 节第五十二轮）。
+  要发 Release 就把 `publish` 打开并给 tag。**资产只有可执行文件本身**（不带 dll、不带 mpv、不带文档）。
 - 日常产物：Artifacts `rustbilipc-win-x64-release` / 本机 `build.bat` 归集到 `publish/` 根。
 - 缓存：`~/.cargo` 与 `target/` 按 profile 分 key；首次冷编译约 25–45 分钟属预期。
 - 为什么是 release 而不是 debug：gpui 的 Windows 后端在 debug 下**运行时**从编译机路径读 HLSL 源，

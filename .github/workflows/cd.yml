@@ -6,16 +6,20 @@ name: CD
 # 这条管"给人下载的产物"。**只打包 exe**——不塞 dll、不塞 mpv、不塞 README
 # （用户定稿："注意只需要打包 exe，不要打包其他东西"；本项目本来就是单 exe + 外置 mpv.exe）。
 #
-# 目标表在 `.github/cd-matrix.json`（唯一的清单），`targets` 挑其中一条或全部；
-# `publish` 默认关：**先量真实体积，别先公开**。四个目标里只有 win-x64 是 ci.yml 天天在跑的，
-# 另三条一次都没真跑过（runner 标签、系统库齐不齐都没证据 —— 风险清单第 31 条）。
-# 第一次真跑完请把结论回填 `docs/architecture.md` 第 2 节与风险清单，别把"配上了"当成"能用了"。
+# 结构：四个静态作业，每条腿调同一份 `.github/workflows/build-exe.yml`（步骤只有一份）。
+# 为什么不用矩阵 + `fromJson` 的动态目标表：**那条路实测不通**（第五十二轮连踩两次，
+# `build` 作业凭空消失、run 红、日志零错误；`include` 不能来自表达式，矩阵值也不能是对象）。
+# 现在挑目标靠作业级 `if` 判 `targets`，没选中的那条就是干净的 `skipped`。
+#
+# `publish` 默认关：**先量 `release-dist` + UPX 的真实体积，不建 Release**（发 Release 是公开动作）。
+# 四个目标里只有 win-x64 是 `ci.yml` 天天在跑的，另三条一次都没真跑过
+# （runner 标签、系统库齐不齐都没证据 —— 风险清单第 31 条）。跑完把结论回填第 2 节与风险清单。
 
 on:
   workflow_dispatch:
     inputs:
       targets:
-        description: "编哪个目标（先挑一个把流水线跑通，再选 all）"
+        description: "编哪个目标（先挑一条把流水线跑通，再选 all）"
         type: choice
         required: true
         default: "win-x64"
@@ -31,7 +35,7 @@ on:
         required: false
         default: false
       tag:
-        description: "Release 的 tag（比如 v0.1.0）"
+        description: "Release 的 tag（比如 v0.1.0），publish=true 时必填"
         type: string
         required: false
         default: "v0.1.0"
@@ -46,184 +50,73 @@ on:
         required: false
         default: true
 
-# `contents: write` 是**这条**流水线要的（建 release、传资产）；
-# ci.yml 那边仍然保持 `contents: read`——构建与测试不需要写权限。
+# `contents: write` 是 `release` 作业要的（建 release、传资产）；四个 build 作业用不到写权限，
+# 但 workflow 级的 `secrets: inherit` 会把这份带下去，所以调用侧再显式收紧不如在这里说清。
 permissions:
   contents: write
 
-env:
-  CARGO_TERM_COLOR: always
-  RUSTFLAGS: ""
-
 jobs:
-  # 为什么要有这一道：GitHub 的 matrix **不能在作业级按输入跳过某一条腿**，
-  # 而"先只开 win-x64 把流水线跑通"是这次定下来的做法。
-  #
-  # **踩过的坑（第五十二轮，两个 run 各红一次）**：交给 `strategy.matrix.include:`
-  # 或 `matrix: {"include":[...]}` 都让 `build` 作业**凭空消失**——
-  # `plan` 绿、`release` 正确跳过、整个 run 红、日志与注释里一句错都没有。
-  # 有效的写法是**一个数组维**（`matrix.leg` 的每一项是一整个目标对象），
-  # 所以下面所有步骤都写 `matrix.leg.xxx`。
-  plan:
-    runs-on: ubuntu-latest
-    outputs:
-      legs: ${{ steps.pick.outputs.legs }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+  win-x64:
+    if: ${{ inputs.targets == 'all' || inputs.targets == 'win-x64' }}
+    uses: ./.github/workflows/build-exe.yml
+    with:
+      name: win-x64
+      os: windows-latest
+      target: x86_64-pc-windows-msvc
+      exe: rustbilipc.exe
+      asset: rustbilipc-win-x64.exe
+      windows: "true"
+      nasm: "true"
+      upx: ${{ inputs.upx }}
 
-      - name: Pick matrix legs
-        shell: bash
-        env:
-          TARGETS: ${{ inputs.targets }}
-        run: |
-          set -e
-          if [ "$TARGETS" = "all" ]; then
-            legs=$(jq -c . .github/cd-matrix.json)
-          else
-            legs=$(jq -c --arg n "$TARGETS" '[.[] | select(.name == $n)]' .github/cd-matrix.json)
-          fi
-          # 挑空了必须当场红：否则后面是一个"成功但什么都没编"的绿勾。
-          if [ "$(jq -r 'length' <<<"$legs")" = "0" ]; then
-            echo "目标 \"$TARGETS\" 在 .github/cd-matrix.json 里不存在"
-            exit 1
-          fi
-          echo "legs=$legs" >> "$GITHUB_OUTPUT"
-          # 把交出去的那份打进日志：万一 `build` 还是不出现，证据就在这行里，不用靠猜。
-          echo "交给 build 的 leg 数组：$legs"
-          echo "### 这次要编的目标" >> "$GITHUB_STEP_SUMMARY"
-          jq -r '.[].name' <<<"$legs" >> "$GITHUB_STEP_SUMMARY"
-          echo "publish=${{ inputs.publish }} upx=${{ inputs.upx }} tag=${{ inputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+  win-arm64:
+    if: ${{ inputs.targets == 'all' || inputs.targets == 'win-arm64' }}
+    uses: ./.github/workflows/build-exe.yml
+    with:
+      name: win-arm64
+      os: windows-latest
+      target: aarch64-pc-windows-msvc
+      exe: rustbilipc.exe
+      asset: rustbilipc-win-arm64.exe
+      windows: "true"
+      nasm: "true"
+      upx: ${{ inputs.upx }}
 
-  build:
-    needs: plan
-    strategy:
-      fail-fast: false
-      matrix:
-        leg: ${{ fromJson(needs.plan.outputs.legs) }}
-    name: ${{ matrix.leg.name }}
-    runs-on: ${{ matrix.leg.os }}
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+  linux-x64:
+    if: ${{ inputs.targets == 'all' || inputs.targets == 'linux-x64' }}
+    uses: ./.github/workflows/build-exe.yml
+    with:
+      name: linux-x64
+      os: ubuntu-latest
+      target: x86_64-unknown-linux-gnu
+      exe: rustbilipc
+      asset: rustbilipc-linux-x64
+      windows: "false"
+      nasm: "false"
+      upx: ${{ inputs.upx }}
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.leg.target }}
-
-      # aws-lc-sys 在 MSVC 上要 NASM。第五十一轮查明它**去不掉**：点名要它的是 quinn-proto
-      # （HTTP/3，随 reqwest 进来，gpui/bpi-rs 带的，我们改不动特征），所以这一步继续留着；
-      # 我们的 rustls 已经只装 ring，运行时不走 aws-lc，但编译还是要它。
-      - name: Install NASM (for aws-lc-sys on MSVC)
-        if: matrix.leg.nasm
-        run: choco install nasm --no-progress -y
-
-      # gpui 的 Linux 后端要 X11/wayland/fontconfig/ALSA/vulkan 这些开发包；
-      # Debian/Ubuntu 的包名按 gpui 自己 CI 的那一份列（缺一个就是 link 阶段一大串 undefined）。
-      - name: Install Linux system dependencies
-        if: ${{ !matrix.leg.windows }}
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libasound2-dev libx11-xcb-dev libxcb-render0-dev libxcb-shape0-dev \
-            libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libclang-dev \
-            libvulkan1 libfontconfig1-dev libexpat1-dev fonts-noto-color-emoji \
-            libwayland-dev wayland-protocols libxcursor-dev libxcb1-dev \
-            pkg-config mold
-        # `mold` 只当链接器加速用；装不上也不该挡住整条流水线（下一步显式判断）。
-
-      - name: Locate fxc.exe (gpui compiles HLSL at build time in release)
-        if: matrix.leg.windows
-        run: |
-          $sdk = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
-          $fxc = Get-ChildItem -Path $sdk -Recurse -Filter fxc.exe -ErrorAction SilentlyContinue |
-                 Where-Object { $_.FullName -match 'x64' } |
-                 Sort-Object FullName -Descending |
-                 Select-Object -First 1
-          if ($fxc) {
-            "GPUI_FXC_PATH=$($fxc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-            "fxc: $($fxc.FullName)"
-          } else {
-            "fxc.exe 未找到；gpui 的 build.rs 会自行搜索，若失败请检查 Windows SDK"
-          }
-
-      - name: Cache cargo home and target
-        uses: actions/cache@v4
-        with:
-          save-always: true
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            ~/.cargo/bin
-            C:/Users/runneradmin/.cargo/registry
-            C:/Users/runneradmin/.cargo/git
-            target
-          key: cargo-${{ matrix.leg.name }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: |
-            cargo-${{ matrix.leg.name }}-
-
-      # `release-dist` 是 Cargo.toml 里为这条流水线单独加的配置：
-      # LTO + codegen-units=1 + strip（+ 不做 debug 信息），产物才配得上 UPX 与"发出去"。
-      # 交叉/多目标都走同一份配置；输出目录是 `target/<triple>/release-dist/`。
-      - name: Build (release-dist, ${{ matrix.leg.target }})
-        shell: bash
-        run: cargo build --profile release-dist --target ${{ matrix.leg.target }}
-
-      - name: Install UPX
-        if: inputs.upx
-        run: |
-          set -o pipefail
-          if command -v choco >/dev/null 2>&1; then
-            choco install upx --no-progress -y
-            echo "UPX_BIN=$(command -v upx || echo '/c/Program Files/UPX/upx.exe')" >> "$GITHUB_ENV"
-          else
-            sudo apt-get update && sudo apt-get install -y upx || sudo apt-get install -y upx-ufl
-            echo "UPX_BIN=$(command -v upx)" >> "$GITHUB_ENV"
-          fi
-
-      - name: Compress with UPX
-        if: inputs.upx
-        shell: bash
-        run: |
-          bin="target/${{ matrix.leg.target }}/release-dist/${{ matrix.leg.exe }}"
-          if [ ! -f "$bin" ]; then echo "找不到产物：$bin"; exit 1; fi
-          before=$(wc -c < "$bin")
-          # 不覆盖原文件：先压到临时名，成功了才换回去（压失败时至少还有一个能用的 exe）。
-          # `-9` 是最高压缩档；`--lzma` 换 LZMA 过滤器（更小、更慢）。UPX 对
-          # PE/ARM64 与 ELF/ARM64 都支持，但** Rust 产物压缩后偶尔会在运行期出问题 **，
-          # 所以这一步失败不挡住发布：未压缩的那一份照样发出去。
-          if "$UPX_BIN" -9 --lzma "$bin" -o "$bin.upx"; then
-            mv "$bin.upx" "$bin"
-            after=$(wc -c < "$bin")
-            echo "UPX：$before → $after 字节（省 $((before - after))）"
-          else
-            echo "UPX 失败，发布未压缩的那一份（$before 字节）"
-            rm -f "$bin.upx"
-          fi
-
-      - name: Stage asset (only the executable)
-        shell: bash
-        run: |
-          mkdir -p dist
-          cp "target/${{ matrix.leg.target }}/release-dist/${{ matrix.leg.exe }}" "dist/${{ matrix.leg.asset }}"
-          ls -l dist
-          echo "### ${{ matrix.leg.name }} 产物" >> "$GITHUB_STEP_SUMMARY"
-          echo "未压缩与压缩后的字节数看上面 `ls -l` 那一行；SHA256：" >> "$GITHUB_STEP_SUMMARY"
-          sha256sum "dist/${{ matrix.leg.asset }}"
-
-      - name: Upload staged asset
-        uses: actions/upload-artifact@v4
-        with:
-          name: asset-${{ matrix.leg.name }}
-          path: dist/${{ matrix.leg.asset }}
-          if-no-files-found: error
+  # 为什么用 arm runner 而不是在 x86 runner 上交叉编译：gpui 的 Linux 后端要链接一串系统库
+  # （X11/wayland/fontconfig/ALSA/vulkan），交叉编译得先搭一个带这些 .so 与头文件的 arm64 sysroot，
+  # 比直接用 arm runner 贵得多。`ubuntu-24.04-arm` 这个标签是否存在**也还没验过**。
+  linux-arm64:
+    if: ${{ inputs.targets == 'all' || inputs.targets == 'linux-arm64' }}
+    uses: ./.github/workflows/build-exe.yml
+    with:
+      name: linux-arm64
+      os: ubuntu-24.04-arm
+      target: aarch64-unknown-linux-gnu
+      exe: rustbilipc
+      asset: rustbilipc-linux-arm64
+      windows: "false"
+      nasm: "false"
+      upx: ${{ inputs.upx }}
 
   release:
-    needs: build
-    # 默认**不发**：这一条流水线第一件事是量真实体积（`release-dist` + UPX 那两份 exe 取回来就行），
-    # 建 Release 是公开动作，要他点头。挑 `publish=true` 才会走到下面。
-    if: inputs.publish
+    needs: [win-x64, win-arm64, linux-x64, linux-arm64]
+    # 两层门槛：① `publish` 关掉就整个跳过（默认关）；
+    # ② `!failure() && !cancelled()` —— 默认的 `success()` 会因为"有 needs 是 skipped"而连带跳过，
+    # 而只挑一条腿时另外三条**必然**是 skipped，那样 `targets=win-x64 + publish=true` 就永远发不出去。
+    if: ${{ inputs.publish && !failure() && !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - name: Require a tag when publishing
@@ -243,7 +136,7 @@ jobs:
       - name: Collect assets
         uses: actions/download-artifact@v4
         with:
-          # 只收这次挑中的那几个 exe（每条腿一个 `asset-<name>`），别的 artifact（Cargo.lock 那类）不混进来。
+          # 只收这次真跑过的那几条 exe（每条腿一个 `asset-<name>`），别的 artifact 不混进来。
           pattern: asset-*
           path: release-files
           merge-multiple: true

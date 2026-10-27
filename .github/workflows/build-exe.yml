@@ -1,0 +1,174 @@
+name: Build one executable
+
+# **被 `cd.yml` 调用的 reusable workflow**（`on: workflow_call`），不单独跑。
+# 为什么长这样：GitHub 的**动态矩阵有两条实测到的硬限制**——
+# ① `include` 不能从表达式（作业输出 + `fromJson`）带进来；② 矩阵的值必须是标量，
+# 不能是一整个对象。两种写法都让 `build` 作业**凭空消失**：run 结论红、日志与注释里零错误
+# （第五十二轮连踩两次，`docs/architecture.md` 第 8 节那条）。
+# 剩下的可用形状只有"每个键一个标量数组"，而我们的四个字段必须成组，所以**不用矩阵**：
+# `cd.yml` 里四个静态作业各调这一份，目标靠作业级 `if` 挑，改参数只改一处。
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+inputs:
+  name:
+    description: "目标名（win-x64 / win-arm64 / linux-x64 / linux-arm64），也用作缓存 key 与资产名的一部分"
+    type: string
+    required: true
+  os:
+    description: "runs-on 的 runner 标签"
+    type: string
+    required: true
+  target:
+    description: "rustup 的 target triple"
+    type: string
+    required: true
+  exe:
+    description: "构建出来的可执行文件名（Windows 带 .exe）"
+    type: string
+    required: true
+  asset:
+    description: "发布时这个 exe 在 Release 里的名字（**只打包它，不带别的文件**）"
+    type: string
+    required: true
+  windows:
+    description: "是不是 Windows 目标（'true'/'false'）：决定探 fxc.exe 还是装 Linux 系统库"
+    type: string
+    required: true
+  nasm:
+    description: "要不要装 NASM（'true'/'false'）：MSVC 上编译 aws-lc-sys 需要它"
+    type: string
+    required: false
+    default: "false"
+  upx:
+    description: "用 UPX 压缩产物（--lzma --best）"
+    type: boolean
+    required: true
+
+jobs:
+  build:
+    name: ${{ inputs.name }}
+    runs-on: ${{ inputs.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ inputs.target }}
+
+      # aws-lc-sys 在 MSVC 上要 NASM。第五十一轮查明它**去不掉**：点名要它的是 quinn-proto
+      # （HTTP/3，随 reqwest 进来，gpui/bpi-rs 带的，我们改不动特征），所以这一步继续留着；
+      # 我们的 rustls 已经只装 ring，运行时不走 aws-lc，但编译还是要它。
+      - name: Install NASM (for aws-lc-sys on MSVC)
+        if: inputs.nasm == 'true'
+        run: choco install nasm --no-progress -y
+
+      # gpui 的 Linux 后端要 X11/wayland/fontconfig/ALSA/vulkan 这些开发包；
+      # Debian/Ubuntu 的包名按 gpui 自己 CI 的那一份列（缺一个就是 link 阶段一大串 undefined）。
+      - name: Install Linux system dependencies
+        if: inputs.windows != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libasound2-dev libx11-xcb-dev libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libclang-dev \
+            libvulkan1 libfontconfig1-dev libexpat1-dev fonts-noto-color-emoji \
+            libwayland-dev wayland-protocols libxcursor-dev libxcb1-dev \
+            pkg-config mold
+        # `mold` 只当链接器加速用；装不上也不该挡住整条流水线（下一步显式判断）。
+
+      # gpui 的 build.rs 在 release 下要编译 HLSL 着色器，需要 Windows SDK 里的 fxc.exe。
+      # 找不到时只提示、不挡住：gpui 的 build.rs 自己也会搜一遍（第四轮起就这么活的）。
+      - name: Locate fxc.exe (gpui compiles HLSL at build time in release)
+        if: inputs.windows == 'true'
+        shell: pwsh
+        run: |
+          $sdk = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
+          $fxc = Get-ChildItem -Path $sdk -Recurse -Filter fxc.exe -ErrorAction SilentlyContinue |
+                 Where-Object { $_.FullName -match 'x64' } |
+                 Sort-Object FullName -Descending |
+                 Select-Object -First 1
+          if ($fxc) {
+            "GPUI_FXC_PATH=$($fxc.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+            "fxc: $($fxc.FullName)"
+          } else {
+            "fxc.exe 未找到；gpui 的 build.rs 会自行搜索，若失败请检查 Windows SDK"
+          }
+
+      - name: Cache cargo home and target
+        uses: actions/cache@v4
+        with:
+          save-always: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            ~/.cargo/bin
+            C:/Users/runneradmin/.cargo/registry
+            C:/Users/runneradmin/.cargo/git
+            target
+          key: cargo-${{ inputs.name }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ inputs.name }}-
+
+      # `release-dist` 是 Cargo.toml 里为发布单独加的配置：
+      # LTO + codegen-units=1 + strip（+ 不做 debug 信息），产物才配得上 UPX 与"发出去"。
+      # **不写 `panic = "abort"`**：`app::describe_join_error` 靠 tokio 把任务 panic 变成
+      # `JoinError` 才能把崩溃原因说给人看。输出目录是 `target/<triple>/release-dist/`。
+      - name: Build (release-dist, ${{ inputs.target }})
+        shell: bash
+        run: cargo build --profile release-dist --target ${{ inputs.target }}
+
+      - name: Install UPX
+        if: inputs.upx
+        shell: bash
+        run: |
+          set -o pipefail
+          if command -v choco >/dev/null 2>&1; then
+            choco install upx --no-progress -y
+            echo "UPX_BIN=$(command -v upx || echo '/c/Program Files/UPX/upx.exe')" >> "$GITHUB_ENV"
+          else
+            sudo apt-get update && sudo apt-get install -y upx || sudo apt-get install -y upx-ufl
+            echo "UPX_BIN=$(command -v upx)" >> "$GITHUB_ENV"
+          fi
+
+      - name: Compress with UPX
+        if: inputs.upx
+        shell: bash
+        run: |
+          bin="target/${{ inputs.target }}/release-dist/${{ inputs.exe }}"
+          if [ ! -f "$bin" ]; then echo "找不到产物：$bin"; exit 1; fi
+          before=$(wc -c < "$bin")
+          # 先压到临时名、成功了才换回去（压失败时至少还有一个能用的 exe）。
+          # `-9` 最高压缩档、`--lzma` 换过滤器（更小更慢）。UPX 对 PE/ARM64 与 ELF/ARM64 都支持，
+          # 但 **Rust 产物压缩后偶尔会在运行期出问题**，所以这一步失败不挡住发布：
+          # 未压缩的那一份照样出。
+          if "$UPX_BIN" -9 --lzma "$bin" -o "$bin.upx"; then
+            mv "$bin.upx" "$bin"
+            after=$(wc -c < "$bin")
+            echo "UPX：$before → $after 字节（省 $((before - after))）" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "UPX 失败，交付未压缩的那一份（$before 字节）" | tee -a "$GITHUB_STEP_SUMMARY"
+            rm -f "$bin.upx"
+          fi
+
+      # **只 stage 可执行文件本身**：不塞 dll、不塞 mpv、不塞 README（用户定稿）。
+      - name: Stage asset (only the executable)
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ inputs.target }}/release-dist/${{ inputs.exe }}" "dist/${{ inputs.asset }}"
+          ls -l dist | tee -a "$GITHUB_STEP_SUMMARY"
+          sha256sum "dist/${{ inputs.asset }}" | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload staged asset
+        uses: actions/upload-artifact@v4
+        with:
+          name: asset-${{ inputs.name }}
+          path: dist/${{ inputs.asset }}
+          if-no-files-found: error

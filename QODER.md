@@ -20,10 +20,17 @@
 - 编译只通过 GitHub Actions，2026-10-26（P13）按用途拆成两条：
   - **`ci.yml`**：**push / PR 自动跑**，只做 **Windows x64 release** 编译 + `cargo test`。
     这条是"改动还能不能编过"的证据通道，所以刻意不做多平台、不压 UPX（矩阵一次 20 分钟起，
-    放在 push 上会让人不敢推）。
-  - **`cd.yml`**：**手动触发**（`workflow_dispatch`），win/linux × x64/arm64 四个目标，
-    用 `[profile.release-dist]`（LTO + `codegen-units=1` + `strip`）编，UPX 压，
-    发 GitHub Release。**资产只有 exe 本身**（用户定稿："注意只需要打包 exe，不要打包其他东西"）：
+    放在 push 上会让人不敢推）。**2026-10-27 加了两道闸**：`paths-ignore`（`docs/**`、`*.md`、
+    `QODER.md`、`cd.yml`、`build-exe.yml` 这些单独提交不触发编译——一轮的文档同步是规矩，
+    但全 `.md` 的提交编出来跟上一版一模一样）与 `concurrency` + `cancel-in-progress`
+    （同分支同事件只留最新一次）。**`ci.yml` 自己不在 ignore 里**；同一提交里只要带源码就照常编。
+  - **`cd.yml`**：**手动触发**（`workflow_dispatch`），`targets` 挑一条或 all（默认 `win-x64`）、
+    **`publish` 默认关**（关掉就只编译取产物、不建 Release —— 发 Release 是公开动作，要他点头）。
+    结构是**四个静态作业各调 `.github/workflows/build-exe.yml`**（步骤只有一份），用
+    `[profile.release-dist]`（LTO + `codegen-units=1` + `strip`）编，UPX 压。
+    **这里不要用矩阵**：动态矩阵（作业输出 + `fromJson`）实测两种写法都让 `build` 作业凭空消失
+    （`include` 不能来自表达式、矩阵值不能是对象），第五十二轮连踩两次，记在第 8 节。
+    **资产只有 exe 本身**（用户定稿："注意只需要打包 exe，不要打包其他东西"）：
     不塞 dll、不塞 mpv、不塞 README。
   - 旧的单文件 `build.yml` 已删除；不要再往"手动一条路什么都干"的方向合回去。
 - **不要改成 debug**：gpui 的 Windows 后端（`gpui-pre-windows 0.3.9`）在 `cfg(debug_assertions)` 下
