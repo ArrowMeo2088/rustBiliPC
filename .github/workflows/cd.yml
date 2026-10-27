@@ -1,24 +1,30 @@
 name: CD
 
-# 手动触发的**发布**流水线：四个平台同时编（一条作业 + 静态 `include` 矩阵，`fail-fast: false`，
-# 一个目标红不带走其余三个），用 `[profile.release-dist]`（LTO / codegen-units=1 / strip）编，
-# UPX 压，**资产只有可执行文件**——不塞 dll、不塞 mpv、不塞 README
-# （用户定稿："注意只需要打包 exe，不要打包其他东西"；本项目本来就是单 exe + 外置 mpv.exe）。
-# 形状照 `ref/ocfree/workflows/cd.yml` 抄：矩阵写死在文件里，**不要 `plan` 作业、不要 `fromJson`**
-# （第五十二轮为"按输入挑目标"绕了一圈动态矩阵，红三次，真因是我自己漏写步骤 `id`，见架构第 8 节）。
+# 手动触发的**发布**流水线：四个平台同时编（一条 `build` 作业 + 静态 `include` 四腿矩阵，
+# `fail-fast: false`，一个目标红不带走其余三个），用 `[profile.release-dist]`
+# （LTO fat / codegen-units=1 / strip symbols / 无 debug 信息）编，**编完四份直接发 GitHub Release**。
 #
-# `publish` 默认关：这一条第一件事是**量真实体积**（`release-dist` + UPX 那四份取回来就行），
-# 建 Release 是公开动作，要点头。四个目标里只有 win-x64 是 `ci.yml` 天天在跑的，
-# 另三条一次都没真跑过（runner 标签、系统库齐不齐都没证据 —— 风险清单第 31 条）。
+# **不再压 UPX**（2026-10-27 用户定稿）：现象是压缩过的 win-arm64 那份在他机器上双击起不来
+# （成因没追下去，UPX 对 `win64/arm64` 这个格式本来就是后加的，见 upx#650，压过的 exe 还容易被杀软误报），
+# 他直接决定不付这个代价。
+# 代价说清楚：不做 UPX 就少掉那 70% 的体积（win-x64 31.76 MB 而不是 8.09 MB），
+# 换来的是"发出去的每一份都是普通链接产物"。第五十一轮的图标表已经把日常那份压小过 0.93 MB。
+#
+# 形状照 `ref/ocfree/workflows/cd.yml`：矩阵写死在文件里，**不要 `plan` 作业、不要 `fromJson`**
+# （第五十二轮为"按输入挑一条腿"绕了一圈动态矩阵，红三次，真因是我自己漏写步骤 `id`，见架构第 8 节）。
+#
+# 四个目标在第五十四轮已经**全绿**（含体积数字，第 8 节）。资产只有可执行文件本身——
+# 不塞 dll、不塞 mpv、不塞 README（用户定稿："注意只需要打包 exe，不要打包其他东西"；
+# 本项目本来就是单 exe + 外置 mpv.exe）。
 
 on:
   workflow_dispatch:
     inputs:
       publish:
-        description: "把这四份 exe 发成 GitHub Release（关掉 = 只编译取产物，不动 Release）"
+        description: "把这四份 exe 发成 GitHub Release（2026-10-27 用户定稿：编完就发；关掉 = 只取产物）"
         type: boolean
         required: false
-        default: false
+        default: true
       tag:
         description: "Release 的 tag（比如 v0.1.0），publish=true 时必填"
         type: string
@@ -34,16 +40,6 @@ on:
         type: boolean
         required: false
         default: false
-      upx:
-        description: "用 UPX 压缩（--lzma --best）"
-        type: boolean
-        required: false
-        default: true
-      diagnostic:
-        description: "每个目标**另出一份诊断版**（控制台子系统 + 默认写 debug.log，不压缩），用来查\"双击没反应\""
-        type: boolean
-        required: false
-        default: false
 
 # `contents: write` 是 `release` 作业要的（建 release、传资产）。
 permissions:
@@ -51,10 +47,6 @@ permissions:
 
 env:
   CARGO_TERM_COLOR: always
-  # UPX 版本钉死：`choco install upx` 给的是"当时最新"，某天换个版本压出来的东西不一样。
-  # Windows 用官方 zip（choco 那条路也留着当回退），Linux 用 apt 的包——**不能**在 arm64 runner 上
-  # 解压 amd64 的 UPX，那是跑不起来的。
-  UPX_VERSION: 5.2.1
 
 jobs:
   build:
@@ -69,7 +61,6 @@ jobs:
             target: x86_64-pc-windows-msvc
             exe: rustbilipc.exe
             asset: rustbilipc-win-x64.exe
-            diag_asset: rustbilipc-win-x64-diagnostic.exe
             windows: true
             # aws-lc-sys 在 MSVC 上要 NASM（第五十一轮查明它随 quinn-proto 进来、去不掉）。
             nasm: true
@@ -81,7 +72,6 @@ jobs:
             target: aarch64-pc-windows-msvc
             exe: rustbilipc.exe
             asset: rustbilipc-win-arm64.exe
-            diag_asset: rustbilipc-win-arm64-diagnostic.exe
             windows: true
             nasm: true
             need_fxc: true
@@ -93,7 +83,6 @@ jobs:
             target: x86_64-unknown-linux-gnu
             exe: rustbilipc
             asset: rustbilipc-linux-x64
-            diag_asset: rustbilipc-linux-x64-diagnostic
             windows: false
             nasm: false
             need_fxc: false
@@ -106,7 +95,6 @@ jobs:
             target: aarch64-unknown-linux-gnu
             exe: rustbilipc
             asset: rustbilipc-linux-arm64
-            diag_asset: rustbilipc-linux-arm64-diagnostic
             windows: false
             nasm: false
             need_fxc: false
@@ -181,47 +169,6 @@ jobs:
         shell: bash
         run: cargo build --profile release-dist --target ${{ matrix.target }}
 
-      - name: Install UPX (Windows)
-        if: ${{ inputs.upx && matrix.windows }}
-        shell: pwsh
-        run: |
-          $v = $env:UPX_VERSION
-          Invoke-WebRequest -Uri "https://github.com/upx/upx/releases/download/v$v/upx-$v-win64.zip" -OutFile upx.zip
-          Expand-Archive -Path upx.zip -DestinationPath upx -Force
-          "$PWD/upx/upx-$v-win64" | Out-File -FilePath $env:GITHUB_PATH -Append
-
-      - name: Install UPX (Linux)
-        if: ${{ inputs.upx && !matrix.windows }}
-        # arm64 上的 `upx` 包在某些源里叫 `upx-ufl`（免费版），装不上就退一份。
-        run: sudo apt-get update && (sudo apt-get install -y upx || sudo apt-get install -y upx-ufl)
-
-      - name: Compress with UPX
-        if: inputs.upx
-        shell: bash
-        run: |
-          set -u
-          bin="target/${{ matrix.target }}/release-dist/${{ matrix.exe }}"
-          if [ ! -f "$bin" ]; then echo "找不到产物：$bin"; exit 1; fi
-          before=$(wc -c < "$bin")
-          summary="压缩前 $before 字节"
-          # 不覆盖原文件：先压到临时名，成功了才换回去（压失败时至少还有一个能用的 exe）。
-          # UPX 对 PE/ARM64 与 ELF/ARM64 都支持，但 **Rust 产物压缩后偶尔会在运行期出问题**，
-          # 所以这一步失败不挡住发布：未压缩的那一份照样出。
-          if upx -9 --lzma "$bin" -o "$bin.upx"; then
-            mv "$bin.upx" "$bin"
-            after=$(wc -c < "$bin")
-            pct=$(awk -v a="$after" -v b="$before" 'BEGIN{printf "%.1f", a*100/b}')
-            echo "UPX：$before → $after 字节（原体积的 $pct%）"
-            summary="UPX 完成：$before → $after 字节（$pct%）"
-          else
-            echo "UPX 失败，交付未压缩的那一份（$before 字节）"
-            summary="UPX 失败，交付未压缩那份（$before 字节）"
-            rm -f "$bin.upx"
-          fi
-          echo "$summary"
-          echo "- ${{ matrix.rid }}：$summary，最终 $(wc -c < "$bin") 字节" >> "$GITHUB_STEP_SUMMARY"
-
-      # **只 stage 可执行文件本身**，名字带平台与架构（Release 上看得懂）。
       - name: Stage asset (only the executable)
         shell: bash
         run: |
@@ -239,146 +186,3 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      # ---------- 诊断版（可选，`diagnostic=true` 才做）----------
-      # 查"双击没反应、连窗口都没出来"这类起不来的现场：正常那份是 GUI 子系统，
-      # 加载器报错与 panic 文本全是静默的；这份带控制台，且 `debug.log` 默认就写。
-      # **顺序要紧**：必须排在正常那份 stage 之后——两次 `cargo build` 的输出是同一个路径
-      # （`target/<triple>/release-dist/<exe>`），后一次会覆盖前一次；UPX 也已经压过了。
-      - name: Build (diagnostic, console + log on)
-        if: inputs.diagnostic
-        shell: bash
-        run: cargo build --profile release-dist --target ${{ matrix.target }} --features console_diag
-
-      - name: Stage diagnostic asset
-        if: inputs.diagnostic
-        shell: bash
-        run: |
-          mkdir -p dist
-          cp "target/${{ matrix.target }}/release-dist/${{ matrix.exe }}" "dist/${{ matrix.diag_asset }}"
-          chmod +x "dist/${{ matrix.diag_asset }}"
-          ls -l "dist/${{ matrix.diag_asset }}" | tee -a "$GITHUB_STEP_SUMMARY"
-          echo "- ${{ matrix.rid }} 诊断版（**未压缩**）：$(wc -c < "dist/${{ matrix.diag_asset }}") 字节" >> "$GITHUB_STEP_SUMMARY"
-
-      - name: Upload diagnostic asset
-        if: inputs.diagnostic
-        uses: actions/upload-artifact@v4
-        with:
-          name: asset-${{ matrix.rid }}-diagnostic
-          path: dist/${{ matrix.diag_asset }}
-          if-no-files-found: error
-          retention-days: 30
-
-  release:
-    needs: build
-    # 两层门槛：① `publish` 关掉就整条跳过（默认关）；
-    # ② 这里不需要 `!failure()`——四个目标都跑，任一红就不该发。
-    if: inputs.publish
-    runs-on: ubuntu-latest
-    steps:
-      - name: Require a tag when publishing
-        shell: bash
-        env:
-          TAG: ${{ inputs.tag }}
-        run: |
-          if [ -z "$TAG" ]; then
-            echo "publish=true 必须给 tag"; exit 1
-          fi
-
-      # `gh release` 要本地仓库（它拿 remote 拼 API 地址），所以这一步必须 checkout；
-      # 少了它整条 release 步骤报 "no git remote"（本项目以前踩过，见 QODER.md CI 那条）。
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Collect assets
-        uses: actions/download-artifact@v4
-        with:
-          # 只收这四份 exe（每条腿一个 `asset-<rid>`），别的 artifact（Cargo.lock 那类）不混进来。
-          pattern: asset-*
-          path: release-files
-          merge-multiple: true
-
-      - name: Checksums and manifest
-        shell: bash
-        run: |
-          ls -l release-files
-          # 四条腿都在（少一份就是矩阵少跑了一条，那种情况不该发出去）。
-          test "$(find release-files -maxdepth 1 -type f | wc -l)" -ge 4
-          (cd release-files && sha256sum * > SHA256SUMS.txt && cat SHA256SUMS.txt)
-
-      # 标签指向哪要先查清楚：v0.1.0 那次踩过"标签已在别的提交上，create 失败后回退 upload，
-      # 产物换了新的、标题与说明却还是旧内容"（抄自 `ref/ocfree/workflows/cd.yml` 的这段）。
-      # 不一致就明确失败，除非勾了 `replace_tag`。
-      - name: Check where the tag points
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag }}
-          REPLACE: ${{ inputs.replace_tag }}
-        run: |
-          obj=$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$TAG" \
-            --jq '.object | "\(.type):\(.sha)"' 2>/dev/null || true)
-          case "${obj%%:*}" in
-            commit) sha="${obj#*:}" ;;
-            tag) sha=$(gh api "repos/$GITHUB_REPOSITORY/git/tags/${obj#*:}" --jq .object.sha) ;;
-            *) sha="" ;;
-          esac
-          if [ -z "$sha" ]; then
-            echo "标签 $TAG 不存在，本次新建。"
-          elif [ "$sha" = "$GITHUB_SHA" ]; then
-            echo "标签 $TAG 已指向本次提交。"
-          elif [ "$REPLACE" = "true" ]; then
-            echo "标签 $TAG 指向 ${sha:0:7}，按 replace_tag 删旧 release 与标签后重建。"
-            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes --cleanup-tag || true
-          else
-            {
-              echo "## 标签已存在且不在本次提交"
-              echo ""
-              echo "- \`$TAG\` → \`${sha:0:7}\`"
-              echo "- 本次构建 → \`${GITHUB_SHA:0:7}\`"
-              echo ""
-              echo "直接发布会把产物挂在旧提交名下、说明也不刷新。"
-              echo "勾 \`replace_tag\` 重跑可删旧重建，或者换新版本号。"
-            } >> "$GITHUB_STEP_SUMMARY"
-            echo "::error::$TAG 指向 ${sha:0:7} 而非本次提交；要覆盖请勾 replace_tag 或换版本号。"
-            exit 1
-          fi
-
-      - name: Write release notes
-        shell: bash
-        env:
-          TAG: ${{ inputs.tag }}
-        run: |
-          {
-            echo "rustBiliPC（Rust + GPUI 的 Bilibili 桌面客户端）。"
-            echo
-            echo '每个资产都是**单个可执行文件**，不带 dll、不带 mpv——'
-            echo '播放用的是外置 mpv（放在 PATH 里，或在设置页指给它）。'
-            echo
-            echo '登录凭据与设置写在 `%APPDATA%/ArrowMeo/rustBiliPC`（Linux 是 `~/.config/ArrowMeo/rustBiliPC`）。'
-            echo
-            echo '经 UPX 压缩的 exe 容易被杀软误报，遇到拦截请加白名单。校验和见 `SHA256SUMS.txt`。'
-            echo
-            echo "构建提交：\`${GITHUB_SHA::7}\`"
-          } > notes.md
-          cat notes.md
-
-      - name: Create or fix up the GitHub Release
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-          TAG: ${{ inputs.tag }}
-          PRERELEASE: ${{ inputs.prerelease }}
-        run: |
-          args=(--title "rustBiliPC $TAG" --target "$GITHUB_SHA" --notes-file notes.md)
-          if [ "$PRERELEASE" = "true" ]; then args+=(--prerelease); fi
-          if ! gh release create "$TAG" --repo "$GITHUB_REPOSITORY" "${args[@]}" release-files/* 2>/tmp/create.err; then
-            # 同 tag 重跑时 create 会失败，改成覆盖上传，避免手动删 release。
-            cat /tmp/create.err
-            gh release upload "$TAG" --repo "$GITHUB_REPOSITORY" release-files/* --clobber
-          fi
-          # create 成功时 edit 是无害的自我覆盖；走 upload 回退时这一步才把标题、说明、指向提交纠正过来。
-          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --title "rustBiliPC $TAG" --target "$GITHUB_SHA" --notes-file notes.md
-          gh release view "$TAG" --repo "$GITHUB_REPOSITORY" \
-            --json tagName,name,targetCommitish,publishedAt,url,assets \
-            --jq '"\(.tagName) → \(.targetCommitish[0:7])  \(.publishedAt)  \(.url)  \([.assets[].name] | join(", "))"' | tee -a "$GITHUB_STEP_SUMMARY"

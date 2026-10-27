@@ -27,20 +27,21 @@
   - **`cd.yml`**：**手动触发**（`workflow_dispatch`），**一条 `build` 作业 + 静态 `include` 四腿矩阵**
     （`win-x64`/`win-arm64`/`linux-x64`/`linux-arm64` 同时编，`fail-fast: false`，每腿
     `name: ${{ matrix.rid }}`）；用 `[profile.release-dist]`（LTO + `codegen-units=1` + `strip`）编，
-    UPX 压（**版本钉 `UPX_VERSION`**，Windows 用官方 zip、Linux 走 apt —— arm64 runner 上不能解
-    amd64 那份）；Linux 目标**钉 `ubuntu-22.04`**（glibc 2.35 当地板）。
-    **`publish` 默认关**：关掉就只编译取产物、不建 Release（发 Release 是公开动作，要他点头）；
+    UPX 曾压过（**2026-10-27 定稿：不要再加 UPX**——压缩过的 win-arm64 在他机器上双击起不来，
+    成因没追下去，他直接决定不付这个代价；代价是发布件回到 31.76 MB 那一档而不是 8.09 MB）；
+    Linux 目标**钉 `ubuntu-22.04`**（glibc 2.35 当地板）。
+    **`publish` 默认开**（用户定稿：四个编译完就发到 GitHub Release）；要只取产物不动 Release 就关掉它。
     打开时先查同名标签指向哪次提交，不在本次提交上就明确失败（除非勾 `replace_tag`）。
     **资产只有 exe 本身**（用户定稿："注意只需要打包 exe，不要打包其他东西"）：
     不塞 dll、不塞 mpv、不塞 README。
     形状照 **`ref/ocfree/workflows/cd.yml`** 抄——那份一直是对的：矩阵写死在文件里就行，
     **不要 `plan` 作业 + `fromJson` 那套动态矩阵**（我为"按输入挑一条腿"绕过去，连红三次，
     真因见下面那条陷阱；四个目标一起编本来就是要的）。
-    还有一个 **`diagnostic`（默认关）**：开了给**每个目标另出一份诊断版**
-    （`rustbilipc-<rid>-diagnostic[.exe]`，**控制台子系统 + `debug.log` 默认就写 + 不压 UPX**，
-    cargo feature `console_diag`）——查"双击没反应、连窗口都没出来"这类**静默起不来**就靠它。
-    **目标现状（第五十三轮第一次真跑）**：`win-x64` 31,759,360 → UPX **8,088,064**（25.47%）绿；
-    `win-arm64` 26,878,976 → **8,952,320**（33.31%）绿；两条 Linux 当时只差一个
+    **诊断版不再由流水线自动编**（`diagnostic` 输入已删）；cargo feature `console_diag` 留着当
+    手动逃生口（`cargo build --features console_diag`：控制台子系统 + `debug.log` 默认就写），
+    查"双击没反应、连窗口都没出来"这类**静默起不来**时用一次就行。
+    **目标现状**：四条腿第五十四轮全绿；`release-dist` 未压缩 win-x64 **31,759,360**、
+    win-arm64 26,878,976、linux-x64 42,575,616、linux-arm64 36,918,696 字节。两条 Linux 当时只差一个
     `libxkbcommon-x11-dev`（不是 gpui 不支持 Linux），已补进包列表。
   - 旧的单文件 `build.yml` 已删除；不要再往"手动一条路什么都干"的方向合回去。
   - **改 `.github/workflows/*` 之前先跑 `python .github/scripts/check_workflows.py`**，

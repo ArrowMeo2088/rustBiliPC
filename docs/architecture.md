@@ -23,7 +23,7 @@ Bilibili 桌面客户端（Windows x64），功能顺序 **搜索 → 个人 →
 | 放弃 | `ref/gpui-component`（0.2.2）与 Ely 作依赖 | 分别因为：拉 tree-sitter + `lb-wry`（WebView2）且与 0.3.9 类型不兼容；`publish=false` 只能 git 依赖 + Rust 1.95 |
 | API | `bpi-rs = "0.3.1"`，`default-features = false` + 8 个 feature | 关掉 `full` 的 27 个模块，只开 login/search/video/user/fav/historytoview/misc/comment（最后一个是 P6b 评论区；它在 bpi-rs 里写作 `comment = []`，纯 cfg 开关、不引入新 crate） |
 | 异步 | 自建 tokio runtime（`src/app.rs`） | gpui 执行器不是 tokio，reqwest 需要 reactor |
-| 编译配置 | 日常（`ci.yml`）用 **release**：`lto = "off"`、`strip = false`、`debug = true`；发布（`cd.yml`）用 **`release-dist`**：`lto = "fat"`、`codegen-units = 1`、`strip = "symbols"`、`debug = false` + UPX | 见下节；两份配置的分工在第 4.28 节第 ④ 条 |
+| 编译配置 | 日常（`ci.yml`）用 **release**：`lto = "off"`、`strip = false`、`debug = true`；发布（`cd.yml`）用 **`release-dist`**：`lto = "fat"`、`codegen-units = 1`、`strip = "symbols"`、`debug = false`（**2026-10-27 起不再做 UPX**，见第 8 节第五十五轮） | 见下节；两份配置的分工在第 4.28 节第 ④ 条 |
 | 依赖锁定 | **提交 `Cargo.lock`** 作为版本种子，CI **不加** `--locked` | 挡住 gpui-pre 每周快照的破坏性变更；本机无 cargo，加 `--locked` 会让任何新增依赖直接卡死 CI |
 
 ### 为什么必须 release
@@ -1091,10 +1091,13 @@ div().text_size(..).text_color(..)                       // 样式仍留在父 d
 **④ CI/CD 拆开**（`.github/workflows/`，`build.yml` 删除）：
 `ci.yml` = push/PR 自动跑、只 win x64 release + `cargo test`（本机没工具链，这一条是编译证据通道，
 矩阵会让人不敢推）；`cd.yml` = 手动、win/linux × x64/arm64 四个目标、
-`[profile.release-dist]`（LTO + `codegen-units=1` + `strip`）+ UPX（`-9 --lzma`，压失败就发未压缩那份）
-+ `gh release create`，**资产只有可执行文件**。`release-dist` 不写 `panic = "abort"`：
+`[profile.release-dist]`（LTO + `codegen-units=1` + `strip`）+ `gh release create`，
+**资产只有可执行文件**。**2026-10-27 定稿两处改动**：`publish` 默认开（四条腿编完就发），
+**不再做 UPX**（压缩过的 win-arm64 在他机器上双击起不来，成因没追、直接不付这个代价；
+代价是发布件从 8.09 MB 回到 31.76 MB）。`release-dist` 不写 `panic = "abort"`：
 `app::describe_join_error` 靠 tokio 把任务 panic 变成 `JoinError` 才能把崩溃原因说给人看。
-四个目标里 win-x64 是长期验证过的，另三个是这一版**新配上、还没跑过**的（风险表第 31 条）。
+四个目标在第五十四轮**全绿**（体积数字在第 8 节）。**产物图标**由 `build.rs` 用
+`link.exe` 的 `/ICON:` 把 `res/icon.ico` 链进 Windows 可执行文件（**零构建依赖**，见第 4.30 节）。
 
 **这两条在第五十二轮各改了一处结构**（都因为踩过）：
 - `ci.yml` 加 `paths-ignore`（`docs/**`、`*.md`、`QODER.md`、`cd.yml`）
@@ -1103,7 +1106,8 @@ div().text_size(..).text_color(..)                       // 样式仍留在父 d
   **`ci.yml` 自己不在 ignore 里**（动它仍跑一轮），同一提交里只要带源码也照常全编。
 - `cd.yml` 定成**一条 `build` 作业 + 静态 `include` 四腿矩阵**（照 `ref/ocfree/workflows/cd.yml`：
   `fail-fast: false`、每腿 `name: ${{ matrix.rid }}`、Linux 钉 `ubuntu-22.04` 卡 glibc 地板、
-  UPX 版本钉死、release 先查标签指向再 `create`/回退 `upload --clobber` 再 `edit`）。
+  release 先查标签指向再 `create`/回退 `upload --clobber` 再 `edit`）。
+  **UPX 在第五十五轮整条撤掉**（压缩过的 win-arm64 双击起不来，代价换成体积），`publish` 也从那时起默认开。
   `publish` 默认关：**先量体积不建 Release**。
   中途为"按输入挑一条腿"试过动态矩阵（`plan` + `fromJson`），连红三次——
   **真因是我漏写步骤 `id`，不是平台限制**（判据与取证全在第 8 节第五十二轮）；
@@ -1169,6 +1173,30 @@ P13 交完之后按"设计缺陷 / 依赖 / 性能 / 占用 / 体积 / 稳定"�
 **没做的两件与理由**：列表虚拟化（gpui 的 `List` 才是虚拟的，我们整页都是 `div` 堆卡片；
 自动翻页因此加了"240 条就停"的软闸，改成虚拟化是一次真正的重构，不动）；
 `profile` 细分（`opt-level`/`panic` 这些先按现两份配置走，等 `cd.yml` 真跑一次量出数字再说）。
+
+### 4.30 产物图标（`res/icon.ico` + `build.rs`，2026-10-27）
+
+- **做法**：`build.rs` 只在 `CARGO_CFG_TARGET_OS == "windows"` 时打一行
+  `cargo:rustc-link-arg-bins=/ICON:<绝对路径>/res/icon.ico`。**不引 `winresource`/`embed-resource`**——
+  那两类要么要 Windows SDK 的 `rc.exe`，要么多一个构建依赖，而 `/ICON:` 是链接器自带的能力，
+  **一个依赖都不加**。图标文件是 7 幅（16/24/32/48/64/128/256，32 bpp，144,167 字节），
+  Explorer、任务栏与快捷方式会按尺寸自己挑。
+- **为什么窗口与任务栏那颗也会变**：gpui 的 Windows 后端在
+  `gpui_windows/src/platform.rs:1633` 的 `load_icon()` 里
+  `LoadImageW(hModule, PCWSTR(1), IMAGE_ICON, LR_DEFAULTSIZE | LR_SHARED)` —— 它要的就是
+  **资源 ID 1** 的图标，而 `/ICON:` 编进去的组图标正是那一个。
+  **这一条是读源码推出来的、还没经他真机确认**：如果真机上 Explorer 里 exe 有图标、
+  窗口/任务栏那颗还是默认的，说明编号不是 1，改法是 `build.rs` 里改成生成 `.rc`
+  显式写 `1 ICON "res/icon.ico"` 再交给 `rc.exe`（那时才值得加依赖）。
+- **落库位置**：`.gitignore` 原来是 `/res/*` + `!res/README.md`，现在**单独放行
+  `!res/icon.ico`**——它是构建输入，CI 上没有它就等于产物没图标；其余资源文件仍然不入库。
+- **Linux 目标**没有等价的"把图标塞进可执行文件"的做法（图标属于 `.desktop`/Icon 主题那一层），
+  所以 `build.rs` 直接跳过；本轮不为 Linux 桌面集成做任何事（他没要，也不在范围里）。
+- `main.rs` 那条 `#![cfg_attr(... windows_subsystem = "windows")]` 现在带
+  `not(feature = "console_diag")`：日常与发布都还是 GUI 子系统（双击不弹黑窗），
+  而 `cargo build --features console_diag` 留着当**手动逃生口**（带控制台 + `debug.log` 默认就写）。
+  `cd.yml` 不再自动编诊断版（2026-10-27 他定稿），要现场时本地/临时 dispatch 一条命令而已。
+
 
 ## 5. 阶段进度
 
@@ -2214,6 +2242,27 @@ Linux 目标**钉 `ubuntu-22.04`**（glibc 2.35 当地板，24.04 的 2.39 拿�
 
 （日常 `ci.yml` 那份 win-x64 是 **36,053,504**：LTO + `codegen-units=1` + `strip` 买到 31.76 MB，
 UPX 再买到 8.09 MB。两个口径别混——`publish/` 给他真机用的仍是日常那份。）
+
+### 第五十五轮（他定稿三件事：不做 UPX、不编诊断版、编完就发；再加程序图标）
+
+| 项 | 内容 |
+| --- | --- |
+| 触发 | 他说"我知道问题了"，直接给三条定稿 |
+| `cd.yml` | **UPX 整条撤掉**（`upx` 输入、两次 Install UPX、Compress 步骤、`UPX_VERSION` 全删）；**`diagnostic` 输入与那三个诊断步骤删掉**；**`publish` 默认改成开**（四个编完就发 GitHub Release），发布说明里那句"UPX 容易被杀软误报"换成"产物是普通链接的 exe" |
+| `Cargo.toml` | `console_diag` 这个 feature **留着**（注释改成"流水线不再自动编它，只当下次遇到起不来的现场时手动 `--features console_diag` 的逃生口"）；`main.rs` 里那条 `#![cfg_attr]` 与 `debug_log` 判定不动，日常/发布行为没变 |
+| 图标 | 新增包根 **`build.rs`**：Windows 目标上 `cargo:rustc-link-arg-bins=/ICON:<绝对路径>/res/icon.ico`。`.gitignore` 给 `res/` 开了**唯一例外** `!res/icon.ico`（它是构建输入） |
+
+**为什么用 `link.exe` 的 `/ICON:` 而不是 `winresource`/`embed-resource`**：前者是链接器自带的能力，
+**一个依赖都不加、不改依赖图**；后者要 `rc.exe`（Windows SDK）或多一个 crate。
+gpui 那边也核过了：`gpui_windows/src/platform.rs:1633` 的 `load_icon()` 加载的是
+**资源 ID 1** 的 `IMAGE_ICON`，`/ICON:` 编进去的组图标就是那一个，所以**窗口与任务栏那颗应当跟着变**
+——这一条是读源码推出来的，**等他真机看**：如果 exe 在资源管理器里有图标、窗口那颗还是默认的，
+就说明编号不是 1，那时才改成生成 `.rc` 显式命名 `1 ICON "res/icon.ico"`（机制写在 `build.rs` 注释与第 4.30 节）。
+
+**"不做 UPX"这件事的代价要写明白**：发布件从 8.09 MB 回到 **31.76 MB**（win-x64，`release-dist` 未压缩）。
+买回来的是"发出去的每一份都是普通链接产物"——起不来时不用再怀疑加壳层，杀软也不会因为壳报警。
+第五十一轮的图标表那 0.93 MB 与 LTO/strip 那 4.29 MB 都还在。
+
 
 **他报的新现场：win-arm64 双击没反应、连窗口都不出来。** 三个还没排除的假设，按"能不能一次实验分开"排：
 

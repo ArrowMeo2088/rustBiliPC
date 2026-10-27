@@ -14,7 +14,7 @@ Direct3D11 + DirectComposition + DirectWrite 原生绘制；视频播放交给�
 | 播放 | 把 DASH 直链 URL 交给外部 mpv **在线流式播**（不下整片），独立窗口。**播放期的一切（进度条/时间/暂停/音量/全屏/字幕显示）都归 mpv 自带的 OSC，本项目不做**；我们只做播放之外（见下一行） |
 | 范围 | rustBiliPC 负责：主页（首页推荐）、搜索、收藏/历史/待看（各一个侧栏入口，能搜）、视频详情、评论区（**文字可选中可复制**）、**用户空间（投稿/图文/收藏/合集与系列）**、**分集与分 P（合集里的分段；一集自己还有多 P 时标 `N P`，点进去照常能播/能下）**、清晰度档位（按设置封顶）、**下载（双文件，落盘位置每次弹框选）**、拉起 mpv（**起播前会先探一次直链地址**）；**长列表滚到底自动接下一页**（P13）。不负责：播放器界面本身；**字幕投递与同实例换清晰度也不做**（用户 2026-10-25 判定"两个都没必要"） |
 | 画质 | **设置页可选**：1080P / 1080P 60帧 / 4K（默认 116），同档内编码偏好可选 HEVC / AVC / AV1（默认 HEVC）。B 站没有"2K"这一档，界面上不造 |
-| 编译 | 本机**不装** Rust 工具链，全部由 GitHub Actions 编：`ci.yml` push 自动跑 win x64 release + 单测；`cd.yml` 手动出多平台发布包（LTO/strip + UPX，只打 exe） |
+| 编译 | 本机**不装** Rust 工具链，全部由 GitHub Actions 编：`ci.yml` push 自动跑 win x64 release + 单测；`cd.yml` 手动出多平台发布包（LTO/strip，四平台同时编，编完直接发 GitHub Release，只打 exe；**不做 UPX**） |
 | 阶段 | P0–P13 全部编译交付（P13 见本节末尾那条）。**真机进度**：P8 与 P9 已在他机器上跑过（`debug.log` 里收藏下钻、收藏夹内容 19 条、历史 30 条、待看 6 条、详情字幕/评论全通，零错误），登录独立小窗与 P10 的拖动滚动也已真机确认。**P11**（第四十二轮 75 passed、零 Rust warning，产物 md5 `dd020f45…`）= 详情页与评论区文字**可选中 + 复制**（gpui 没有选择机制，用 kit 的 `base::SelectableText`；触摸屏给一颗「复制选中」）+ **下载**（`.m4v`+`.m4a` 双文件、画质吃封顶、只下当前 P、每次弹框选目录、进度与取消、备用域名、打开所在目录/用 mpv 打开）——**这是唯一允许写到运行目录之外的功能**（用户 2026-10-26 定稿）。另修掉 roadmap R0 两条：清晰度按钮以前能点出 4K/HDR（现在按 `config.json` 封顶过滤），`src/README.md` 里那条早已不存在的 `--input-ipc-server` 说法。第四十轮红过一次，原因写在第 8 节。见第 4.24、4.25 节。**P12**（第四十三轮一次过：82 passed、零 Rust warning，产物 md5 `a591abdf…`）= 他推翻自己"合集列表不做"之后的**合集与系列 + 分集**：空间页第四格同时列合集与系列、点进去是一页页分集（这两条接口没有 `keyword`，所以不放搜索框），详情页右栏最上一节"分集"带**分段 chips**、跨分段连续行号与 `N P` 角标——"复杂"就是他那张 189 集的截图：合集里再分段，而一集自己还是个多 P 稿件。分集信息库里那份 `VideoView` 没带（带它的类型是死代码），所以用 `BpiClient::get` 自己再发一次 `view` 读原始 JSON、宽容解析，失败只少那一节。见第 4.26 节。**P13**（第四十四轮红 5 条、四十五轮红 1 条，正在第四十六轮上）= 四类完善：
 ① **设置页四项真能改**（MPV 位置默认可选文件、默认画质 1080P/1080P60/4K、默认编码 HEVC/AVC/AV1、
 调试模式默认关——关时不产生 `debug.log`、不输出日志，Windows 上 exe 改 GUI 子系统所以永不弹控制台）；
@@ -22,14 +22,14 @@ Direct3D11 + DirectComposition + DirectWrite 原生绘制；视频播放交给�
 **凭据 `-101` → 自动开扫码登录小窗**（重登只关小窗并刷新当前格，绝不再开一个主窗口），
 **滚到底自动连续翻页**（历史、收藏夹内容、合集内容、搜索、空间的图文与合集）；
 ③ **落盘搬到 `%APPDATA%/ArrowMeo/rustBiliPC`，旧位置代码清零**；
-④ **工作流拆成 `ci.yml`（push 自动）与 `cd.yml`（手动：一条作业 + 静态四腿矩阵同时编四平台，LTO/strip + UPX，`publish` 开关控制是否发 Release，只打 exe）**。
+④ **工作流拆成 `ci.yml`（push 自动）与 `cd.yml`（手动：一条作业 + 静态四腿矩阵同时编四平台，LTO/strip，编完发 GitHub Release，只打 exe；2026-10-27 定稿不做 UPX）**。
 见第 4.27、4.28 节 |
 
 ## 大概的文件结构
 
 ```
 rustBiliPC/
-├── .github/workflows/   `ci.yml`（push 自动：win x64 release + 单测）+ `cd.yml`（手动：一条 build 作业 + 静态 include 四腿矩阵，release-dist + UPX，`publish` 开关控制是否发 GitHub Release）+ `../scripts/check_workflows.py`（推 workflow 改动前的本地校验）
+├── .github/workflows/   `ci.yml`（push 自动：win x64 release + 单测）+ `cd.yml`（手动：一条 build 作业 + 静态 include 四腿矩阵，release-dist，`publish` 默认开）+ `../scripts/check_workflows.py`（推 workflow 改动前的本地校验）
 ├── src/                 项目源代码（单元测试在 src/tests/）
 │   ├── main.rs lib.rs app.rs theme.rs logging.rs
 │   ├── api/             bpi-rs 封装 + DASH 码流选择 + 播控取地址 + 下载 + 起播前地址探测
@@ -60,15 +60,16 @@ rustBiliPC/
   这是"改动还能不能编过"的证据通道（本机没有 Rust 工具链，每一轮都要靠它）。
   两道闸（第五十二轮加的）：`paths-ignore` 让**全是文档/只动 `cd.yml` 的提交不触发编译**
   （`ci.yml` 自己除外），`concurrency` + `cancel-in-progress` 让同分支同事件只留最新一次。
-- **`cd.yml`**：Actions → CD → **Run workflow**（手动）。输入：`publish`（**默认关：只编译取产物、
-  不建 Release**）、`tag`、`prerelease`、`replace_tag`、`upx`、`diagnostic`
-  （开了给**每个目标另出一份诊断版** `rustbilipc-<rid>-diagnostic[.exe]`：控制台子系统 +
-  默认写 `debug.log` + 不压缩，专查"双击没反应、连窗口都没出来"）。四个目标 win-x64 / win-arm64 /
-  linux-x64 / linux-arm64 是**一条 `build` 作业 + 静态 `include` 四腿矩阵**，四条**同时开跑**
-  （`fail-fast: false`，一个红不带走其余三个），用 `release-dist`（LTO + `codegen-units=1` + strip）编，
-  再 UPX 压（版本钉死；压不动的目标出未压缩那份）。Linux 钉 `ubuntu-22.04` 卡 glibc 下限。
-  要发 Release 就把 `publish` 打开并给 tag（发之前会先查同名标签指向哪次提交）。
-  **资产只有可执行文件本身**（不带 dll、不带 mpv、不带文档）。
+- **`cd.yml`**：Actions → CD → **Run workflow**（手动）。输入：`publish`（**默认开**：四个编完就发到
+  GitHub Release；关掉 = 只取产物不动 Release）、`tag`、`prerelease`、`replace_tag`。四个目标
+  win-x64 / win-arm64 / linux-x64 / linux-arm64 是**一条 `build` 作业 + 静态 `include` 四腿矩阵**，
+  四条**同时开跑**（`fail-fast: false`，一个红不带走其余三个），用 `release-dist`
+  （LTO + `codegen-units=1` + strip）编；Linux 钉 `ubuntu-22.04` 卡 glibc 下限。
+  **不做 UPX**（2026-10-27 定稿：压过的 win-arm64 双击起不来，成因没追，直接不付这个代价；
+  代价是发布件是 31.76 MB 那一档而不是 8.09 MB）。发之前先查同名标签指向哪次提交，
+  不在本次提交上就明确失败（除非勾 `replace_tag`）。**资产只有可执行文件本身**（不带 dll、不带 mpv、不带文档）。
+- **程序图标**：`res/icon.ico`（7 幅 16→256）由根目录 `build.rs` 用链接器自带的
+  `/ICON:` 选项编进 Windows exe——**不为此加构建依赖**。它是 `res/` 目录唯一入库的文件（构建输入）。
 - **改 workflow 之前先跑** `python .github/scripts/check_workflows.py`：`yaml.safe_load` 查不出
   重复键、`needs` 悬空、未声明的 `inputs.*`，尤其查不出 **`${{ steps.<id>.* }}` 指到一个没写 `id:`
   的步骤**——那条求值为空串且不报错，能让一个作业在作业列表里**凭空消失**（第五十二轮连红三次的真因，
