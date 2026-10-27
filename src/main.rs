@@ -105,11 +105,13 @@ fn main() {
     relogin::set_client(Arc::clone(&client));
 
     // 图标资源用**我们自己那张表**（`src/ui/assets.rs`：kit 默认那 106 个 + 侧栏多用的 4 个，
-    // 171 KB），不用 kit 的 `AllAssets`（1830 个 svg、2.8 MB 全塞进 exe，其中 94% 永远不会被请求）。
+    // 48 KB），不用 kit 的 `AllAssets`（1830 个 svg、磁盘 732 KB 全塞进 exe，其中 94% 永远不会被请求；
+    // 实测挂在二进制里比原始字节更贵，换掉这版 exe 小了 0.9 MB）。
     // 为什么不用 kit 默认的 `Assets`：侧栏要的 House/Clock/Bookmark/Download 不在那 106 个里，
     // 而**图标名找不到不会报错、只会画出一片空白**（见 `ui::layout::side_item` 的说明）——
     // 所以我们把默认那 106 个一并带上，让 kit 自己的组件也不缺图。
-    // 加新图标：拷 svg + 在 `ICONS` 表里加一行，两步都要做（见 `src/ui/icons/README.md`）。
+    // 加新图标：拷 svg + `ICONS` 表加一行 + `assets_tests` 那个数组加一项，三处都要做
+    // （见 `src/ui/icons/README.md`）。
     let application = gpui_kit::application().with_assets(rustbilipc::ui::assets::AppAssets);
 
     application.run(move |cx| {

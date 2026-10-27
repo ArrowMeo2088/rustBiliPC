@@ -118,11 +118,10 @@ impl ShellTab {
         }
     }
 
-    /// 图标名。**这些变体必须真实存在于 `ref/gpui-kit/crates/assets/assets/icons/`**：
-    /// 名字写错既不会编译失败也不会 panic，只会画出一片空白（见
-    /// [`side_item`](crate::ui::layout::side_item) 的说明）。
-    /// 完整目录里的 `House`/`Clock`/`Bookmark`/`Download` 不在 kit 默认那 106 个图标里，
-    /// 所以 `main.rs` 挂的是 `assets::AllAssets`。
+    /// 图标名。**这些变体必须真实存在于 `ref/gpui-kit/crates/assets/assets/icons/`，
+    /// 而且必须已经收进 `src/ui/assets.rs` 那张表**：名字对了但表里没有，既不会编译失败也不会 panic，
+    /// 只会画出一片空白（见 [`side_item`](crate::ui::layout::side_item) 的说明与 `assets_tests`）。
+    /// `House`/`Clock`/`Bookmark`/`Download` 就是 kit 默认那 106 个之外、我们额外嵌进来的四个。
     fn icon(self) -> IconName {
         match self {
             Self::Home => IconName::House,

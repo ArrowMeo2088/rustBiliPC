@@ -124,12 +124,13 @@ pub fn section_title(text: impl Into<SharedString>) -> AnyElement {
 /// 240 那一版的"一行文字"排不下七个入口了。图标 + 两字是这个宽度里唯一还能读的排法；
 /// 参考项目的紧凑态也是这个形状，只是它交给系统控件（WinUI `NavigationView`）画，我们没有等价物。
 ///
-/// 图标来自 kit 的 Lucide 集，用的是**完整目录** `gpui_kit::assets::IconName`（1830 个变体，
+/// 图标来自 kit 的 Lucide 集，类型是**完整目录** `gpui_kit::assets::IconName`（1830 个变体，
 /// 变体名是文件名的 PascalCase）。两个坑记在这里：
-/// - kit 默认那份 `Assets` 只嵌了 106 个图标，`House`/`Clock`/`Bookmark`/`Download` 都不在，
-///   所以 `main.rs` 挂的是 `assets::AllAssets`；
-/// - 名字写错**不会编译失败也不会 panic**：找不到资源时 svg 那边 `log_err()` 后直接不画
-///   （`component/src/svg.rs:166-171`），界面上就是一片空白——加新入口时先确认 `icons/*.svg` 在不在。
+/// - 变体有 1830 个，但**我们 exe 里只嵌了 110 个**（`src/ui/assets.rs` 那张表：kit 默认那 106 个
+///   + 侧栏多用的 4 个）。用表里没有的名字不会编译失败、也不会 panic：找不到资源时 svg 那边
+///   `log_err()` 后直接不画（`component/src/svg.rs:166-171`），界面上就是一片空白。
+///   所以加图标 = 拷 svg + 在表里加一行 + 在 `assets_tests` 那个数组里加一项（P14）。
+/// - 排查"这里怎么是空的"先怀疑这一条，不要先怀疑布局。
 ///
 /// 回调是 gpui 原样的 `Fn(&ClickEvent, &mut Window, &mut App)`，由调用方用 `cx.listener` 造，
 /// 组件层不认识任何页面类型。

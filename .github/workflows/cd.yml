@@ -6,16 +6,34 @@ name: CD
 # 这条管"给人下载的产物"。**只打包 exe**——不塞 dll、不塞 mpv、不塞 README
 # （用户定稿："注意只需要打包 exe，不要打包其他东西"；本项目本来就是单 exe + 外置 mpv.exe）。
 #
-# 四个目标里哪些是**已验证**的，写在下面的 `notes` 里；第一次跑完请把结论回填
-# `docs/architecture.md` 第 2 节与风险清单，别把"配上了"当成"能用了"。
+# 四个目标里哪些是**已验证**的写在 `.github/cd-matrix.json` 的顺序里：只有 win-x64 是 ci.yml
+# 天天在跑的，另三条**一次都没真跑过**（runner 标签、系统库齐不齐都没证据）。
+# 所以 `targets` 默认只挑 win-x64、`publish` 默认关掉：**先量体积，别先公开**。
+# 第一次跑完请把结论回填 `docs/architecture.md` 第 2 节与风险清单，别把"配上了"当成"能用了"。
 
 on:
   workflow_dispatch:
     inputs:
+      targets:
+        description: "编哪个目标（先挑一个把流水线跑通，再选 all）"
+        type: choice
+        required: true
+        default: "win-x64"
+        options:
+          - win-x64
+          - win-arm64
+          - linux-x64
+          - linux-arm64
+          - all
+      publish:
+        description: "把这些 exe 发成 GitHub Release（关掉 = 只编译取产物，不动 Release）"
+        type: boolean
+        required: false
+        default: false
       tag:
         description: "Release 的 tag（比如 v0.1.0）"
         type: string
-        required: true
+        required: false
         default: "v0.1.0"
       prerelease:
         description: "标成预发布（prerelease）"
@@ -38,46 +56,44 @@ env:
   RUSTFLAGS: ""
 
 jobs:
+  # 目标表在 `.github/cd-matrix.json`（唯一的清单），这里只按 `targets` 挑出要跑的那几条。
+  # 为什么要绕这一道：GitHub 的 matrix **不能在作业级按输入跳过某一条腿**，
+  # 而"先只开 win-x64 把流水线跑通"是这次定下来的做法——要么复制四份作业定义，要么这么筛。
+  plan:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Pick matrix legs
+        shell: bash
+        env:
+          TARGETS: ${{ inputs.targets }}
+        run: |
+          set -e
+          if [ "$TARGETS" = "all" ]; then
+            matrix=$(jq -c . .github/cd-matrix.json)
+          else
+            matrix=$(jq -c --arg n "$TARGETS" '[.[] | select(.name == $n)]' .github/cd-matrix.json)
+          fi
+          # 挑空了必须当场红：否则后面是一个"成功但什么都没编"的绿勾。
+          if [ "$(jq -c '. | length' <<<"$matrix")" = "0" ]; then
+            echo "目标 \"$TARGETS\" 在 .github/cd-matrix.json 里不存在"
+            exit 1
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "### 这次要编的目标" >> "$GITHUB_STEP_SUMMARY"
+          jq -r '.[].name' <<<"$matrix" >> "$GITHUB_STEP_SUMMARY"
+          echo "publish=${{ inputs.publish }} tag=${{ inputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+
   build:
+    needs: plan
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: win-x64
-            os: windows-latest
-            target: x86_64-pc-windows-msvc
-            exe: rustbilipc.exe
-            asset: rustbilipc-win-x64.exe
-            # aws-lc-sys 在 MSVC 上要 NASM，gpui 的 build.rs 要 fxc.exe（两条都在步骤里装/探）。
-            windows: true
-            nasm: true
-
-          - name: win-arm64
-            os: windows-latest
-            target: aarch64-pc-windows-msvc
-            exe: rustbilipc.exe
-            asset: rustbilipc-win-arm64.exe
-            windows: true
-            nasm: true
-
-          - name: linux-x64
-            os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-            exe: rustbilipc
-            asset: rustbilipc-linux-x64
-            windows: false
-            nasm: false
-
-          - name: linux-arm64
-            # ARM 型的 Linux 托管 runner。为什么不用 x86 runner 交叉编译：
-            # gpui 的 Linux 后端要链接一堆系统库（X11/wayland/fontconfig/ALSA），
-            # 交叉编译得先搭一个带这些 .so 与头文件的 arm64 sysroot，比直接用 arm runner 贵得多。
-            os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
-            exe: rustbilipc
-            asset: rustbilipc-linux-arm64
-            windows: false
-            nasm: false
+        include: ${{ fromJson(needs.plan.outputs.matrix) }}
 
     runs-on: ${{ matrix.os }}
     steps:
@@ -89,6 +105,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # aws-lc-sys 在 MSVC 上要 NASM。第五十一轮查明它**去不掉**：点名要它的是 quinn-proto
+      # （HTTP/3，随 reqwest 进来，gpui/bpi-rs 带的，我们改不动特征），所以这一步继续留着；
+      # 我们的 rustls 已经只装 ring，运行时不走 aws-lc，但编译还是要它。
       - name: Install NASM (for aws-lc-sys on MSVC)
         if: matrix.nasm
         run: choco install nasm --no-progress -y
@@ -193,8 +212,20 @@ jobs:
 
   release:
     needs: build
+    # 默认**不发**：这一条流水线第一件事是量真实体积（`release-dist` + UPX 那两份 exe 取回来就行），
+    # 建 Release 是公开动作，要他点头。挑 `publish=true` 才会走到下面。
+    if: inputs.publish
     runs-on: ubuntu-latest
     steps:
+      - name: Require a tag when publishing
+        shell: bash
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if [ -z "$TAG" ]; then
+            echo "publish=true 必须给 tag"; exit 1
+          fi
+
       # `gh release` 要本地仓库（它拿 remote 拼 API 地址），所以这一步必须 checkout；
       # 少了它整条 release 步骤报 "no git remote"（本项目以前踩过，见 QODER.md CI 那条）。
       - name: Checkout
@@ -203,7 +234,7 @@ jobs:
       - name: Collect assets
         uses: actions/download-artifact@v4
         with:
-          # 只收四个 exe（每个作业一个 `asset-<name>`），别的 artifact（Cargo.lock 那类）不混进来。
+          # 只收这次挑中的那几个 exe（每条腿一个 `asset-<name>`），别的 artifact（Cargo.lock 那类）不混进来。
           pattern: asset-*
           path: release-files
           merge-multiple: true

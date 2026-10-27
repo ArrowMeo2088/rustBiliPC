@@ -3,22 +3,26 @@
 //! ## 为什么要自己写一份，而不用 kit 的 `AllAssets`
 //!
 //! `main.rs` 以前挂的是 `gpui_kit::assets::AllAssets`：它把 kit 那套**完整 Lucide 目录**
-//! （1830 个 svg，磁盘上 2.8 MB）用 rust-embed 整个塞进 exe。当时是被迫的：
+//! （1830 个 svg，磁盘上 749,008 字节）用 rust-embed 整个塞进 exe。当时是被迫的：
 //! kit 默认的 `Assets` 只有 106 个，侧栏要的 House/Clock/Bookmark/Download 不在里面，
 //! 而**图标名找不到不会报错、只会画出一片空白**（`component/src/svg.rs` 那边 `log_err()` 就完了）。
-//! 也就是说那 2.8 MB 里有 94% 是永远不会被请求的文件。
+//! 也就是说那批文件里有 94% 是永远不会被请求的。
 //!
 //! 现在这张表是"**kit 默认那 106 个**（它自己的组件要用哪些，全在里面）
-//! **+ 我们侧栏/页头多用的那 4 个**"，一共 110 个、171 KB，
+//! **+ 我们侧栏/页头多用的那 4 个**"，一共 110 个、48,250 字节，
 //! 用 `include_bytes!` 直接嵌（**不引 rust-embed 依赖**，那张表就是编译期常量）。
-//! 省下的是 exe 里 ~2.6 MB 的 `.rdata`（UPX 对这种文本型 blob 效果本来就好，
-//! 但日常那份不压缩，所以省的是实打实的下载与内存映射）。
+//! **实测省下来的是 exe 的 927,232 字节**（第五十一轮，同一台 CI 机 `--release`：
+//! 36,980,736 → 36,053,504；那一轮同时还加了探测/重登/设置页的代码，所以这条单独收益更大）。
+//! 为什么字节数比原始文件更值得看：嵌进 `.rdata` 每个条目要对齐，
+//! 挂上整目录那一轮 exe 涨了 1.33 MB，而原始文件只 0.75 MB —— **磁盘字节 ≠ 二进制成本**。
 //!
 //! ## 加图标时要做什么
 //!
 //! 新增一个 `IconName::X` 用到而表里没有 → **界面那片是空的，不会编译失败**。
-//! 所以加图标 = 两件事：把 `ref/gpui-kit/crates/assets/assets/icons/<kebab>.svg` 拷进
-//! `src/ui/icons/`，再在下面这张表里加一行。文件名用 `IconName` 的 kebab-case
+//! 所以加图标 = **三处一起改**：① 把 `ref/gpui-kit/crates/assets/assets/icons/<kebab>.svg` 拷进
+//! `src/ui/icons/`，② 在下面这张表里加一行（只做 ① 等于没加，表是唯一的清单），
+//! ③ 在 `src/tests/mod.rs` 的 `assets_tests` 那个"用到的名字"数组里加一项 ——
+//! 漏了 ③ 就没有任何东西替我们盯"少了一个图标"。文件名用 `IconName` 的 kebab-case
 //! （kit 的 build.rs 就是 `icons/<file-stem>.svg`，`House` → `house.svg`、`ArrowLeft` → `arrow-left.svg`）。
 //!
 //! [`AppAssets::MISSING_HINT`] 那句是给排查用的：真怀疑少图标时，在 `ref/gpui-kit` 里

@@ -137,8 +137,12 @@
   "返回"。**登录是独立小窗口**（320×420、不可缩放），不再是主窗口里换视图——
   换窗口有两条硬约束（先开主窗再关登录窗；不能在别的窗口的 update 里开窗），
   写在 `docs/architecture.md` 第 4.19 节与 `src/pages/windows.rs` 文件头，改之前先读那两处。
-  图标名写错**不会报错也不会 panic**，只会画出一片空白，所以加图标前先确认
-  `ref/gpui-kit/crates/assets/assets/icons/<名字>.svg` 存在。
+  **图标只嵌我们自己那张表**（P14）：`src/ui/assets.rs` 的 `ICONS` 数组 + `src/ui/icons/*.svg`
+  （kit 默认 106 个 + 我们多用的 4 个 = 110 项 / 磁盘 48 KB），**不要改回 `gpui_kit::assets::AllAssets`**
+  ——那是把整份 Lucide（1830 个文件 / 磁盘 732 KB）编进 exe，**而实测每个文件还要额外对齐，
+  挂在二进制里比原始字节更贵**（当年挂上它那一轮 exe 大了 1.33 MB；换回来后 exe 小了 0.93 MB）。
+  用到了但表里没有的图标**不会报错也不会 panic，只会画出一片空白**。所以加图标是三处一起改：拷 svg、`ICONS` 加一行、
+  `assets_tests` 里那个数组加一项（漏第三处就没有防护网了）。
 - **落盘位置（2026-10-26 P13 用户改口，取代"exe 同目录"那一版）**：`auth.json`、`config.json`、
   `debug.log` 三样都在**用户数据目录**
   （Windows `%APPDATA%\ArrowMeo\rustBiliPC`，Linux `$XDG_CONFIG_HOME`/`~/.config` 下的同名子目录；
