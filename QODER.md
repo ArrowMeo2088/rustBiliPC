@@ -36,6 +36,9 @@
     形状照 **`ref/ocfree/workflows/cd.yml`** 抄——那份一直是对的：矩阵写死在文件里就行，
     **不要 `plan` 作业 + `fromJson` 那套动态矩阵**（我为"按输入挑一条腿"绕过去，连红三次，
     真因见下面那条陷阱；四个目标一起编本来就是要的）。
+    **目标现状（第五十三轮第一次真跑）**：`win-x64` 31,759,360 → UPX **8,088,064**（25.47%）绿；
+    `win-arm64` 26,878,976 → **8,952,320**（33.31%）绿；两条 Linux 当时只差一个
+    `libxkbcommon-x11-dev`（不是 gpui 不支持 Linux），已补进包列表。
   - 旧的单文件 `build.yml` 已删除；不要再往"手动一条路什么都干"的方向合回去。
   - **改 `.github/workflows/*` 之前先跑 `python .github/scripts/check_workflows.py`**，
     推之前也再跑一次。`yaml.safe_load` 只证明"能读"，读不出这几类：重复键（GitHub 报

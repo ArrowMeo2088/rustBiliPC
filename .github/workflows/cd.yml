@@ -118,16 +118,19 @@ jobs:
 
       # gpui 的 Linux 后端要 X11/wayland/fontconfig/ALSA/vulkan 这些开发包；包名按 gpui 自己 CI 那份列
       # （缺一个就是 link 阶段一大串 undefined）。
+      # **第五十三轮补的 `libxkbcommon-x11-dev`**：两条 Linux 目标第一次跑就在链接期报
+      # `cannot find -lxkbcommon-x11`——那份包列表里没有它（x64 走 rust-lld、arm64 走 /usr/bin/ld，
+      # 报的是同一个库），不是 gpui 不支持 Linux，是少装一个 -dev 包。
       - name: Install Linux system dependencies
         if: ${{ !matrix.windows }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libasound2-dev libx11-xcb-dev libxcb-render0-dev libxcb-shape0-dev \
-            libxcb-xfixes0-dev libxkbcommon-dev libssl-dev libclang-dev \
-            libvulkan1 libfontconfig1-dev libexpat1-dev fonts-noto-color-emoji \
-            libwayland-dev wayland-protocols libxcursor-dev libxcb1-dev \
-            pkg-config
+            libxcb-xfixes0-dev libxkbcommon-dev libxkbcommon-x11-dev libssl-dev \
+            libclang-dev libvulkan1 libfontconfig1-dev libexpat1-dev \
+            fonts-noto-color-emoji libwayland-dev wayland-protocols \
+            libxcursor-dev libxcb1-dev pkg-config
 
       # gpui 的 build.rs 在 release 下要编译 HLSL 着色器，需要 Windows SDK 里的 fxc.exe。
       # 找不到时只提示、不挡住：gpui 的 build.rs 自己也会搜一遍（第四轮起就这么活的）。
