@@ -32,7 +32,12 @@
 // 他说"调试模式关闭则启动时不显示控制台"。控制台的存在与否是**链接期**决定的子系统，
 // 不是运行时能开关的，所以这里取"永远不弹"：调试模式只决定要不要写 `debug.log`
 // （关了连文件都不创建）。真想要"调试时弹一个控制台"，得另外做 `AttachConsole`，那没做。
-#![cfg_attr(target_os = "windows", windows_subsystem = "windows")]
+// **诊断版（`--features console_diag`）故意不加这条**：留着控制台，双击就能看到加载器的报错
+// （缺 DLL、不是有效的 Win32 应用）与 panic 文本——GUI 子系统下这些全是静默消失。
+#![cfg_attr(
+    all(target_os = "windows", not(feature = "console_diag")),
+    windows_subsystem = "windows"
+)]
 
 use std::sync::Arc;
 
@@ -60,15 +65,21 @@ fn main() {
     let (config, outcome) = Config::load_or_create();
     // 配置文件坏了就用默认值，而默认值是"不写日志"——那样他就既看不到错误、
     // 也没法打开调试模式（开关就写在那个坏文件里）。所以这一轮强制开日志。
-    let debug_log = config.debug_log || matches!(outcome, LoadOutcome::RecoveredFromBroken);
+    // 诊断版**强制开日志**：那份 exe 就是为了拿日志回来查的，不该还要求"先进设置页开、再重启"。
+    let debug_log = config.debug_log
+        || cfg!(feature = "console_diag")
+        || matches!(outcome, LoadOutcome::RecoveredFromBroken);
     app::init_config(config);
 
     let log_path = logging::init(debug_log);
     log::info!(
-        "rustBiliPC v{} 启动，工作目录 {:?}，数据目录 {:?}",
+        "rustBiliPC v{} 启动，工作目录 {:?}，数据目录 {:?}（平台 {}/{}，诊断版={}）",
         rustbilipc::VERSION,
         crate::app::exe_dir(),
-        crate::app::settings_dir()
+        crate::app::settings_dir(),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+        cfg!(feature = "console_diag")
     );
     match &log_path {
         Some(path) => log::info!("日志文件 {:?}", path),

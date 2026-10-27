@@ -39,6 +39,11 @@ on:
         type: boolean
         required: false
         default: true
+      diagnostic:
+        description: "每个目标**另出一份诊断版**（控制台子系统 + 默认写 debug.log，不压缩），用来查\"双击没反应\""
+        type: boolean
+        required: false
+        default: false
 
 # `contents: write` 是 `release` 作业要的（建 release、传资产）。
 permissions:
@@ -64,6 +69,7 @@ jobs:
             target: x86_64-pc-windows-msvc
             exe: rustbilipc.exe
             asset: rustbilipc-win-x64.exe
+            diag_asset: rustbilipc-win-x64-diagnostic.exe
             windows: true
             # aws-lc-sys 在 MSVC 上要 NASM（第五十一轮查明它随 quinn-proto 进来、去不掉）。
             nasm: true
@@ -75,6 +81,7 @@ jobs:
             target: aarch64-pc-windows-msvc
             exe: rustbilipc.exe
             asset: rustbilipc-win-arm64.exe
+            diag_asset: rustbilipc-win-arm64-diagnostic.exe
             windows: true
             nasm: true
             need_fxc: true
@@ -86,6 +93,7 @@ jobs:
             target: x86_64-unknown-linux-gnu
             exe: rustbilipc
             asset: rustbilipc-linux-x64
+            diag_asset: rustbilipc-linux-x64-diagnostic
             windows: false
             nasm: false
             need_fxc: false
@@ -98,6 +106,7 @@ jobs:
             target: aarch64-unknown-linux-gnu
             exe: rustbilipc
             asset: rustbilipc-linux-arm64
+            diag_asset: rustbilipc-linux-arm64-diagnostic
             windows: false
             nasm: false
             need_fxc: false
@@ -227,6 +236,35 @@ jobs:
         with:
           name: asset-${{ matrix.rid }}
           path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+          retention-days: 30
+
+      # ---------- 诊断版（可选，`diagnostic=true` 才做）----------
+      # 查"双击没反应、连窗口都没出来"这类起不来的现场：正常那份是 GUI 子系统，
+      # 加载器报错与 panic 文本全是静默的；这份带控制台，且 `debug.log` 默认就写。
+      # **顺序要紧**：必须排在正常那份 stage 之后——两次 `cargo build` 的输出是同一个路径
+      # （`target/<triple>/release-dist/<exe>`），后一次会覆盖前一次；UPX 也已经压过了。
+      - name: Build (diagnostic, console + log on)
+        if: inputs.diagnostic
+        shell: bash
+        run: cargo build --profile release-dist --target ${{ matrix.target }} --features console_diag
+
+      - name: Stage diagnostic asset
+        if: inputs.diagnostic
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/${{ matrix.target }}/release-dist/${{ matrix.exe }}" "dist/${{ matrix.diag_asset }}"
+          chmod +x "dist/${{ matrix.diag_asset }}"
+          ls -l "dist/${{ matrix.diag_asset }}" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "- ${{ matrix.rid }} 诊断版（**未压缩**）：$(wc -c < "dist/${{ matrix.diag_asset }}") 字节" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload diagnostic asset
+        if: inputs.diagnostic
+        uses: actions/upload-artifact@v4
+        with:
+          name: asset-${{ matrix.rid }}-diagnostic
+          path: dist/${{ matrix.diag_asset }}
           if-no-files-found: error
           retention-days: 30
 
