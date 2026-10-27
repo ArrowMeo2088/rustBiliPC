@@ -209,6 +209,69 @@ jobs:
           echo "长度=$(wc -c <<<"$RAW") 条数=$(jq -r 'length' <<<"$RAW")"
           echo "这一腿的 matrix=[$LEG]"
 
+  # 第三组：**把当时那份 `plan`/`build` 的剩余差别补齐** —— plan 里有 `actions/checkout`、
+  # 值是从一个 JSON 文件 `jq` 出来的（这里由步骤自己写出该文件，内容就是当初的 `.github/cd-matrix.json`），
+  # build 里带一个真 `actions/cache` 步骤（`hashFiles('Cargo.lock')` 当 key 的一部分）。
+  # 如果 r-build 的腿照样出现，那三次红就**不是这份文件的内容能解释的**（平台侧或当时的某种状态），
+  # 我就按矩阵那份定稿，并把"这三次红的成因至今没复现出来"如实写进文档，不编一个解释。
+  r-plan:
+    if: ${{ inputs.targets == 'probe' }}
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Pick matrix legs
+        shell: bash
+        env:
+          TARGETS: win-x64
+        run: |
+          set -e
+          # 不用 heredoc：YAML 块标量里的缩进会让结束标记前面的空格把 bash 卡住（这里只要内容一致，排版不重要）。
+          cat > ./cd-matrix.json <<JSON
+          [{"name":"win-x64","os":"windows-latest","target":"x86_64-pc-windows-msvc","exe":"rustbilipc.exe","asset":"rustbilipc-win-x64.exe","windows":true,"nasm":true},{"name":"linux-x64","os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","exe":"rustbilipc","asset":"rustbilipc-linux-x64","windows":false,"nasm":false}]
+          JSON
+          matrix=$(jq -c --arg n "$TARGETS" '[.[] | select(.name == $n)]' ./cd-matrix.json)
+          if [ "$(jq -c '. | length' <<<"$matrix")" = "0" ]; then
+            echo "目标不存在"; exit 1
+          fi
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "### 这次要编的目标" >> "$GITHUB_STEP_SUMMARY"
+          jq -r '.[].name' <<<"$matrix" >> "$GITHUB_STEP_SUMMARY"
+          echo "publish=false tag=v0.1.0" >> "$GITHUB_STEP_SUMMARY"
+          echo "r-plan 交出去：$matrix"
+
+  r-build:
+    if: ${{ inputs.targets == 'probe' }}
+    needs: r-plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.r-plan.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Cache cargo home and target
+        uses: actions/cache@v4
+        with:
+          save-always: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ matrix.name }}-${{ hashFiles('**/README.md') }}
+
+      - name: Echo（不编东西）
+        env:
+          LEG: ${{ toJSON(matrix) }}
+        run: |
+          echo "r-build 这条腿出现了：[$LEG]"
+          echo "cargo build --profile release-dist --target ${{ matrix.target }}"
+
   p-static:
     if: ${{ inputs.targets == 'probe' }}
     runs-on: ${{ matrix.os }}
