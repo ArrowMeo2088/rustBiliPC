@@ -14,40 +14,46 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
-inputs:
-  name:
-    description: "目标名（win-x64 / win-arm64 / linux-x64 / linux-arm64），也用作缓存 key 与资产名的一部分"
-    type: string
-    required: true
-  os:
-    description: "runs-on 的 runner 标签"
-    type: string
-    required: true
-  target:
-    description: "rustup 的 target triple"
-    type: string
-    required: true
-  exe:
-    description: "构建出来的可执行文件名（Windows 带 .exe）"
-    type: string
-    required: true
-  asset:
-    description: "发布时这个 exe 在 Release 里的名字（**只打包它，不带别的文件**）"
-    type: string
-    required: true
-  windows:
-    description: "是不是 Windows 目标（'true'/'false'）：决定探 fxc.exe 还是装 Linux 系统库"
-    type: string
-    required: true
-  nasm:
-    description: "要不要装 NASM（'true'/'false'）：MSVC 上编译 aws-lc-sys 需要它"
-    type: string
-    required: false
-    default: "false"
-  upx:
-    description: "用 UPX 压缩产物（--lzma --best）"
-    type: boolean
-    required: true
+# `inputs` 必须写在 `on.workflow_call` 下面，**不是工作流顶层**。
+# 第五十二轮在这里红过一次：顶层写 `inputs:` 时 dispatch 直接 HTTP 422
+# （`failed to parse workflow … Unexpected value 'inputs'`），而本地 `yaml.safe_load` 一切正常 ——
+# **YAML 合法 ≠ workflow 合法**，这条流水线只有真 dispatch 一次才知道写得对不对。
+on:
+  workflow_call:
+    inputs:
+      name:
+        description: "目标名（win-x64 / win-arm64 / linux-x64 / linux-arm64），也用作缓存 key 与资产名的一部分"
+        type: string
+        required: true
+      os:
+        description: "runs-on 的 runner 标签"
+        type: string
+        required: true
+      target:
+        description: "rustup 的 target triple"
+        type: string
+        required: true
+      exe:
+        description: "构建出来的可执行文件名（Windows 带 .exe）"
+        type: string
+        required: true
+      asset:
+        description: "发布时这个 exe 在 Release 里的名字（**只打包它，不带别的文件**）"
+        type: string
+        required: true
+      windows:
+        description: "是不是 Windows 目标（'true'/'false'）：决定探 fxc.exe 还是装 Linux 系统库"
+        type: string
+        required: true
+      nasm:
+        description: "要不要装 NASM（'true'/'false'）：MSVC 上编译 aws-lc-sys 需要它"
+        type: string
+        required: false
+        default: "false"
+      upx:
+        description: "用 UPX 压缩产物（--lzma --best）"
+        type: boolean
+        required: true
 
 jobs:
   build:
