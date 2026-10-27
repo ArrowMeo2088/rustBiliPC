@@ -172,6 +172,43 @@ jobs:
     steps:
       - run: echo "windows-latest 这条腿出现了：${{ toJSON(matrix) }}"
 
+  # 第二组对照：**唯一还没试过的两个差别** —— ① 输出那个键就叫 `matrix`（当时写的是
+  # `outputs.matrix` + `fromJson(needs.plan.outputs.matrix)`）；② 值是脚本用 `jq` 拼出来后
+  # 写进 `$GITHUB_OUTPUT` 的（探针第一组是单引号字面量）。
+  # `q-build` 第一步先把拿到的原始输出打出来：如果那条腿出现了但内容是空的，
+  # 就说明红的原因在输出传递上，而不是矩阵展开（**零条腿的作业在作业列表里就是不出现**）。
+  q-plan:
+    if: ${{ inputs.targets == 'probe' }}
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - id: pick
+        shell: bash
+        run: |
+          set -e
+          json='[{"name":"win-x64","os":"ubuntu-latest","target":"x86_64-pc-windows-msvc","exe":"rustbilipc.exe","asset":"rustbilipc-win-x64.exe","windows":true,"nasm":true}]'
+          matrix=$(jq -c . <<<"$json")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "q-plan 交出去的：$matrix"
+
+  q-build:
+    if: ${{ inputs.targets == 'probe' }}
+    needs: q-plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.q-plan.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - env:
+          RAW: ${{ needs.q-plan.outputs.matrix }}
+          LEG: ${{ toJSON(matrix) }}
+        run: |
+          echo "拿到的原始输出=[$RAW]"
+          echo "长度=$(wc -c <<<"$RAW") 条数=$(jq -r 'length' <<<"$RAW")"
+          echo "这一腿的 matrix=[$LEG]"
+
   p-static:
     if: ${{ inputs.targets == 'probe' }}
     runs-on: ${{ matrix.os }}
