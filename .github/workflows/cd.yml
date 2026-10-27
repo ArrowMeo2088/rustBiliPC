@@ -29,6 +29,7 @@ on:
           - linux-x64
           - linux-arm64
           - all
+          - probe
       publish:
         description: "把这些 exe 发成 GitHub Release（关掉 = 只编译取产物，不动 Release）"
         type: boolean
@@ -110,6 +111,73 @@ jobs:
       windows: "false"
       nasm: "false"
       upx: ${{ inputs.upx }}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # **临时探针（第五十二轮）**：`targets=probe` 时才跑，四个 echo 作业，一条 ubuntu 几秒钟。
+  # 要判的事很具体：那三次红里 `build` 作业**根本不存在**（run 红、日志零错误），
+  # 到底是"动态矩阵不支持"还是"我某处写法有问题"。官方 `workflow-syntax.md` 第 1294 行
+  # 明确写着矩阵的某个维度**可以是对象数组**，所以我先前那条"值只能是标量"是错的归纳。
+  # 判据不是日志而是**作业列表里出现几条腿**：某形状完全没出现＝那条形状在这份文件里就是展开不出来。
+  # p-static 是对照组（纯静态 include），如果连它都不出现，问题就不在 fromJson。
+  # 结论拿到后这一整段删掉。
+  # ─────────────────────────────────────────────────────────────────────────────
+  p-plan:
+    if: ${{ inputs.targets == 'probe' }}
+    runs-on: ubuntu-latest
+    outputs:
+      arr: ${{ steps.m.outputs.arr }}
+      obj: ${{ steps.m.outputs.obj }}
+    steps:
+      - id: m
+        shell: bash
+        run: |
+          echo 'arr=[{"name":"A","os":"ubuntu-latest"},{"name":"B","os":"ubuntu-latest"}]' >> "$GITHUB_OUTPUT"
+          echo 'obj={"include":[{"name":"C","os":"ubuntu-latest"},{"name":"D","os":"ubuntu-latest"}]}' >> "$GITHUB_OUTPUT"
+
+  p-static:
+    if: ${{ inputs.targets == 'probe' }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - name: S1
+            os: ubuntu-latest
+          - name: S2
+            os: ubuntu-latest
+    steps:
+      - run: echo "对照组 p-static 出现了：${{ toJSON(matrix) }}"
+
+  p-inc:
+    if: ${{ inputs.targets == 'probe' }}
+    needs: p-plan
+    name: p-inc-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include: ${{ fromJson(needs.p-plan.outputs.arr) }}
+    steps:
+      - run: echo "include 来自表达式：${{ toJSON(matrix) }}"
+
+  p-whole:
+    if: ${{ inputs.targets == 'probe' }}
+    needs: p-plan
+    name: p-whole-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix: ${{ fromJson(needs.p-plan.outputs.obj) }}
+    steps:
+      - run: echo "整份 matrix 对象来自表达式：${{ toJSON(matrix) }}"
+
+  p-obj-legs:
+    if: ${{ inputs.targets == 'probe' }}
+    needs: p-plan
+    name: p-obj-legs-${{ matrix.leg.name }}
+    runs-on: ${{ matrix.leg.os }}
+    strategy:
+      matrix:
+        leg: ${{ fromJson(needs.p-plan.outputs.arr) }}
+    steps:
+      - run: echo "对象数组当一维：${{ toJSON(matrix.leg) }}"
 
   release:
     needs: [win-x64, win-arm64, linux-x64, linux-arm64]
