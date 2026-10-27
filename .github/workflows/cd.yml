@@ -242,6 +242,11 @@ jobs:
           jq -r '.[].name' <<<"$matrix" >> "$GITHUB_STEP_SUMMARY"
           echo "publish=false tag=v0.1.0" >> "$GITHUB_STEP_SUMMARY"
           echo "r-plan 交出去：$matrix"
+          # **同一步内**才看得到本步骤自己的输出文件（每个步骤一个 set_output_<uuid>，步结束即回收，
+          # 所以上一轮在另一个步骤里 cat 到的是空文件，那次取证无效）。
+          echo "----- r-plan 本步骤 GITHUB_OUTPUT 的原始字节 -----"
+          cat -A "$GITHUB_OUTPUT"
+          echo "----- 结束（行数 $(wc -l < "$GITHUB_OUTPUT")）-----"
 
       # 同作业内回看：`steps.pick.outputs.matrix` 有没有真被记上。
       # 空 → 丢在写入/解析那一侧（跟矩阵、跟消费方都无关）；非空 → 丢在跨作业传递那一步。
@@ -252,6 +257,44 @@ jobs:
         run: |
           echo "SEEN 的长度=${#SEEN}"
           echo "SEEN=[$SEEN]"
+
+  # 还有一处没单独验过：r-plan 里那段"挑空了就 exit 1"的守卫（用了 `<<<` here-string 套 jq）。
+  # y-plan 与 r-plan 只差这一段，去掉它 —— 如果腿回来，凶手就是这段守卫所在的执行路径。
+  y-plan:
+    if: ${{ inputs.targets == 'probe' }}
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Pick matrix legs
+        shell: bash
+        env:
+          TARGETS: win-x64
+        run: |
+          set -e
+          cat > ./cd-matrix.json <<JSON
+          [{"name":"win-x64","os":"windows-latest","target":"x86_64-pc-windows-msvc","exe":"rustbilipc.exe","asset":"rustbilipc-win-x64.exe","windows":true,"nasm":true},{"name":"linux-x64","os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","exe":"rustbilipc","asset":"rustbilipc-linux-x64","windows":false,"nasm":false}]
+          JSON
+          matrix=$(jq -c --arg n "$TARGETS" '[.[] | select(.name == $n)]' ./cd-matrix.json)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "### 这次要编的目标" >> "$GITHUB_STEP_SUMMARY"
+          jq -r '.[].name' <<<"$matrix" >> "$GITHUB_STEP_SUMMARY"
+          echo "publish=false tag=v0.1.0" >> "$GITHUB_STEP_SUMMARY"
+          echo "y-plan 交出去：$matrix"
+
+  y-build:
+    if: ${{ inputs.targets == 'probe' }}
+    needs: y-plan
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.y-plan.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - run: echo "y-build 这条腿出现了：${{ toJSON(matrix) }}"
 
   # 两种写法各写一遍，再用**两条腿分别消费**：哪条腿出现，就说明哪种写法真把输出交出去了。
   # 差别只可能在 `echo "名=值" >>` 与 `名<<分隔符 … 分隔符` 这两种写法本身。
