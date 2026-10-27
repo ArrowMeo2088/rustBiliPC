@@ -127,12 +127,50 @@ jobs:
     outputs:
       arr: ${{ steps.m.outputs.arr }}
       obj: ${{ steps.m.outputs.obj }}
+      real: ${{ steps.m.outputs.real }}
+      realwin: ${{ steps.m.outputs.realwin }}
     steps:
       - id: m
         shell: bash
         run: |
           echo 'arr=[{"name":"A","os":"ubuntu-latest"},{"name":"B","os":"ubuntu-latest"}]' >> "$GITHUB_OUTPUT"
           echo 'obj={"include":[{"name":"C","os":"ubuntu-latest"},{"name":"D","os":"ubuntu-latest"}]}' >> "$GITHUB_OUTPUT"
+          # **那三次红时交出去的内容原样**（键、布尔值、`target`/`exe`/`asset` 都在），
+          # 只把 `os` 换成 ubuntu-latest 让这一跑只花几秒钟。p-bool 用来判"是不是布尔值/这些键出问题"。
+          echo 'real=[{"name":"win-x64","os":"ubuntu-latest","target":"x86_64-pc-windows-msvc","exe":"rustbilipc.exe","asset":"rustbilipc-win-x64.exe","windows":true,"nasm":true},{"name":"linux-x64","os":"ubuntu-latest","target":"x86_64-unknown-linux-gnu","exe":"rustbilipc","asset":"rustbilipc-linux-x64","windows":false,"nasm":false}]' >> "$GITHUB_OUTPUT"
+          # 第三条：**连 runner 标签都与当时一致**（windows-latest），只跑 echo，不编任何东西。
+          echo 'realwin=[{"name":"win-x64","os":"windows-latest","target":"x86_64-pc-windows-msvc","exe":"rustbilipc.exe","asset":"rustbilipc-win-x64.exe","windows":true,"nasm":true}]' >> "$GITHUB_OUTPUT"
+
+  p-bool:
+    if: ${{ inputs.targets == 'probe' }}
+    needs: p-plan
+    name: p-bool-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.p-plan.outputs.real) }}
+    steps:
+      - name: 布尔值当 if 条件（当时就是这么写的）
+        if: matrix.nasm
+        run: echo "nasm=true 这一腿：${{ toJSON(matrix) }}"
+      - name: 反向条件
+        if: ${{ !matrix.windows }}
+        run: echo "windows=false 这一腿也走得到"
+      - name: 用 matrix 的值拼路径
+        run: echo "cargo build --profile release-dist --target ${{ matrix.target}} -> ${{ matrix.exe }} as ${{ matrix.asset }}"
+
+  p-win:
+    if: ${{ inputs.targets == 'probe' }}
+    needs: p-plan
+    name: p-win-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.p-plan.outputs.realwin) }}
+    steps:
+      - run: echo "windows-latest 这条腿出现了：${{ toJSON(matrix) }}"
 
   p-static:
     if: ${{ inputs.targets == 'probe' }}
