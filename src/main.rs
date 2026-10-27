@@ -104,11 +104,13 @@ fn main() {
     // 换一份客户端就等于换一个 cookie jar，扫完码主窗口那些页面还是旧的登录态。
     relogin::set_client(Arc::clone(&client));
 
-    // Assets 用 kit 的**完整** Lucide 集（1830 个 svg 全嵌进 exe）。
-    // 默认那份 `Assets` 只嵌 106 个，侧栏要的 House/Clock/Bookmark/Download 都不在里面；
-    // 名字找不到不会报错，只会画出一片空白（见 `ui::layout::side_item` 的说明）。
-    // 将来要加载我们自己的图片/字体时，改成组合形式而不是退回 `Assets`。
-    let application = gpui_kit::application().with_assets(gpui_kit::assets::AllAssets);
+    // 图标资源用**我们自己那张表**（`src/ui/assets.rs`：kit 默认那 106 个 + 侧栏多用的 4 个，
+    // 171 KB），不用 kit 的 `AllAssets`（1830 个 svg、2.8 MB 全塞进 exe，其中 94% 永远不会被请求）。
+    // 为什么不用 kit 默认的 `Assets`：侧栏要的 House/Clock/Bookmark/Download 不在那 106 个里，
+    // 而**图标名找不到不会报错、只会画出一片空白**（见 `ui::layout::side_item` 的说明）——
+    // 所以我们把默认那 106 个一并带上，让 kit 自己的组件也不缺图。
+    // 加新图标：拷 svg + 在 `ICONS` 表里加一行，两步都要做（见 `src/ui/icons/README.md`）。
+    let application = gpui_kit::application().with_assets(rustbilipc::ui::assets::AppAssets);
 
     application.run(move |cx| {
         // 使用任何 kit 组件前必须调用。
@@ -150,6 +152,8 @@ fn main() {
         // 直接把原因写进日志并结束进程，比留一个隐形的主线程挂在循环里有用。
         if let Err(error) = opened {
             log::error!("开窗口失败，退出: {error}");
+            // 这条路上外壳根本没建起来，也就没有 `DownloadQueue::Drop` 兜底 —— 手工叫一次收尾。
+            rustbilipc::api::download::cancel_all_active();
             cx.quit();
         }
     });

@@ -459,7 +459,9 @@ impl DetailPage {
             let Some(view) = this.upgrade() else { return };
             view.update(cx, |view, cx| {
                 view.player_note = match outcome {
-                    Ok(name) => format!("已开始下载：{name}（进度在左侧「下载」那一页）").into(),
+                    // 措辞是"排进队列"而不是"已开始下载"：P14 起同时在跑的有上限（3 条），
+                    // 点第五下时它多半还在排队，写"已开始"就成了假话。
+                    Ok(name) => format!("已排进下载队列：{name}（进度在左侧「下载」那一页）").into(),
                     Err(message) => message.into(),
                 };
                 cx.notify();

@@ -30,7 +30,9 @@ use gpui_kit::component::progress::Progress;
 use gpui_kit::*;
 
 use crate::api::download;
-use crate::pages::download::queue::{DownloadQueue, DownloadTask, DownloadsChanged, TaskState};
+use crate::pages::download::queue::{
+    DownloadQueue, DownloadTask, DownloadsChanged, TaskState, MAX_RUNNING,
+};
 use crate::ui::scroll::DragScroll;
 use crate::ui::{layout, palette};
 
@@ -163,7 +165,8 @@ impl DownloadPage {
         let files = row.files.clone();
 
         // 进度条：跑动用百分比（拿不到大小就退成不定进度）；"已完成"画满；
-        // 失败与取消**不画线**——那两行要人读的是原因文字，不是一条停在半路的线。
+        // **排队中**、失败与取消都不画线——那三行要人读的是"还没轮到"或原因文字，
+        // 不是一条停在 0% 的线（0% 的线看起来像"卡住了"）。
         let bar = match row.state {
             TaskState::Running => {
                 let bar = Progress::new(format!("download-bar-{id}"))
@@ -187,7 +190,9 @@ impl DownloadPage {
 
         // 按钮：按状态给，不给点了没反应的按钮。
         let mut actions: Vec<AnyElement> = Vec::new();
-        if row.state == TaskState::Running {
+        // 排队中的也要给"取消"：不然那条记录唯一的入口就是"等它开始下"，
+        // 而人家明显不想下第五条（点了才发现要排队，此刻能反悔才有意义）。
+        if row.state.active() {
             actions.push(
                 Button::new(format!("download-cancel-{id}"))
                     .label("取消")
@@ -218,7 +223,9 @@ impl DownloadPage {
                     .into_any_element(),
             );
         }
-        if row.state != TaskState::Running {
+        // 还在跑或还排着的**不给"移除记录"**：那是这条任务唯一的入口，
+        // 摘掉之后取消按钮就没了（排队的尤其危险——它会一直等到有名额时自己开跑）。
+        if !row.state.active() {
             actions.push(
                 Button::new(format!("download-forget-{id}"))
                     .label("移除记录")
@@ -240,6 +247,9 @@ impl DownloadPage {
                 })
                 .collect::<Vec<String>>()
                 .join(" + ")
+        } else if row.state == TaskState::Pending {
+            // 排队中的那一行必须自己解释自己：否则它和"卡住的下载"在界面上长得一样。
+            format!("等前面的下完就轮到（同时最多 {MAX_RUNNING} 条）")
         } else {
             row.readout()
         };
@@ -313,21 +323,31 @@ impl Render for DownloadPage {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.scroll.watch(window, cx.entity_id());
 
-        let (rows, running, finished) = {
+        let (rows, running, waiting, finished) = {
             let queue = self.queue.read(cx);
             let rows: Vec<TaskRow> = queue.tasks().iter().map(TaskRow::of).collect();
             let running = queue.running();
+            let waiting = queue.waiting();
             let finished = rows
                 .iter()
                 .filter(|row| matches!(row.state, TaskState::Finished | TaskState::Cancelled))
                 .count();
-            (rows, running, finished)
+            (rows, running, waiting, finished)
         };
 
         // 显式标类型：这一条 `if/else` 的 `None` 分支要靠后面的 `header` 才推得出来，
         // 不写就是 E0282（第三十轮那两条歧义 collect 是同一类错）。
+        // 排队中的数目一定要写出来：不说"为什么这条停在排队中"，它就长得像"下载坏了"。
         let subtitle: Option<SharedString> = if rows.is_empty() {
             None
+        } else if waiting > 0 {
+            Some(
+                format!(
+                    "共 {} 条 · 进行中 {running} · 排队中 {waiting}（同时最多下 {MAX_RUNNING} 条）",
+                    rows.len()
+                )
+                .into(),
+            )
         } else {
             Some(format!("共 {} 条 · 进行中 {running}", rows.len()).into())
         };

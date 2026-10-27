@@ -220,6 +220,10 @@ impl MainShell {
 
         // 主页是默认页：构造完就把第一批推荐取回来，登录后第一眼不该是一片空白。
         shell.home.update(cx, |page, cx| page.ensure_loaded(cx));
+        // 下载队列的 `Drop` 会在外壳被释放时叫停在跑的任务（"退出别留 .part"）。
+        // 这一句是**故意多此一举**的一层保险：把队列强提一次，确保它在实体表里有正式归属，
+        // 也就确保外壳 drop 时它跟着 drop —— 而不是变成一个"没人持有、被实体表回收得不知去哪"的实体。
+        let _ = &shell.queue;
         // 登记给重登协调器（P13）：凭据过期时它要拿这份客户端开扫码窗，
         // 重登成功后要叫这一个外壳刷新第一屏。用弱句柄，窗口关了它就自动失效。
         crate::pages::relogin::set_shell(cx.entity().downgrade());

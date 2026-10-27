@@ -39,6 +39,7 @@
 use std::io::{BufWriter, Write as _};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use futures::AsyncReadExt as _;
@@ -218,9 +219,59 @@ pub fn spawn_download(
             .unwrap_or_else(|| "未知".to_string())
     );
     let join = spawn_on_api_runtime(async move {
-        run(request, dir, client, cancel, sender).await;
+        // 注册进"还在跑"的名册：退场时（`cancel_all_active`）才知道该给哪些任务置取消标志。
+        // 放在任务里而不是 `spawn_download` 里，是为了**名册里有的那一支一定已经在跑**，
+        // 排队中的任务（P14 的队列上限）不该被"退出收尾"叫到。
+        register(&cancel);
+        run(request, dir, client, cancel.clone(), sender).await;
+        unregister(&cancel);
     });
     (join, receiver)
+}
+
+/// 在跑任务的取消标志名册。
+///
+/// 为什么是一张全局表而不是"队列自己记得"：置标志这件事发生在**进程要退的时候**，
+/// 那一刻队列实体正在被 drop（`DownloadQueue::drop` 就是主要调用方），
+/// 从 `Drop` 里再回头借 `&self.tasks` 是行得通的，但另一条路（`main.rs` 主动 `cx.quit()`）
+/// 手上根本没有队列实体 —— 一张表能让两个入口共用，也不会漏下"队列已被清掉但任务还在写"的那种。
+static ACTIVE: Mutex<Vec<Arc<AtomicBool>>> = Mutex::new(Vec::new());
+
+fn register(flag: &Arc<AtomicBool>) {
+    if let Ok(mut guard) = ACTIVE.lock() {
+        guard.push(Arc::clone(flag));
+    }
+}
+
+fn unregister(flag: &Arc<AtomicBool>) {
+    if let Ok(mut guard) = ACTIVE.lock() {
+        guard.retain(|one| !Arc::ptr_eq(one, flag));
+    }
+}
+
+/// 叫所有在跑的任务收尾（置取消标志），返回叫了几条。
+///
+/// **只置标志、不删文件**：删 `.part` 由任务自己做（它先 flush、再关句柄、最后删）。
+/// 主线程直接删会有两个问题：Windows 上"文件还开着就删"会失败，
+/// 以及"任务刚好改名成成品"时把成品当临时文件删掉（先后顺序谁也不知道）。
+///
+/// 诚实的限制：置完标志到进程真的退出之间可能只剩几毫秒，任务不一定来得及跑到下一个分块，
+/// 那时磁盘上仍会留一个 `.part`。要治那条得让退出路径等一等任务，
+/// 而"退出时卡两秒等下载收尾"是不是他要的，得先问（见风险表新增那条）。
+pub fn cancel_all_active() -> usize {
+    let Ok(mut guard) = ACTIVE.lock() else {
+        return 0;
+    };
+    // 顺手清掉已经结束的（正常路径上任务自己摘了，这里是防泄漏的兜底）。
+    guard.retain(|flag| !flag.load(Ordering::Relaxed));
+    let count = guard.len();
+    for flag in guard.iter() {
+        flag.store(true, Ordering::Relaxed);
+    }
+    if count > 0 {
+        log::info!("下载：退出收尾请求了 {count} 条在跑的任务");
+    }
+    count
 }
 
 /// 一条任务的主体：先把视频写完再写音频，中途只认取消标志。
@@ -386,6 +437,10 @@ async fn attempt(
     loop {
         if cancel.load(Ordering::Relaxed) {
             let _ = writer.flush();
+            // **先把句柄关掉再交回给上层删**：`BufWriter` 里面装着那个 `File`，
+            // 没 drop 就去 `remove_file` 在 Windows 上会失败（文件正开着），
+            // 症状是"取消了，但目录里还是留了个 .part"。
+            drop(writer);
             return Err(AttemptStop::Cancelled { bytes: written });
         }
         let read = body

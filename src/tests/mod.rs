@@ -1582,3 +1582,71 @@ mod auto_page_tests {
         assert!(AUTO_PAGE_MAX_ITEMS >= 120, "{AUTO_PAGE_MAX_ITEMS}");
     }
 }
+
+#[cfg(test)]
+mod assets_tests {
+    use crate::ui::assets::AppAssets;
+    use gpui_kit::AssetSource as _;
+    use gpui_kit::assets::IconName;
+
+    /// **我们代码里用到的每一个图标，都必须在这张表里**。
+    ///
+    /// 这条测试是"图标"这件事唯一的防护网：资源名找不到**不会编译失败、不会 panic**，
+    /// 只会在界面上画出一片空白（第四轮踩过一次，那次是因为 kit 默认的 `Assets` 太少）。
+    /// 现在换成自己那张 110 项的表，同一个坑的可能性反而更高了 —— 所以加图标时必须同时改这里：
+    /// 新增一个 `IconName::X` 而没加进数组，这条测试就红，而不是等真机看出一片空白。
+    #[test]
+    fn every_icon_the_app_asks_for_is_embedded() {
+        let used = [
+            IconName::House,
+            IconName::Search,
+            IconName::Star,
+            IconName::Clock,
+            IconName::Bookmark,
+            IconName::Download,
+            IconName::Settings,
+            IconName::ArrowLeft,
+        ];
+        for name in used {
+            let path = name.path();
+            assert!(AppAssets::has(path.as_ref()), "表里缺这个图标：{path}");
+        }
+    }
+
+    /// 表里每一项都得真的能读出来（路径拼错一个字母，`load` 就会给 `None` → 界面一片空白）。
+    #[test]
+    fn each_table_entry_can_be_loaded() {
+        for name in [
+            IconName::House,
+            IconName::Clock,
+            IconName::Bookmark,
+            IconName::Download,
+            IconName::ArrowLeft,
+            IconName::Star,
+            IconName::Search,
+            IconName::Settings,
+        ] {
+            let path = name.path();
+            let bytes = AppAssets
+                .load(path.as_ref())
+                .expect("资源源本身不该报错")
+                .expect("这条路径该读得出内容");
+            assert!(
+                bytes.starts_with(b"<svg") || bytes.starts_with(b"<?xml"),
+                "{path} 读出来的不像 svg"
+            );
+        }
+    }
+
+    /// 体积回归闸：这张表存在的意义就是"别把整个 Lucide 目录塞进 exe"。
+    /// 完整目录是 1830 个文件 / 2.8 MB（第四十八轮量的），我们这份要小一个数量级。
+    #[test]
+    fn the_embedded_table_stays_small() {
+        assert_eq!(AppAssets::COUNT, 110, "图标数量变了要同时改这里（加/减图标是有意决定）");
+        let total: usize = AppAssets::bytes();
+        assert!(
+            total < 600 * 1024,
+            "图标表已经 {total} 字节了，快赶上整份 Lucide 目录的一半"
+        );
+    }
+}

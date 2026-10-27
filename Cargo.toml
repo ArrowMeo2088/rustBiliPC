@@ -60,9 +60,20 @@ log = "0.4"
 # 关掉默认的 image/svg/pic 渲染后端：那三个会拉进 pixels 版 `image`，与 gpui 用的
 # 同名 fork（`use image::Frame`）混在一个构建里容易出问题。二维码直接用 div 网格画。
 qrcode-generator = { version = "6.1", default-features = false, features = ["std", "qr"] }
-# 只为在启动时装一次进程级 rustls crypto provider（依赖图里 aws-lc-rs 与 ring 同时启用，
-# 不装会在 TLS 握手处 panic）。版本由 Cargo.lock 与 bpi-rs 统一，不额外引入实现。
-rustls = "0.23"
+# 只为在启动时装一次进程级 rustls crypto provider。依赖图里 aws-lc-rs 与 ring 同时启用时
+# rustls 无法自行二选一，任何 HTTPS 请求都会在握手处 panic（`app::install_tls_provider`）。
+#
+# **P14 把默认特征关了**：`default = ["aws-lc-rs", ...]` 会把 `aws-lc-sys` 拉进来
+# （一个 C/汇编大依赖，CI 因此必须装 NASM，编译时间和体积都吃它）。
+# 我们只要 `ring` 那一个 provider，所以显式列特征、不再开默认。
+# 剩多少要看 CI 日志里还有没有 `Compiling aws-lc-sys`——reqwest 那条链如果自己要求 aws-lc，
+# 这一改就只是"显式声明了我们用哪个"，不会真的减依赖（那也要写进文档，别当已省）。
+rustls = { version = "0.23", default-features = false, features = [
+    "ring",
+    "std",
+    "logging",
+    "tls12",
+] }
 # gpui 的默认 HttpClient 是 NullHttpClient（请求直接失败），网络封面图必须换成真客户端。
 # 与 kit 的 pin 保持同一个 =0.3.9 快照，避免多一份 gpui。
 reqwest_client = { package = "gpui-pre-reqwest-client", version = "=0.3.9" }

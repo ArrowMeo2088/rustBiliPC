@@ -75,17 +75,18 @@ pub fn update_config(
 
 /// 显式安装 rustls 的进程级默认 crypto provider。
 ///
-/// 必须做，否则**任何 HTTPS 请求都会在 TLS 握手处 panic**：这张依赖图里
-/// `rustls 0.23` 同时启用了 `aws-lc-rs`（reqwest 的默认 provider）与 `ring`
-/// （首轮 CI 的 Cargo.lock 里两者都在），rustls 无法自行二选一，会抛
-/// "Could not automatically determine a process-level default crypto provider"。
+/// 必须做，否则**任何 HTTPS 请求都会在 TLS 握手处 panic**：rustls 0.23 的依赖图里
+/// `aws-lc-rs` 与 `ring` 可能同时被启用（reqwest/bpi-rs 与我们各自带到），rustls 无法自行二选一，
+/// 会抛 "Could not automatically determine a process-level default crypto provider"。
 /// panic 发生在 tokio 任务里，表现为 `JoinHandle` 返回 Err，界面就停在加载态。
 ///
-/// 选 `aws-lc-rs`：它已经在依赖图里编译好了（CI 为此装了 NASM），换 `ring` 不会更省事。
+/// **选 `ring`（P14 改）**：`ring` 是纯 Rust + 少量 C，而 `aws-lc-sys` 要 NASM/CMake、
+/// 编译慢、代码大。我们直接依赖的 `rustls` 已经 `default-features = false` + 只开 `ring`，
+/// 这里再把它显式装上，两边口径一致。
 /// `install_default` 只允许装一次，重复调用返回 Err，这里降级成一条 warn。
 pub fn install_tls_provider() {
-    match rustls::crypto::aws_lc_rs::default_provider().install_default() {
-        Ok(()) => log::debug!("已安装 rustls 默认 provider: aws-lc-rs"),
+    match rustls::crypto::ring::default_provider().install_default() {
+        Ok(()) => log::debug!("已安装 rustls 默认 provider: ring"),
         // 注意：这个版本的 `install_default()` 的 Err 里装的是"已经被装上那个 provider"，
         // 它不实现 Display，所以只能记事件、不能格式化内容（CI 实测踩过）。
         Err(_) => log::warn!("rustls 默认 provider 已被安装，沿用现有配置"),
