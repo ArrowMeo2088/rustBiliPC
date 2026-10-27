@@ -243,15 +243,88 @@ jobs:
           echo "publish=false tag=v0.1.0" >> "$GITHUB_STEP_SUMMARY"
           echo "r-plan 交出去：$matrix"
 
-      # 直接看 `$GITHUB_OUTPUT` 这个文件里到底是什么：如果 `matrix=` 那行在文件里但作业输出没被记上，
-      # 丢的环节就在"GitHub 解析输出文件"这一侧；如果文件里就没有那行（或值被截断），丢在写入侧。
-      - name: 看 GITHUB_OUTPUT 的原文
+  # 两种写法各写一遍，再用**两条腿分别消费**：哪条腿出现，就说明哪种写法真把输出交出去了。
+  # 差别只可能在 `echo "名=值" >>` 与 `名<<分隔符 … 分隔符` 这两种写法本身。
+  u-plan:
+    if: ${{ inputs.targets == 'probe' }}
+    runs-on: ubuntu-latest
+    outputs:
+      eq: ${{ steps.w.outputs.eq }}
+      heredoc: ${{ steps.w.outputs.heredoc }}
+      win: ${{ steps.w.outputs.win }}
+    steps:
+      - id: w
         shell: bash
         run: |
-          echo "路径：$GITHUB_OUTPUT"
-          echo "----- 原文 -----"
-          cat -A "$GITHUB_OUTPUT"
-          echo "----- 行数：$(wc -l < "$GITHUB_OUTPUT")"
+          set -e
+          v='[{"name":"win-x64","os":"ubuntu-latest","target":"x86_64-pc-windows-msvc","exe":"rustbilipc.exe","asset":"rustbilipc-win-x64.exe","windows":true,"nasm":true}]'
+          echo "eq=$v" >> "$GITHUB_OUTPUT"
+          echo "heredoc<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$v" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          w='[{"name":"win-x64","os":"windows-latest","target":"x86_64-pc-windows-msvc","exe":"rustbilipc.exe","asset":"rustbilipc-win-x64.exe","windows":true,"nasm":true}]'
+          echo "win=$w" >> "$GITHUB_OUTPUT"
+
+  # 两条 windows-latest 的腿：**内容、os、矩阵写法全都一样**，只差"有没有那个 actions/cache 步骤"。
+  # 当时三次红的 build 作业里唯一比探针多出来的东西就是这个缓存步骤（`hashFiles('Cargo.lock')`）。
+  u-win-plain:
+    if: ${{ inputs.targets == 'probe' }}
+    needs: u-plan
+    name: u-win-plain-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.u-plan.outputs.win) }}
+    steps:
+      - run: echo "没有缓存步骤的 windows 腿：${{ toJSON(matrix) }}"
+
+  u-win-cache:
+    if: ${{ inputs.targets == 'probe' }}
+    needs: u-plan
+    name: u-win-cache-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.u-plan.outputs.win) }}
+    steps:
+      - name: Cache cargo home and target
+        uses: actions/cache@v4
+        with:
+          save-always: true
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ matrix.name }}-${{ hashFiles('Cargo.lock') }}
+      - run: echo "带缓存步骤的 windows 腿：${{ toJSON(matrix) }}"
+
+  u-build-eq:
+    if: ${{ inputs.targets == 'probe' }}
+    needs: u-plan
+    name: u-build-eq-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.u-plan.outputs.eq) }}
+    steps:
+      - run: echo "echo 写法这条腿出现了：${{ toJSON(matrix) }}"
+
+  u-build-heredoc:
+    if: ${{ inputs.targets == 'probe' }}
+    needs: u-plan
+    name: u-build-heredoc-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.u-plan.outputs.heredoc) }}
+    steps:
+      - run: echo "多行写法这条腿出现了：${{ toJSON(matrix) }}"
+
+  p-static:
 
   r-build:
     if: ${{ inputs.targets == 'probe' }}
