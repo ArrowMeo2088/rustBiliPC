@@ -61,7 +61,9 @@ rustBiliPC/
   两道闸（第五十二轮加的）：`paths-ignore` 让**全是文档/只动 `cd.yml` 的提交不触发编译**
   （`ci.yml` 自己除外），`concurrency` + `cancel-in-progress` 让同分支同事件只留最新一次。
 - **`cd.yml`**：Actions → CD → **Run workflow**（手动）。输入：`publish`（**默认关：只编译取产物、
-  不建 Release**）、`tag`、`prerelease`、`replace_tag`、`upx`。四个目标 win-x64 / win-arm64 /
+  不建 Release**）、`tag`、`prerelease`、`replace_tag`、`upx`、`diagnostic`
+  （开了给**每个目标另出一份诊断版** `rustbilipc-<rid>-diagnostic[.exe]`：控制台子系统 +
+  默认写 `debug.log` + 不压缩，专查"双击没反应、连窗口都没出来"）。四个目标 win-x64 / win-arm64 /
   linux-x64 / linux-arm64 是**一条 `build` 作业 + 静态 `include` 四腿矩阵**，四条**同时开跑**
   （`fail-fast: false`，一个红不带走其余三个），用 `release-dist`（LTO + `codegen-units=1` + strip）编，
   再 UPX 压（版本钉死；压不动的目标出未压缩那份）。Linux 钉 `ubuntu-22.04` 卡 glibc 下限。
