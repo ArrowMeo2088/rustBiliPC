@@ -83,7 +83,13 @@ jobs:
             echo "目标 \"$TARGETS\" 在 .github/cd-matrix.json 里不存在"
             exit 1
           fi
-          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          # 交给 matrix 的那份必须是**整个 matrix 对象**（`{"include":[...]}`），
+          # 不能只给数组再挂到 `include:` 上 —— 第五十二轮实测：那样 `build` 作业直接消失，
+          # 整个 run 红、日志里一句错都没有（比红更难查的是"没跑"）。
+          echo "matrix={\"include\":$matrix}" >> "$GITHUB_OUTPUT"
+          # 把交出去的那份打进日志：下一次如果 `build` 还是不出现，证据就在这行里
+          # （是空的？还是带了 GitHub 不接受的值类型？），不用靠猜。
+          echo "交给 build 的 matrix：{\"include\":$matrix}"
           echo "### 这次要编的目标" >> "$GITHUB_STEP_SUMMARY"
           jq -r '.[].name' <<<"$matrix" >> "$GITHUB_STEP_SUMMARY"
           echo "publish=${{ inputs.publish }} tag=${{ inputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
@@ -92,8 +98,7 @@ jobs:
     needs: plan
     strategy:
       fail-fast: false
-      matrix:
-        include: ${{ fromJson(needs.plan.outputs.matrix) }}
+      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
 
     runs-on: ${{ matrix.os }}
     steps:
