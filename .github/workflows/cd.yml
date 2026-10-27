@@ -243,6 +243,16 @@ jobs:
           echo "publish=false tag=v0.1.0" >> "$GITHUB_STEP_SUMMARY"
           echo "r-plan 交出去：$matrix"
 
+      # 同作业内回看：`steps.pick.outputs.matrix` 有没有真被记上。
+      # 空 → 丢在写入/解析那一侧（跟矩阵、跟消费方都无关）；非空 → 丢在跨作业传递那一步。
+      - name: 回看 pick 步骤的输出
+        shell: bash
+        env:
+          SEEN: ${{ steps.pick.outputs.matrix }}
+        run: |
+          echo "SEEN 的长度=${#SEEN}"
+          echo "SEEN=[$SEEN]"
+
   # 两种写法各写一遍，再用**两条腿分别消费**：哪条腿出现，就说明哪种写法真把输出交出去了。
   # 差别只可能在 `echo "名=值" >>` 与 `名<<分隔符 … 分隔符` 这两种写法本身。
   u-plan:
