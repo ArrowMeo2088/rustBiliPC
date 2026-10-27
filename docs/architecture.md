@@ -1174,106 +1174,35 @@ P13 交完之后按"设计缺陷 / 依赖 / 性能 / 占用 / 体积 / 稳定"�
 自动翻页因此加了"240 条就停"的软闸，改成虚拟化是一次真正的重构，不动）；
 `profile` 细分（`opt-level`/`panic` 这些先按现两份配置走，等 `cd.yml` 真跑一次量出数字再说）。
 
-### 4.30 产物图标（`res/icon.ico` + `build.rs`，2026-10-27）
+### 4.30 产物图标（`res/icon.ico` → `rc.exe` → `.res` → 链接，2026-10-27）
 
-- **做法**：`build.rs` 只在 `CARGO_CFG_TARGET_OS == "windows"` 时打一行
-  `cargo:rustc-link-arg-bins=/ICON:<绝对路径>/res/icon.ico`。**不引 `winresource`/`embed-resource`**——
-  那两类要么要 Windows SDK 的 `rc.exe`，要么多一个构建依赖，而 `/ICON:` 是链接器自带的能力，
-  **一个依赖都不加**。图标文件是 7 幅（16/24/32/48/64/128/256，32 bpp，144,167 字节），
-  Explorer、任务栏与快捷方式会按尺寸自己挑。
-- **为什么窗口与任务栏那颗也会变**：gpui 的 Windows 后端在
-  `gpui_windows/src/platform.rs:1633` 的 `load_icon()` 里
-  `LoadImageW(hModule, PCWSTR(1), IMAGE_ICON, LR_DEFAULTSIZE | LR_SHARED)` —— 它要的就是
-  **资源 ID 1** 的图标，而 `/ICON:` 编进去的组图标正是那一个。
-  **这一条是读源码推出来的、还没经他真机确认**：如果真机上 Explorer 里 exe 有图标、
-  窗口/任务栏那颗还是默认的，说明编号不是 1，改法是 `build.rs` 里改成生成 `.rc`
-  显式写 `1 ICON "res/icon.ico"` 再交给 `rc.exe`（那时才值得加依赖）。
-- **落库位置**：`.gitignore` 原来是 `/res/*` + `!res/README.md`，现在**单独放行
-  `!res/icon.ico`**——它是构建输入，CI 上没有它就等于产物没图标；其余资源文件仍然不入库。
-- **Linux 目标**没有等价的"把图标塞进可执行文件"的做法（图标属于 `.desktop`/Icon 主题那一层），
-  所以 `build.rs` 直接跳过；本轮不为 Linux 桌面集成做任何事（他没要，也不在范围里）。
-- `main.rs` 那条 `#![cfg_attr(... windows_subsystem = "windows")]` 现在带
-  `not(feature = "console_diag")`：日常与发布都还是 GUI 子系统（双击不弹黑窗），
-  而 `cargo build --features console_diag` 留着当**手动逃生口**（带控制台 + `debug.log` 默认就写）。
-  `cd.yml` 不再自动编诊断版（2026-10-27 他定稿），要现场时本地/临时 dispatch 一条命令而已。
-
-
-## 5. 阶段进度
-
-
-| 阶段 | 内容 | 状态 |
-| --- | --- | --- |
-| P0 | 依赖骨架、release CI、空窗口 + 中文输入框 + 假数据列表、`api/store/player` 纯逻辑层 | **完成**（run 39787252294 全绿） |
-| P1 | 搜索接线：`search().video()`、结果转换（剥 `<em>`）、封面网络图（gpui 原生 URI 加载）、分页/排序 | **完成**（第十六轮找到封面真因——协议相对地址被当成内置资源，第 4.5 节——修好后真机确认列表/分页/封面都正常） |
-| P2a | 登录：扫码（取码/轮询/过期重载）+ 凭据落盘 + 启动判定 + 登录后进主界面 | **完成**（第十一轮产物真机扫码登录通过，凭据已写出） |
-| P2b | 个人：我的信息 / 收藏 / 历史 入口与页面 | **完成**（第十五轮产物真机通过；外壳 + 懒加载 + 三路并发，第 4.11 节） |
-| P3 | 详情：`video().view()`、多 P、tags/related、字幕列表 | **完成**（第十七轮产物真机通过；机制见第 4.12 节。发布时间/分区按用户决定**不做**——live 的 `VideoView` 没有这两个字段） |
-| P4a | 起播：playurl 取地址 + 选流 + 拉起外置 mpv（不遥控） | **完成**（第十八轮真机失败：mpv 窗口没出现，根因是 `--opt value` 写法 + mpv 该从运行目录取；第十九轮修好，43 passed、零 warning，真机确认能起播出声） |
-| P4b | 曾按"遥控"理解做过一版（连管道、订阅属性、进度行、暂停/±10 秒）——第二十三轮 57 passed 全绿，但**方向错了**：播放期 UI 归 mpv。已按范围删净，机制留在第 4.14 节 |
-| P5 | 视觉：照 `ref/Bili.Copilot` 的度量重做（色板/字号层级/卡片 232×238/网格/页头 56 + 侧栏 240/右栏 360/hover 换底色） | **完成**（他真机看过说"没什么问题"，唯一剩下的是右上角搜索框——根因是 kit 一直用亮色主题，第二十六轮已修，第 4.15 节最后两条） |
-| P6a | 主页：首页推荐流当默认页 + "换一批"（第 4.16 节） | **编译与测试已绿**（第二十七轮 43 passed、零 Rust warning，产物 `dd2bf73`）；待真机看：能不能"换一批"、`goto` 过滤后有没有内容 |
-| P6b | 评论区（顶层列表 + 翻页 + 最热/最新） | **编译与测试已绿**（第二十九轮 48 passed、零 Rust warning，产物 `edd553e`）；待真机看：评论有没有内容、翻页与排序（第 4.17 节） |
-| P6c | 曾计划做"字幕 `sub-add` + 同实例换清晰度保住进度" | **用户 2026-10-25 判定不做**（"我认为P6c两个都没必要做"）：换清晰度现在就重开一个实例、字幕只列清单。第 4.14 节那套管道机制仍然留档，将来要捡起来照那份做 |
-| P7 | 用户空间：点详情页 UP 主 → 资料卡 + 投稿（带分区筛选）/ 图文 / 收藏（第 4.18 节） | **编译与测试已绿**（第三十二轮 54 passed、零 Rust warning，产物 `40f556d`，md5 `86297ed0…`）；待真机看：第 4.18 节那 6 条 |
-| P8 | 外壳重构（2026-10-26 用户定稿）：登录改独立小窗 + 侧栏 80 宽七入口（收藏/历史/待看/下载/设置）+ 左上角账号头像 + 落盘改 `auth.json`/`config.json` + 待看接口（第 4.19、4.20、4.21 节） | **编译与测试已绿**（第三十五轮 60 passed、零 Rust warning，产物 `0d659a8`，md5 `b2687551…`）；待真机看：第 4.19–4.21 节 + 该轮记录里那 5 条 |
-| P9 | 收藏夹下钻 + 三种搜索（第 4.22 节）：收藏列表可展开成内容页、卡片进详情页；内容页服务端关键词搜索 + 加载更多；历史本地过滤 + 游标"再加载 30 条"；待看本地过滤 | **编译与测试已绿**（第三十八轮 62 passed、零 Rust warning，产物 `22c2f87`，md5 `b7aeeaa1…`）；待真机看：第 4.22 节那三条搜索口径 + 该轮记录 |
-| P10 | 触摸屏优化（单指上下滚动 = 按住拖动平移内容，11 个滚动容器全接）+ 侧栏入口点击直接换页（先清下钻栈）（第 4.23 节） | **完成**（第三十九轮 65 passed、零 Rust warning，产物 `014b71c`，md5 `4c813442…`；他真机确认拖动滚动"这个好了"，侧栏换页同轮通过） |
-
-| P11 | 详情页与评论区文字**可选中可复制**（第 4.25 节）+ **下载**（第 4.24 节：双文件 `.m4v`+`.m4a`、每次弹框选目录、只下当前 P、进度与取消、备用域名、打开所在目录/用 mpv 打开）+ 顺手修掉 roadmap R0 的两条（清晰度按钮按封顶过滤、`src/README.md` 里那条已经不存在的 `--input-ipc-server` 说法） | **编译与测试已绿**（第四十二轮 75 passed、零 Rust warning，产物 `4338445`，md5 `dd020f45…`；第四十轮红一次、第四十一轮绿但剩两条 warning，见第 8 节）；待真机看：选字与拖动滚动的分界（风险第 24 条）、弹框能不能正常选到目录、403/时效表现（风险第 25 条） |
-
-| P12 | 空间页第四格**合集与系列** + 点进去的**内容页**（分页）+ 详情页右栏**分集**那一节（分段 chips、跨段连续行号、`N P` 角标、"本集的分 P"）（第 4.26 节） | **编译与测试已绿**（第四十三轮一次过：82 passed、零 Rust warning、Cargo.lock 零差异，产物 `858d275`，md5 `a591abdf…`）；待真机看：他那两个合集（含 189 集那个）能不能列全、分段切换、点一集进去还能不能正常播/下 |
-| P13 | 设置页**四项真能改**（MPV 位置 / 默认画质 / 默认编码 / 调试模式，第 4.27 节）+ 三件补齐（起播前探地址换 `backupUrl`、`-101` 自动开重登小窗、滚到底自动翻页，第 4.28 节）+ 落盘搬到 `%APPDATA%/ArrowMeo/rustBiliPC`（旧位置代码清零）+ CI/CD 拆成 `ci.yml`/`cd.yml`（多平台 + LTO/strip + UPX + Release，资产只有 exe） | **编译与测试已绿**（第四十四轮红 5 条、第四十五轮红 1 条，第四十六轮 `85ef8ff` 绿：**102 passed、零 Rust warning、Cargo.lock 零差异**；第四十七轮 `12ce966` 补上本轮 exe 的 artifact 并交付，产物 md5 `efb03a94…`，见第 8 节三段）；待真机看：设置页四项改完是不是真的生效（尤其编码偏好与 4K 档）、`-101` 那一路会不会自己弹出小窗、滚到底翻页顺不顺、`%APPDATA%` 里三个文件长得对不对 |
-| P14 | 全面审之后的优化（第 4.29 节）：八条修正（**panic 钩子 + `crash.log` 永远写**、设置页不再每帧扫磁盘、重登不再先删凭据、探测并行 + 收预算、**下载进度不再倒退**、日志不写完整直链、自动翻页加 240 条软闸、去掉没人用的 `tokio/macros`）+ 三件要动体积与依赖的（图标只嵌 110 个 / `rustls` 换 `ring` / 下载同时限 3 条与退出收尾） | **第五十一轮已绿**（`fcf9329`，107 passed / 0 warning / Cargo.lock 零差异，产物 **36,053,504** 字节、比第四十七轮**小 927,232**，已覆盖 `publish/rustbilipc.exe`，md5 `3197f5c9…`）。三条兑现度不同：① 图标兑现（实测数字见第 4.29 节）；② provider **只兑现一半**——`aws-lc-sys` 去不掉，要它的是 `quinn-proto`（随 reqwest 进来），运行时确实走 ring；③ 下载排队待他真机点五条验。**第五十二轮**改两条流水线：`cd.yml` 定成一条 `build` 作业 + 静态 `include` 四腿矩阵（照 `ref/ocfree/workflows/cd.yml`，`publish` 默认关，先量 `release-dist`+UPX 的真实体积、别先公开）；`ci.yml` 加 `paths-ignore` + `concurrency`（那一轮为同一个结论编了三次），并新增 `.github/scripts/check_workflows.py`。真因与全程在第 8 节第五十二轮 |
-
-## 6. 已知风险与待验证
-
-| # | 风险 | 处置 |
-| --- | --- | --- |
-| 1 | release 需要 `fxc.exe`（gpui `build.rs` 找不到就 panic） | **已解除**：CI 探测到 Windows SDK 的 fxc 并设 `GPUI_FXC_PATH`，该步通过 |
-| 2 | `rustls 0.23` 默认 provider 拉 `aws-lc-sys`，MSVC 需 CMake + NASM | **已解除**：CI 的 `choco install nasm` 成功，aws-lc 编译通过 |
-| 3 | 构建内有两份 reqwest（kit 的 `gpui-pre-reqwest 0.12.15` + bpi-rs 的 `0.13.5`） | 只影响编译时长，不动 |
-| 4 | gpui-pre 快照每周变动、API 破坏性 | lock 入库作种子 + `=0.3.9` 精确 pin；升级要连带检查 kit 的 pin |
-| 5 | gpui Windows 侧 `WindowDecorations::Client` 是空实现、不支持原生锚定弹窗、无托盘 API | 依赖 kit 组件自绘弹层；托盘如需，自调 `Shell_NotifyIconW` |
-| 6 | 无 Mica/Acrylic 等价物（Bili.Copilot 的观感依赖它） | 用实色底近似，不追求一致 |
-| 7 | mpv 对 DASH/fmp4 双流 seek 无任何文档 | 这条**没解除**，只是观测方变了：seek 现在是用户在 mpv 窗口里拖的，我们看不见。真机若反馈"拖进度后黑屏/音画错位/没声音"，先怀疑这条。**"下载合并再本地播"这个备选与'在线流式、不落盘'的定稿冲突**，真要走到那一步必须先问用户 |
-| 8 | 1080P 需登录、HDR/4K/8K 需大会员 | 按 `accept_quality` 降级 + `requires_vip` 提示 |
-| 9 | rustls 同时启用 aws-lc-rs 与 ring → 未装默认 provider 时 TLS 握手 panic（症状：加载态永不结束） | 启动时 `app::install_tls_provider()`；所有 `JoinHandle` 错误都上界面（第 4.7 节） |
-| 10 | **`cx.spawn` 的 `Task` 被丢弃 = 任务立即取消**（症状：请求发出去了、界面永远停在加载态，日志里连闭包第一行都没有） | 已修：所有 spawn 一律 `.detach()` 或存进实体字段，并用 `[lints.rust] unused_must_use = "deny"` 让这类写法编译失败，见第 4.9 节 |
-| 11 | 扫码成功的响应 cookie 里没有 `buvid3`，而 `Account::validate_complete` 要它 → 登录在最后一步失败 | `poll_qr` 在 `code==0` 且缺 buvid3 时调 `misc().buvid()`（`/x/frontend/finger/spi`）补一个，见第 4.10 节 |
-| 12 | 收藏/历史那几个响应结构**没有 `#[serde(default)]`**（`HistoryListData.cursor/tab/list`、`FavListDetailData.info/has_more/ttl` 等），B 站少给任何一个字段就变成 `BpiError::parse` | 症状可控：那一块显示自己的错误位而不是整页空白（第 4.11 节），日志里有原始错误文本可判断缺哪个字段 |
-| 13 | 播放直链有**时效**（URL 里的 `deadline`），放久了或跨网络就 403；`backupUrl` 也只在同一次响应里有效 | P4a 每次都现取现用（不缓存 `StreamChoice` 去起播）；真机若出现"窗口开了但黑屏"，先对照 `debug.log` 里 playurl 与 launch 的时间差。P6 再加失败换备用域名 |
-| 14 | 目标机 i5-6200U 是 Skylake：**没有 AV1 硬解**，HEVC 只到 8bit；`--hwdec=auto` 选不到就退软解，1080P AV1 大概率丢帧 | 选流已把 HEVC 排在 AV1 之前（第 4.2 节），`player_note` 会打出实际 `codecs`；真机先看那串是 `hev1/hvc1` 还是 `avc1/av01`，再谈要不要在封顶档内偏好某一编码。第十九轮真机报的是 `hev1.1.6.L150.90` ✅ |
-| 15 | 视觉重做只经过编译与代码核对，**没人眼看过**：度量抄的是 xaml，gpui 的排版引擎是 taffy，字体度量/行高/滚动条与 WinUI 不可能一模一样 | 必须真机看过再谈"完成"；第一版允许局部丑，但色板与字号层级不许在页面里各写一套（一律走 `ui/palette.rs`） |
-| 16 | gpui 没有 Acrylic/Mica、没有 ItemContainer 选中视觉、没有图标字库 | 用纯色 + 1px 描边 + 圆角 + 字号差 + 三档灰表达层级；图标暂时用文字（参考项目自己也用"弹"字），需要成套图标时再自绘 SVG 走 asset |
-| 17 | **主页载荷是严格结构**：`RcmdItem` 除四个 `Option` 外没有 `#[serde(default)]`，外层 `preload_expose_pct` 等也必填，B 站少给任一字段就整批 `BpiError::parse` | 症状可控：主页那一块显示原因文本、其余页不受影响（第 4.16 节）。真机若出现"主页永远失败"，先失败在哪个字段——日志里有原始错误文本，据此在 `api/home.rs` 里改成自己解析 `Value`（bpi-rs 那条 `popular_list` 用 Value 就是同一原因的产物） |
-| 18 | `fresh_idx`/`fetch_row` 的递增口径**没有官方文档**（bpi-rs 只把两者原样发出去） | 真机验证"换一批"是否真换出不同内容；不换就改成只递增 `fresh_idx`、`fetch_row` 恒为 1，再不行就换 `video_ranking().popular_list()` 那条热门接口 |
-| 19 | 评论区类型代码如果写错（**11 是相簿、1 才是视频**），症状是"评论永远是空的"而不报错；另外 `Comment`/`Member` 全是必填字段，少给任一就 `BpiError::parse` | 类型代码钉成常量 + 单测 `video_comment_target_type_is_one`（值来自 bpi-rs 的 `CommentType::Video = 1` 与它的 live 测试，见 api-notes 第 11 节）；解析失败只砸在评论区那一块，原因写在提示位，详情页其余部分照常 |
-| 20 | **空间页三块各自可能被严格结构砸到**：`UserUploadedVideos`/`SpaceItem`（图文）这些模型同样没有全套 `#[serde(default)]`，B 站少给任一字段就 `BpiError::parse`；`list.tlist` 更是 `serde_json::Value`，形状完全由接口决定 | 三块各有独立提示位与独立序号（第 4.18 节），坏哪块只显示哪块，`debug.log` 里有原始错误文本；chips 解析失败只少一格（[`parse_tlist`](../src/api/space.rs) 有畸形输入单测）。真机若"投稿空但日志是 parse 失败"，就照第 4.16 节主页那条同法改成自己读 `Value` |
-| 21 | **待看这一路是全有或全无**：`ToViewVideoItem` 与嵌套的 `ToViewRights/Owner/Stat/Dimension` 一个 `#[serde(default)]` 都没有（`ref/bpi-rs/src/historytoview/toview.rs:16-144`），B 站少给任一字段就整次 `BpiError::Decode`；这条接口还没有分页（零参数），所以失败时不是少几条而是整块没有 | 错误只写进待看那一页的提示位，别处照常（第 4.20 节）；日志里有原始文本。真机若稳定复现，照主页那条同法改成自己读 `Value` |
-| 22 | **换窗口的顺序**：登录成功后如果先关登录窗再开主窗，Windows 的默认 `QuitMode` 会在最后一个窗口关闭时直接退进程（`gpui/src/app.rs:458` + `:3180-3188`），症状是扫完码程序闪退 | 顺序钉死在 `open_main_and_close_login`（先开主窗、开成功才关登录窗），且整段跑在 `Context::spawn` 的任务里而不是事件回调里（`app.rs:1520` 会强制画一帧）；改窗口代码前先读第 4.19 节 |
-| 23 | **收藏夹内容这一层是严格结构 + 页码分页**：`FavListDetailData.info/has_more/ttl` 与 `FavListMedia` 十几个字段都没有 `#[serde(default)]`（整个 fav 模块只有 `medias` 有，`ref/bpi-rs/src/fav/list.rs:89`），B 站少给任一字段就整次解析失败 | 失败只显示在收藏夹内容那一页的提示位，收藏列表与别处照常；日志有原文。真机若稳定复现，照第 4.16 节主页那条同法改成自己读 `Value` |
-| 24 | **选中与拖动的分界没在真机上验过**：`TextSelection::is_selectable_at` 读的是"当前作用域"里登记的 `text_bounds`（`base/src/text_selection.rs:2484`），而 `push/pop_text_selection_scope` 只在部分回调路径里包住作用域。如果我们那个按下回调跑在没有作用域的时刻，它会**恒返回 false**，症状是"在文字上拖动时既选字又滚页" | 判据集中在 `ui/scroll.rs::on_press` 一处，真机觉得不划算就改这一处（可以换成"只在详情页让位"或"移动超过 N px 才决定归谁"），**别关掉选择功能**。已定稿的口径：文字区域优先给选字，要滚就在卡片与空白处拖 |
-| 25 | **下载写盘是长事务**：一次任务里 B 站给的 `size` 可能与实际不符（进度退一步）、`rename` 可能被占用文件的程序或杀毒软件挡下、主线程退出时还在写的任务会被硬杀留下 `.part` | 每种失败都原话进那一行的 `note`（不静默）；`.part` 不是成品名，看得见就能删；重试的口径是"再点一次下载"，重取一次地址（直链本身有时效，见 `bpi-rs` 那条 `120 分钟有效` 的注释），这一版**不做续传** |
-| 26 | **没有队列上限**：点五个稿件就是五个任务同时在跑（每个任务内部两条轨是顺序写的），带宽与文件句柄都归 tokio 的多线程 runtime | 真机觉得太满就加"同时在跑不超过 N"的排队；现在先把取消做确实 |
-| 27 | **合集/系列那三条接口的结构是严格的**：`Archive` 一个 `#[serde(default)]` 都没有（`collection/info.rs:25-55`），`SeasonsMeta`/`SeriesMeta` 同理，B 站少给任一字段就整次解析失败（与待看第 21 条、收藏夹内容第 23 条同一类） | 错误只写进本页提示位（空间页那一格 / 内容页那一页），别处照常；日志有原文。真机若稳定复现，照第 4.16 节主页那条同法改成自己读 `Value` |
-| 28 | **分集那一路是我们自己发的第二个 `view` 请求**（第 4.26 节）：它比库里那次多一倍请求量，而且 B 站若把 `ugc_season` 改名/挪走，我们只会"少一节面板"，不会报错 | 宽容解析 + 失败只写进 `notes` 那一行（"分集信息没取到：…"），主体照常；日志里 `分集：标题（N 集，本次列出 M 集）` 一行能判断是"没给"还是"没解析出来"。真要合并成一次请求，就得整块换成自己读 `view`——那是架构决定，得他点头 |
-| 29 | **起播前的地址探测是我们替 mpv 做的一次判断**（第 4.28 节）：`Range: bytes=0-0` 在个别 CDN/代理上可能被拒（416/403），那样会"明明能播却写成换了备用域名"；探测也带来每次起播 2 个小请求与最长 6 秒/条的等待 | ① **200 也算通**，不把"不认 Range"当失败；② 全探不通时**仍然把主地址交给 mpv**（误判不会变成"彻底播不了"）；③ 换址与失败原因都写在提示里（只写主机名，不写带签名令牌的完整 URL），真机若发现"每次都说不通"，看日志里 `CDN 探测完成 视频=N` 那一行就能判断是探测的问题还是 CDN 的问题；④ 探测期间换 P/再点一次播放由 `probe_seq` 作废，不会串台 |
-| 30 | **`-101` 自动重登会删掉 `auth.json`**（第 4.28 节）：如果哪条接口在**没登录也会成功**的场景里回了 `-101`（或库里 `requires_login` 的口径将来变宽），就是"好端端把凭据删了"；另外重登只刷新当前那一格，其余页面此刻仍是失败态 | 删之前先 `log::info!` 写清是哪一路判定的（真机出问题看 `debug.log` 第一行就有）；`Auth::clear()` 失败只 warn、不挡住开窗（拿不到新凭据时旧文件留着反而有用）；同一进程里靠"登录窗句柄还在不在"去重，不会开出一排小窗；其余格子的"重新加载"按钮都还在 |
-| 31 | ~~`cd.yml` 的四个目标里只有 win-x64 是长期编过的~~ **第五十四轮四条腿全绿**（体积见第 8 节），剩下的不确定改成"Linux 与 arm64 产物**有没有真机跑过**"：win-arm64 要 runner 镜像里有 MSVC ARM64 工具，两个 Linux 目标要 gpui 的一串系统库（X11/wayland/fontconfig/ALSA/vulkan），`ubuntu-24.04-arm` 这个 runner 标签是否存在也没验过；UPX 压过的 Rust/GUI exe 还有被杀软误报或压坏的先例风险 | 矩阵是 `fail-fast: false`，一个目标红不影响其余出产物；UPX 那一步**失败就发未压缩那份**（不为了压尺寸把发布卡死）；Linux 依赖那一步只装公共包，没有额外源。**第一次真跑完必须把结论回填本节与 QODER.md 第 2 节**（哪个目标真绿、报什么错），别把"配上了"当"能用了"。**第五十二轮的开关**：`targets` 默认只挑 win-x64、`publish` 默认关，所以现在可以"只量体积不公开"。**第五十三轮已验**：`win-x64` 与 `win-arm64` 都绿（UPX 25.47% / 33.31%，数字在上文第 8 节），两条 Linux 当时只差一个 `libxkbcommon-x11-dev`（已补）；`publish` 开关留下、`targets` 那个输入跟着动态矩阵一起删了（四腿本来就该同时跑） |
-| 32 | **自动连续翻页在 `render` 里判断**（第 4.28 节）：`ScrollHandle::max_offset()` 反映的是**上一帧**布局，所以刚加长列表那一帧读到的是旧行程；另外窗口很高、一屏装得下时 `is_at_bottom` 恒为真 | 四条判据里 `scrollable()` 与 `loading` 就是为这两条准备的（前者挡"零行程也触发"，后者挡"同一游标连发"）；每页的"加载更多/下一页"按钮全部保留，自动那一路没命中还能手点。若真机发现"翻两页就停住"，先看日志里那句"滚到底，自动取第 N 页"有没有出现 |
-| 33 | **图标只嵌我们自己那张表之后，"用了没嵌的名字"从"不会发生"变成"会发生"**（第 4.29 节第 ① 条）：gpui 找不到资源不报错、不 panic，只画一片空白 | `assets_tests` 三条把它变成编译期之外的第一道闸（用到的名字逐个查表 + 每项能 `load` 出像 svg 的内容 + 条目数/字节数当体积闸）；加图标的三步写在 `src/ui/icons/README.md`、`ui::layout::side_item` 注释与 QODER.md 三处。**真出现某处空白时**：先 `grep` 那个 kebab-case 在不在 `src/ui/icons/`，再看 `ICONS` 表有没有那一行 |
-| 34 | **退出收尾只在"我们叫的退出"路径上成立**（第 4.29 节第 ③ 条）：gpui 没有"即将退出"回调，`DownloadQueue::Drop` 兜住点 X 那一路，但置完标志到进程真退可能只剩几毫秒，任务不一定跑到下一个分块 → 磁盘上仍可能留一个 `.part`；被任务管理器杀掉更是完全不走这条路 | 现状：`.part` 一眼能看出不是成品（这是 P11 定"先写 `.part` 再改名"时就买下的保险），删它交给用户即可。要真治：给"退出收尾"加一次极短等待（1~2 秒）或做启动时清理遗留 `.part` —— **两者都会改变退出手感/会误删正在下的东西，等他点头** |
-
-## 7. 维护规则
-
-- 每个目录都有 `README.md`；改了这个目录的东西，就改它的 README，并更新本文相应小节，然后提交 git。
-- **注释是硬要求**（项目规定，覆盖 Agent 默认的"少写注释"取向）：每个模块文件头用 `//!` 写清职责与
-  定稿理由，`pub` 项用 `///`；机制、坑、被否决的方案必须写明，并尽量带上证据（参考仓库的文件行号或
-  CI run 号）。注释解释"为什么"，不复述代码在做什么。
-- 测试只覆盖纯逻辑（`src/tests/`）。UI 与网络的验证方式是：CI 产物在真机上跑起来看。
-- 快速开发阶段不设 clippy/rustfmt 门禁，不追求零 warning；但编译必须无 error。
-
-## 8. CI 实测记录（2026-10-22）
+- **`/ICON:` 是条死路，实测过**：第五十五轮先写的是
+  `cargo:rustc-link-arg-bins=/ICON:…/res/icon.ico`，CI 里得到的是
+  `LINK : warning LNK4044: unrecognized option '/ICON:…'; ignored` —— **MSVC 的 `link.exe` 没有这个选项**，
+  它被丢掉而编译照绿。扫二进制才看出来：那份 exe **连 `.rsrc` 段都没有**
+  （gpui 的 `load_icon()` 于是走 `unwrap_or_default()` 拿空句柄，一直用默认图标）。
+- **现在的做法**：`build.rs` 在 `OUT_DIR` 里生成一句 `1 ICON "<绝对路径>"` 的 `.rc`，
+  用 **Windows SDK 的 `rc.exe`** 编成 `.res`，再 `cargo:rustc-link-arg=<那个 .res>` 交给链接器当输入文件。
+  `rc.exe` 是按 `%WindowsSdkDir%\bin\<版本>\x64\rc.exe` 与
+  `Program Files (x86)\Windows Kits\10\bin\<版本>\x64\rc.exe` 搜的（版本号降序取最新），PATH 上也有就算找到。
+- **为什么不加 `winresource`/`embed-resource`**：`rc.exe` 与 `fxc.exe` 在**同一个 SDK 目录树**里，
+  而 gpui 的 `build.rs` 在 release 下本来就要求 SDK（要编 HLSL 着色器），所以这条路**一个新依赖都不加**；
+  那两个 crate 做的也是同一件"找 rc.exe / windres 编 `.res`"的事，多一个依赖只是把这段搜索搬给别人。
+- **资源 ID 必须是 1**：gpui 在 `gpui_windows/src/platform.rs:1633` 的 `load_icon()` 里
+  `LoadImageW(hModule, PCWSTR(1), IMAGE_ICON, LR_DEFAULTSIZE | LR_SHARED)` —— 它找的就是 ID 1，
+  所以 `.rc` 里那句写死 `1 ICON …`，让 exe 图标与窗口/任务栏那颗是同一份。
+  **窗口那颗是否真跟着变还没经他确认**（这一条是读源码定的编号，`ci.yml` 的校验只看资源在不在）。
+- **找不到 `rc.exe` 时不挡住编译**：只发 `cargo:warning` 并跳过 —— 但为了让这种事**不再静默**，
+  `ci.yml` 有一步 `Verify the exe carries its icon`（跑 `.github/scripts/check_icon.py` 扫 `.rsrc` 顶层，
+  缺 `RT_ICON`/`RT_GROUP_ICON` 就**红**），`cd.yml` 的 Windows 腿也扫一次，但只写进 summary（不为图标卡发布）。
+  这个校验脚本存在的理由就是 LNK4044 那次：**"编译绿"不等于"图标进去了"**。
+- **落库**：`.gitignore` 的 `res/` 只放行两个文件 —— `!res/README.md` 与 **`!res/icon.ico`**
+  （它是构建输入，CI 上没有就等于没图标）。图标是 7 幅 16/24/32/48/64/128/256、32 bpp、144,167 字节。
+- **Linux 目标**没有"把图标塞进可执行文件"的等价做法（图标属于 `.desktop`/图标主题那一层），
+  `build.rs` 对非 Windows 直接返回；本轮不为 Linux 桌面集成做任何事。
+- `main.rs` 那条 `#![cfg_attr(... windows_subsystem = "windows")]` 带着 `not(feature = "console_diag")`：
+  日常与发布仍是 GUI 子系统，`cargo build --features console_diag` 留着当**手动逃生口**
+  （控制台 + `debug.log` 默认写）；`cd.yml` 不再自动编诊断版。
 
 ### 第一轮（run 39785338951）：依赖图全绿，我们自己的代码报错
 
@@ -2250,10 +2179,12 @@ UPX 再买到 8.09 MB。两个口径别混——`publish/` 给他真机用的仍
 | 触发 | 他说"我知道问题了"，直接给三条定稿 |
 | `cd.yml` | **UPX 整条撤掉**（`upx` 输入、两次 Install UPX、Compress 步骤、`UPX_VERSION` 全删）；**`diagnostic` 输入与那三个诊断步骤删掉**；**`publish` 默认改成开**（四个编完就发 GitHub Release），发布说明里那句"UPX 容易被杀软误报"换成"产物是普通链接的 exe" |
 | `Cargo.toml` | `console_diag` 这个 feature **留着**（注释改成"流水线不再自动编它，只当下次遇到起不来的现场时手动 `--features console_diag` 的逃生口"）；`main.rs` 里那条 `#![cfg_attr]` 与 `debug_log` 判定不动，日常/发布行为没变 |
-| 图标 | 新增包根 **`build.rs`**：Windows 目标上 `cargo:rustc-link-arg-bins=/ICON:<绝对路径>/res/icon.ico`。`.gitignore` 给 `res/` 开了**唯一例外** `!res/icon.ico`（它是构建输入） |
+| 图标（第一版） | 先写了 `cargo:rustc-link-arg-bins=/ICON:<绝对路径>/res/icon.ico`，**当天就查出是错的**：见下面那条 |
+| 图标（真因与改法） | CI 给的是 `LINK : warning LNK4044: unrecognized option '/ICON:…'; ignored` —— **`link.exe` 没有 `/ICON:`**。`check_icon.py` 扫第四十六轮那份产物：`.rsrc` 段都不存在。改成 `build.rs` 生成 `1 ICON "…"` 的 `.rc` → **SDK 的 `rc.exe`** 编成 `.res` → `cargo:rustc-link-arg=<.res>`；并加 `ci.yml` 的 `Verify the exe carries its icon`（缺 `RT_ICON`/`RT_GROUP_ICON` 就红）与 `cd.yml` 的 summary 版。**教训：编译绿不等于图标进去了，要扫二进制**。`.gitignore` 给 `res/` 开了唯一例外 `!res/icon.ico`（构建输入） |
 
-**为什么用 `link.exe` 的 `/ICON:` 而不是 `winresource`/`embed-resource`**：前者是链接器自带的能力，
-**一个依赖都不加、不改依赖图**；后者要 `rc.exe`（Windows SDK）或多一个 crate。
+**为什么自己调 `rc.exe` 而不是加 `winresource`/`embed-resource`**：`rc.exe` 与 `fxc.exe` 在同一个
+SDK 目录树里，而 gpui 的 `build.rs` 在 release 下本来就要求 SDK，所以**一个依赖都不加**；
+那两个 crate 也是去找同一个 `rc.exe`/`windres`。
 gpui 那边也核过了：`gpui_windows/src/platform.rs:1633` 的 `load_icon()` 加载的是
 **资源 ID 1** 的 `IMAGE_ICON`，`/ICON:` 编进去的组图标就是那一个，所以**窗口与任务栏那颗应当跟着变**
 ——这一条是读源码推出来的，**等他真机看**：如果 exe 在资源管理器里有图标、窗口那颗还是默认的，

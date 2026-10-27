@@ -1,31 +1,102 @@
-//! 构建脚本：只做一件事——把 `res/icon.ico` 链进 Windows 可执行文件。
+//! 构建脚本：只做一件事——把 `res/icon.ico` 作为 Windows 资源链进可执行文件。
 //!
-//! 为什么用 `link.exe` 的 `/ICON:` 而不是 `winresource`/`embed-resource` 那类构建依赖：
-//! 后者要 `rc.exe`（Windows SDK）或额外 crate，而 `/ICON:` 是链接器自带的选项，
-//! **一个依赖都不加、产物体积只多那 144 KB**。
+//! ## 为什么必须先过 `rc.exe`
 //!
-//! 这颗图标会被 Explorer 与快捷方式直接用上；窗口与任务栏那颗走的是 gpui 的
-//! `load_icon()`（`gpui_windows/src/platform.rs:1633`），它加载的是**资源 ID 1** 的
-//! `IMAGE_ICON`——`/ICON:` 编出来的组图标就是那一个，所以两处一起生效。
-//! 真机上如果发现窗口那颗还是默认图标，说明链接器给的编号不是 1，
-//! 那时才改成写 `.rc` 显式命名 `1 ICON "res/icon.ico"`。
+//! **MSVC 的 `link.exe` 没有 `/ICON:` 这个选项**。第五十五轮先试过直接
+//! `cargo:rustc-link-arg-bins=/ICON:…/res/icon.ico`，CI 里的现场是
+//! `LINK : warning LNK4044: unrecognized option '/ICON:…'; ignored`——
+//! 选项被丢掉、产物里**连 `.rsrc` 段都没有**（用 `.github/scripts/check_icon.py` 扫出来的），
+//! 而编译照样绿。图标是资源，只能先由 SDK 的 `rc.exe` 把 `.rc` 编成 `.res`，再让链接器吃进去。
 //!
-//! 路径必须给绝对路径：链接器的工作目录按 cargo 调用的目录算，跨 target 目录时相对路径会找不到。
+//! ## 为什么自己调 `rc.exe` 而不加 `winresource`/`embed-resource`
+//!
+//! `rc.exe` 与 `fxc.exe` 在同一个 SDK 目录树里，而 **gpui 的 `build.rs` 本来就要求 SDK**
+//! （release 下要编 HLSL），所以这条路**一个新依赖都不加**。那两个 crate 也是去找同一个
+//! `rc.exe`/`windres`，多一个依赖只是把这段搜索代码搬到别人的 crate 里。
+//!
+//! ## 找不到 `rc.exe` 怎么办
+//!
+//! 只发 `cargo:warning` 然后什么都不做——少个图标不该挡住一次编译。
+//! 为了让这事不静默，`ci.yml` 里有一步 `.github/scripts/check_icon.py` 会**明确红**，
+//! `cd.yml` 那份只在 summary 里写一行（不为图标卡住发布）。
+//!
+//! ## 窗口与任务栏那颗
+//!
+//! gpui 在 `gpui_windows/src/platform.rs:1633` 的 `load_icon()` 里
+//! `LoadImageW(hModule, PCWSTR(1), IMAGE_ICON, …)`——**资源 ID 1**。
+//! 所以下面 `.rc` 里那句就写死成 `1 ICON …`，让窗口/任务栏那颗与 exe 图标是同一份。
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
+fn find_rc_exe() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("WindowsSdkDir") {
+        let root = Path::new(&dir).join("bin");
+        if let Some(p) = pick_under(&root) {
+            return Some(p);
+        }
+    }
+    let program_files = std::env::var("ProgramFiles(x86)")
+        .or_else(|_| std::env::var("ProgramFiles"))
+        .unwrap_or_else(|_| r"C:\Program Files (x86)".to_string());
+    Some(pick_under(&Path::new(&program_files).join(r"Windows Kits\10\bin"))?)
+}
+
+/// 在 `Windows Kits\10\bin\<版本>\x64\rc.exe` 这一堆里挑一个（版本号降序，取最新）。
+fn pick_under(root: &Path) -> Option<PathBuf> {
+    let mut found: Vec<PathBuf> = Vec::new();
+    let versions = std::fs::read_dir(root).ok()?;
+    for version in versions.flatten() {
+        for arch in ["x64", ""] {
+            let candidate = version.path().join(arch).join("rc.exe");
+            if candidate.is_file() {
+                found.push(candidate);
+            }
+        }
+    }
+    found.sort();
+    found.reverse();
+    found.into_iter().next()
+}
 
 fn main() {
     println!("cargo:rerun-if-changed=res/icon.ico");
+    println!("cargo:rerun-if-changed=build.rs");
 
     if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("windows") {
         return;
     }
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
-    let icon = Path::new(&manifest_dir).join("res").join("icon.ico");
+    let manifest_dir = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default());
+    let icon = manifest_dir.join("res").join("icon.ico");
     if !icon.is_file() {
-        // 不硬失败：少了图标只是难看，不该挡住一次编译。
         println!("cargo:warning=res/icon.ico 不在，产物将不带自定义图标");
         return;
     }
-    println!("cargo:rustc-link-arg-bins=/ICON:{}", icon.display());
+    let Some(rc) = find_rc_exe() else {
+        println!("cargo:warning=没找到 Windows SDK 的 rc.exe，产物不带自定义图标（gpui 会用默认图标）");
+        return;
+    };
+
+    let out_dir = PathBuf::from(std::env::var("OUT_DIR").unwrap_or_default());
+    let rc_file = out_dir.join("rustbilipc.rc");
+    let res_file = out_dir.join("rustbilipc.res");
+    // `ICON` 那行的资源名写 1：gpui 的 load_icon() 找的就是 ID 1（见文件头）。
+    let text = format!("1 ICON \"{}\"\n", icon.display().to_string().replace('\', "\\\\"));
+    if std::fs::write(&rc_file, &text).is_err() {
+        println!("cargo:warning=写 .rc 失败，产物不带自定义图标");
+        return;
+    }
+    let status = Command::new(&rc)
+        .args(["/nologo", "/fo"])
+        .arg(&res_file)
+        .arg(&rc_file)
+        .status();
+    match status {
+        Ok(status) if status.success() => {
+            // 位置参数交给 link.exe：它就是按输入文件处理 `.res` 的。
+            println!("cargo:rustc-link-arg={}", res_file.display());
+        }
+        Ok(_) => println!("cargo:warning=rc.exe 编译 .rc 失败，产物不带自定义图标"),
+        Err(e) => println!("cargo:warning=调用 rc.exe 失败（{e}），产物不带自定义图标"),
+    }
 }

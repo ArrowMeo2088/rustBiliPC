@@ -120,6 +120,13 @@ jobs:
       # 交付口径是"N passed / 零 warning"，所以这里单独跑一次 check 把 warning 数出来：
       # `cargo build` 命中缓存时**不会重复报**旧的 warning，只有 `--message-format=json` 重新
       # 过一遍前端才数得准。
+      # 第五十五轮的教训：`link.exe` 不认 `/ICON:` 时只丢一句 `LNK4044 … ignored`，
+      # 编译照绿、产物照没图标。**光看编译成不成功查不出这件事**，所以直接扫二进制。
+      # 这一条放在 ci.yml 而不是 cd.yml：日常这条快、红了立刻知道；发布那条只写 summary（不为图标卡发布）。
+      - name: Verify the exe carries its icon
+        shell: bash
+        run: python .github/scripts/check_icon.py target/release/rustbilipc.exe
+
       - name: Test (pure logic only, no window needed)
         shell: bash
         run: cargo test --release

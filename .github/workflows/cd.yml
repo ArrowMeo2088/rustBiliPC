@@ -178,6 +178,18 @@ jobs:
           ls -l dist | tee -a "$GITHUB_STEP_SUMMARY"
           sha256sum "dist/${{ matrix.asset }}" | tee -a "$GITHUB_STEP_SUMMARY"
 
+      # 图标在不在这里只写进 summary，**不挡住发布**（第五十五轮那次是 `/ICON:` 被链接器
+      # 当成无效选项丢掉，编译绿、产物没图标——ci.yml 那一步会红，这里是给人看的第二道证据）。
+      - name: Check the icon made it in (Windows)
+        if: matrix.windows
+        shell: bash
+        run: |
+          if python .github/scripts/check_icon.py "dist/${{ matrix.asset }}" --quiet; then
+            echo "- ${{ matrix.rid }}：产物带图标" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "- ${{ matrix.rid }}：**产物没有图标**（rc.exe 没找到或 .rc 没编出来）" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Upload staged asset
         uses: actions/upload-artifact@v4
         with:

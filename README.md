@@ -68,8 +68,9 @@ rustBiliPC/
   **不做 UPX**（2026-10-27 定稿：压过的 win-arm64 双击起不来，成因没追，直接不付这个代价；
   代价是发布件是 31.76 MB 那一档而不是 8.09 MB）。发之前先查同名标签指向哪次提交，
   不在本次提交上就明确失败（除非勾 `replace_tag`）。**资产只有可执行文件本身**（不带 dll、不带 mpv、不带文档）。
-- **程序图标**：`res/icon.ico`（7 幅 16→256）由根目录 `build.rs` 用链接器自带的
-  `/ICON:` 选项编进 Windows exe——**不为此加构建依赖**。它是 `res/` 目录唯一入库的文件（构建输入）。
+- **程序图标**：`res/icon.ico`（7 幅 16→256）由 `build.rs` 生成 `.rc`、交 **SDK 的 `rc.exe`**
+  编成 `.res` 再链进 Windows exe（资源 ID 1，gpui 的 `load_icon()` 找的就是它）。
+  **`link.exe` 没有 `/ICON:` 选项**，别再用它。`res/` 里唯一入库的就是这个 ico（它是构建输入）。
 - **改 workflow 之前先跑** `python .github/scripts/check_workflows.py`：`yaml.safe_load` 查不出
   重复键、`needs` 悬空、未声明的 `inputs.*`，尤其查不出 **`${{ steps.<id>.* }}` 指到一个没写 `id:`
   的步骤**——那条求值为空串且不报错，能让一个作业在作业列表里**凭空消失**（第五十二轮连红三次的真因，

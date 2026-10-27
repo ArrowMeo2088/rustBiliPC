@@ -53,6 +53,19 @@
     run 结论红而日志与 annotations 零错误。第五十二轮在这上面连红三次、绕了一大圈才定位，
     全过程与判据（看 `Complete job` 有没有 `Set output 'X'`；`cat -A "$GITHUB_OUTPUT"` 必须在
     **写它的那同一步**里，每个步骤各有自己的 `set_output_<uuid>` 文件）记在 `docs/architecture.md` 第 8 节。
+- **程序图标（2026-10-27 定稿，机制在架构文档第 4.30 节）**：`res/icon.ico`（7 幅 16/24/32/48/64/128/256，
+  32 bpp）由包根 `build.rs` 生成一句 `1 ICON "<绝对路径>"` 的 `.rc`，交 **Windows SDK 的 `rc.exe`**
+  编成 `.res`，再 `cargo:rustc-link-arg=<.res>` 链进产物。三条规矩：
+  ① **不要用 `/ICON:`** —— MSVC 的 `link.exe` **没有**这个选项，第五十五轮用了它，只得到
+  `LINK : warning LNK4044 … ignored`，编译照绿而产物**连 `.rsrc` 段都没有**；
+  ② 资源 ID 必须是 **1**（gpui `gpui_windows/src/platform.rs:1633` 的 `load_icon()` 加载的就是 ID 1 的
+  `IMAGE_ICON`，窗口与任务栏那颗靠它）；
+  ③ **不要为此加 `winresource`/`embed-resource`** —— `rc.exe` 与 gpui 本来就要的 `fxc.exe`
+  在同一个 SDK 目录树里，加 crate 只是把同一段搜索搬给别人。
+  另外：`.gitignore` 对 `res/` 只放行 `README.md` 与 **`icon.ico`**（构建输入，CI 缺了就没图标）；
+  `ci.yml` 有一步 `Verify the exe carries its icon`（`.github/scripts/check_icon.py` 扫 `.rsrc`，
+  缺 `RT_ICON`/`RT_GROUP_ICON` 就红）——**"编译绿"不等于"图标进去了"**，这条就是为那次写的。
+
 - **不要改成 debug**：gpui 的 Windows 后端（`gpui-pre-windows 0.3.9`）在 `cfg(debug_assertions)` 下
   于运行时用 `D3DCompileFromFile(env!("CARGO_MANIFEST_DIR")/src/shaders.hlsl)` 编译着色器，
   路径被烧进二进制，CI 产出的 debug exe 在别的机器上无法开窗。`runtime_shaders` 特性只管 macOS。
