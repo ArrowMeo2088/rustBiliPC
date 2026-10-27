@@ -243,6 +243,16 @@ jobs:
           echo "publish=false tag=v0.1.0" >> "$GITHUB_STEP_SUMMARY"
           echo "r-plan 交出去：$matrix"
 
+      # 直接看 `$GITHUB_OUTPUT` 这个文件里到底是什么：如果 `matrix=` 那行在文件里但作业输出没被记上，
+      # 丢的环节就在"GitHub 解析输出文件"这一侧；如果文件里就没有那行（或值被截断），丢在写入侧。
+      - name: 看 GITHUB_OUTPUT 的原文
+        shell: bash
+        run: |
+          echo "路径：$GITHUB_OUTPUT"
+          echo "----- 原文 -----"
+          cat -A "$GITHUB_OUTPUT"
+          echo "----- 行数：$(wc -l < "$GITHUB_OUTPUT")"
+
   r-build:
     if: ${{ inputs.targets == 'probe' }}
     needs: r-plan
