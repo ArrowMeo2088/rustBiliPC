@@ -6,10 +6,10 @@ name: CD
 # 这条管"给人下载的产物"。**只打包 exe**——不塞 dll、不塞 mpv、不塞 README
 # （用户定稿："注意只需要打包 exe，不要打包其他东西"；本项目本来就是单 exe + 外置 mpv.exe）。
 #
-# 四个目标里哪些是**已验证**的写在 `.github/cd-matrix.json` 的顺序里：只有 win-x64 是 ci.yml
-# 天天在跑的，另三条**一次都没真跑过**（runner 标签、系统库齐不齐都没证据）。
-# 所以 `targets` 默认只挑 win-x64、`publish` 默认关掉：**先量体积，别先公开**。
-# 第一次跑完请把结论回填 `docs/architecture.md` 第 2 节与风险清单，别把"配上了"当成"能用了"。
+# 目标表在 `.github/cd-matrix.json`（唯一的清单），`targets` 挑其中一条或全部；
+# `publish` 默认关：**先量真实体积，别先公开**。四个目标里只有 win-x64 是 ci.yml 天天在跑的，
+# 另三条一次都没真跑过（runner 标签、系统库齐不齐都没证据 —— 风险清单第 31 条）。
+# 第一次真跑完请把结论回填 `docs/architecture.md` 第 2 节与风险清单，别把"配上了"当成"能用了"。
 
 on:
   workflow_dispatch:
@@ -56,13 +56,18 @@ env:
   RUSTFLAGS: ""
 
 jobs:
-  # 目标表在 `.github/cd-matrix.json`（唯一的清单），这里只按 `targets` 挑出要跑的那几条。
-  # 为什么要绕这一道：GitHub 的 matrix **不能在作业级按输入跳过某一条腿**，
-  # 而"先只开 win-x64 把流水线跑通"是这次定下来的做法——要么复制四份作业定义，要么这么筛。
+  # 为什么要有这一道：GitHub 的 matrix **不能在作业级按输入跳过某一条腿**，
+  # 而"先只开 win-x64 把流水线跑通"是这次定下来的做法。
+  #
+  # **踩过的坑（第五十二轮，两个 run 各红一次）**：交给 `strategy.matrix.include:`
+  # 或 `matrix: {"include":[...]}` 都让 `build` 作业**凭空消失**——
+  # `plan` 绿、`release` 正确跳过、整个 run 红、日志与注释里一句错都没有。
+  # 有效的写法是**一个数组维**（`matrix.leg` 的每一项是一整个目标对象），
+  # 所以下面所有步骤都写 `matrix.leg.xxx`。
   plan:
     runs-on: ubuntu-latest
     outputs:
-      matrix: ${{ steps.pick.outputs.matrix }}
+      legs: ${{ steps.pick.outputs.legs }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -74,33 +79,30 @@ jobs:
         run: |
           set -e
           if [ "$TARGETS" = "all" ]; then
-            matrix=$(jq -c . .github/cd-matrix.json)
+            legs=$(jq -c . .github/cd-matrix.json)
           else
-            matrix=$(jq -c --arg n "$TARGETS" '[.[] | select(.name == $n)]' .github/cd-matrix.json)
+            legs=$(jq -c --arg n "$TARGETS" '[.[] | select(.name == $n)]' .github/cd-matrix.json)
           fi
           # 挑空了必须当场红：否则后面是一个"成功但什么都没编"的绿勾。
-          if [ "$(jq -c '. | length' <<<"$matrix")" = "0" ]; then
+          if [ "$(jq -r 'length' <<<"$legs")" = "0" ]; then
             echo "目标 \"$TARGETS\" 在 .github/cd-matrix.json 里不存在"
             exit 1
           fi
-          # 交给 matrix 的那份必须是**整个 matrix 对象**（`{"include":[...]}`），
-          # 不能只给数组再挂到 `include:` 上 —— 第五十二轮实测：那样 `build` 作业直接消失，
-          # 整个 run 红、日志里一句错都没有（比红更难查的是"没跑"）。
-          echo "matrix={\"include\":$matrix}" >> "$GITHUB_OUTPUT"
-          # 把交出去的那份打进日志：下一次如果 `build` 还是不出现，证据就在这行里
-          # （是空的？还是带了 GitHub 不接受的值类型？），不用靠猜。
-          echo "交给 build 的 matrix：{\"include\":$matrix}"
+          echo "legs=$legs" >> "$GITHUB_OUTPUT"
+          # 把交出去的那份打进日志：万一 `build` 还是不出现，证据就在这行里，不用靠猜。
+          echo "交给 build 的 leg 数组：$legs"
           echo "### 这次要编的目标" >> "$GITHUB_STEP_SUMMARY"
-          jq -r '.[].name' <<<"$matrix" >> "$GITHUB_STEP_SUMMARY"
-          echo "publish=${{ inputs.publish }} tag=${{ inputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
+          jq -r '.[].name' <<<"$legs" >> "$GITHUB_STEP_SUMMARY"
+          echo "publish=${{ inputs.publish }} upx=${{ inputs.upx }} tag=${{ inputs.tag }}" >> "$GITHUB_STEP_SUMMARY"
 
   build:
     needs: plan
     strategy:
       fail-fast: false
-      matrix: ${{ fromJson(needs.plan.outputs.matrix) }}
-
-    runs-on: ${{ matrix.os }}
+      matrix:
+        leg: ${{ fromJson(needs.plan.outputs.legs) }}
+    name: ${{ matrix.leg.name }}
+    runs-on: ${{ matrix.leg.os }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -108,19 +110,19 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.leg.target }}
 
       # aws-lc-sys 在 MSVC 上要 NASM。第五十一轮查明它**去不掉**：点名要它的是 quinn-proto
       # （HTTP/3，随 reqwest 进来，gpui/bpi-rs 带的，我们改不动特征），所以这一步继续留着；
       # 我们的 rustls 已经只装 ring，运行时不走 aws-lc，但编译还是要它。
       - name: Install NASM (for aws-lc-sys on MSVC)
-        if: matrix.nasm
+        if: matrix.leg.nasm
         run: choco install nasm --no-progress -y
 
       # gpui 的 Linux 后端要 X11/wayland/fontconfig/ALSA/vulkan 这些开发包；
       # Debian/Ubuntu 的包名按 gpui 自己 CI 的那一份列（缺一个就是 link 阶段一大串 undefined）。
       - name: Install Linux system dependencies
-        if: ${{ !matrix.windows }}
+        if: ${{ !matrix.leg.windows }}
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -132,7 +134,7 @@ jobs:
         # `mold` 只当链接器加速用；装不上也不该挡住整条流水线（下一步显式判断）。
 
       - name: Locate fxc.exe (gpui compiles HLSL at build time in release)
-        if: matrix.windows
+        if: matrix.leg.windows
         run: |
           $sdk = "${env:ProgramFiles(x86)}\Windows Kits\10\bin"
           $fxc = Get-ChildItem -Path $sdk -Recurse -Filter fxc.exe -ErrorAction SilentlyContinue |
@@ -157,16 +159,16 @@ jobs:
             C:/Users/runneradmin/.cargo/registry
             C:/Users/runneradmin/.cargo/git
             target
-          key: cargo-${{ matrix.name }}-${{ hashFiles('Cargo.lock') }}
+          key: cargo-${{ matrix.leg.name }}-${{ hashFiles('Cargo.lock') }}
           restore-keys: |
-            cargo-${{ matrix.name }}-
+            cargo-${{ matrix.leg.name }}-
 
       # `release-dist` 是 Cargo.toml 里为这条流水线单独加的配置：
       # LTO + codegen-units=1 + strip（+ 不做 debug 信息），产物才配得上 UPX 与"发出去"。
       # 交叉/多目标都走同一份配置；输出目录是 `target/<triple>/release-dist/`。
-      - name: Build (release-dist, ${{ matrix.target }})
+      - name: Build (release-dist, ${{ matrix.leg.target }})
         shell: bash
-        run: cargo build --profile release-dist --target ${{ matrix.target }}
+        run: cargo build --profile release-dist --target ${{ matrix.leg.target }}
 
       - name: Install UPX
         if: inputs.upx
@@ -184,7 +186,7 @@ jobs:
         if: inputs.upx
         shell: bash
         run: |
-          bin="target/${{ matrix.target }}/release-dist/${{ matrix.exe }}"
+          bin="target/${{ matrix.leg.target }}/release-dist/${{ matrix.leg.exe }}"
           if [ ! -f "$bin" ]; then echo "找不到产物：$bin"; exit 1; fi
           before=$(wc -c < "$bin")
           # 不覆盖原文件：先压到临时名，成功了才换回去（压失败时至少还有一个能用的 exe）。
@@ -204,15 +206,17 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp "target/${{ matrix.target }}/release-dist/${{ matrix.exe }}" "dist/${{ matrix.asset }}"
+          cp "target/${{ matrix.leg.target }}/release-dist/${{ matrix.leg.exe }}" "dist/${{ matrix.leg.asset }}"
           ls -l dist
-          sha256sum "dist/${{ matrix.asset }}"
+          echo "### ${{ matrix.leg.name }} 产物" >> "$GITHUB_STEP_SUMMARY"
+          echo "未压缩与压缩后的字节数看上面 `ls -l` 那一行；SHA256：" >> "$GITHUB_STEP_SUMMARY"
+          sha256sum "dist/${{ matrix.leg.asset }}"
 
       - name: Upload staged asset
         uses: actions/upload-artifact@v4
         with:
-          name: asset-${{ matrix.name }}
-          path: dist/${{ matrix.asset }}
+          name: asset-${{ matrix.leg.name }}
+          path: dist/${{ matrix.leg.asset }}
           if-no-files-found: error
 
   release:
