@@ -81,7 +81,11 @@ fn main() {
     let rc_file = out_dir.join("rustbilipc.rc");
     let res_file = out_dir.join("rustbilipc.res");
     // `ICON` 那行的资源名写 1：gpui 的 load_icon() 找的就是 ID 1（见文件头）。
-    let text = format!("1 ICON \"{}\"\n", icon.display().to_string().replace('\', "\\\\"));
+    // .rc 里的字符串按 C 语法解析，所以路径里的反斜杠要**成对**写。
+    // 两侧都写成 \u{5c}（U+005C 的转义形式），不在源码里放裸反斜杠的字符字面量：
+    // 上一版就是这么写的，rustc 只报了一句 E0762 unterminated character literal，整条 CI 白红一轮。
+    let path_for_rc = icon.display().to_string().replace("\u{5c}", "\u{5c}\u{5c}");
+    let text = format!("1 ICON \"{}\"\n", path_for_rc);
     if std::fs::write(&rc_file, &text).is_err() {
         println!("cargo:warning=写 .rc 失败，产物不带自定义图标");
         return;
@@ -93,8 +97,9 @@ fn main() {
         .status();
     match status {
         Ok(status) if status.success() => {
-            // 位置参数交给 link.exe：它就是按输入文件处理 `.res` 的。
-            println!("cargo:rustc-link-arg={}", res_file.display());
+            // 位置参数交给 link.exe：它就是按输入文件处理 `.res` 的。用 `-bins` 而不是 `-arg`：
+            // 后者会连 rlib 那次编译也带上（虽然不链接，但没必要给别的产物添参数）。
+            println!("cargo:rustc-link-arg-bins={}", res_file.display());
         }
         Ok(_) => println!("cargo:warning=rc.exe 编译 .rc 失败，产物不带自定义图标"),
         Err(e) => println!("cargo:warning=调用 rc.exe 失败（{e}），产物不带自定义图标"),
