@@ -353,6 +353,76 @@ jobs:
           echo "r-build 这条腿出现了：[$LEG]"
           echo "cargo build --profile release-dist --target ${{ matrix.target }}"
 
+  # 二分：`r-plan` 与 `u-plan` 只差两处 —— ① 前面有一个 `actions/checkout`，
+  # ② 写完输出后又往 `$GITHUB_STEP_SUMMARY` 写了两行。各去掉一处，看哪条腿回来。
+  # 值统一用 ubuntu-latest（`u-win-*` 已证明 os 取 windows-latest 没问题）。
+  x-plan-a:
+    if: ${{ inputs.targets == 'probe' }}
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - id: pick
+        shell: bash
+        env:
+          TARGETS: win-x64
+        run: |
+          set -e
+          cat > ./m.json <<JSON
+          [{"name":"win-x64","os":"ubuntu-latest","target":"x86_64-pc-windows-msvc","exe":"rustbilipc.exe","asset":"rustbilipc-win-x64.exe","windows":true,"nasm":true}]
+          JSON
+          matrix=$(jq -c --arg n "$TARGETS" '[.[] | select(.name == $n)]' ./m.json)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "A 组（有 checkout、无 summary 写入）：$matrix"
+
+  x-build-a:
+    if: ${{ inputs.targets == 'probe' }}
+    needs: x-plan-a
+    name: x-build-a-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.x-plan-a.outputs.matrix) }}
+    steps:
+      - run: echo "A 组这条腿出现了：${{ toJSON(matrix) }}"
+
+  x-plan-b:
+    if: ${{ inputs.targets == 'probe' }}
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.pick.outputs.matrix }}
+    steps:
+      - id: pick
+        shell: bash
+        env:
+          TARGETS: win-x64
+        run: |
+          set -e
+          cat > ./m.json <<JSON
+          [{"name":"win-x64","os":"ubuntu-latest","target":"x86_64-pc-windows-msvc","exe":"rustbilipc.exe","asset":"rustbilipc-win-x64.exe","windows":true,"nasm":true}]
+          JSON
+          matrix=$(jq -c --arg n "$TARGETS" '[.[] | select(.name == $n)]' ./m.json)
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "### 这次要编的目标" >> "$GITHUB_STEP_SUMMARY"
+          jq -r '.[].name' <<<"$matrix" >> "$GITHUB_STEP_SUMMARY"
+          echo "publish=false tag=v0.1.0" >> "$GITHUB_STEP_SUMMARY"
+          echo "B 组（无 checkout、有 summary 写入）：$matrix"
+
+  x-build-b:
+    if: ${{ inputs.targets == 'probe' }}
+    needs: x-plan-b
+    name: x-build-b-${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.x-plan-b.outputs.matrix) }}
+    steps:
+      - run: echo "B 组这条腿出现了：${{ toJSON(matrix) }}"
+
   p-static:
     if: ${{ inputs.targets == 'probe' }}
     runs-on: ${{ matrix.os }}
