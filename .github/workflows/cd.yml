@@ -183,6 +183,8 @@ jobs:
       - name: Check the icon made it in (Windows)
         if: matrix.windows
         shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
         run: |
           if python .github/scripts/check_icon.py "dist/${{ matrix.asset }}" --quiet; then
             echo "- ${{ matrix.rid }}：产物带图标" >> "$GITHUB_STEP_SUMMARY"

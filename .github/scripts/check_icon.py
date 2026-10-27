@@ -46,7 +46,18 @@ def top_level_resource_types(path):
     return set()
 
 
+def _force_utf8_stdout():
+    """Windows 控制台默认是码页编码（cp1252/cp936…），打印中文会直接 UnicodeEncodeError。
+    第五十六轮就是这样红了一次：脚本本身算出了结论，死在那句 print 上。"""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
+
 def main():
+    _force_utf8_stdout()
     args = [a for a in sys.argv[1:] if a != "--quiet"]
     quiet = "--quiet" in sys.argv[1:]
     if not args:

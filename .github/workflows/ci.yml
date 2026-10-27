@@ -125,6 +125,8 @@ jobs:
       # 这一条放在 ci.yml 而不是 cd.yml：日常这条快、红了立刻知道；发布那条只写 summary（不为图标卡发布）。
       - name: Verify the exe carries its icon
         shell: bash
+        env:
+          PYTHONIOENCODING: utf-8
         run: python .github/scripts/check_icon.py target/release/rustbilipc.exe
 
       - name: Test (pure logic only, no window needed)
